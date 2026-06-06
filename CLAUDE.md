@@ -17,6 +17,16 @@ There is no package, no tests, no build step — just the script. Run it directl
 ./claude-yolo.py -- --network host                   # extra docker run args
 ```
 
+The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
+(`requires-python = ">=3.10"`, no dependencies), so the script self-runs under
+**uv**, which guarantees a Python ≥3.10 (the `str | None` annotations need it;
+macOS system `python3` is often 3.9). Running it therefore requires `uv` to be
+installed. It's still stdlib-only — uv just selects the interpreter. To run it
+from anywhere, `chmod +x claude-yolo.py` and symlink it onto PATH (e.g.
+`ln -s "$PWD/claude-yolo.py" ~/.local/bin/claude-yolo`); a symlink keeps it
+tracking the repo. uv preserves the `--` separator, so docker-arg passthrough
+still works.
+
 ## How it works
 
 1. **Builds the image** (`build_docker_image`) from an inline

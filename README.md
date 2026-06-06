@@ -18,8 +18,26 @@ standard library. There's no package to install and nothing to build.
   `security` CLI, and the script assumes an SSH agent is running
   (`SSH_AUTH_SOCK`).
 - **Docker** installed and running.
+- **[uv](https://docs.astral.sh/uv/)** installed. The script's shebang is
+  `#!/usr/bin/env -S uv run --script`, so it self-runs under uv, which guarantees
+  a Python ≥3.10 (it's still stdlib-only — uv just picks the interpreter, since
+  macOS's system `python3` is often too old).
 - **Claude Code** already set up on your host (so its credentials are in the
   keychain), or **AWS credentials** if you want to run against Bedrock.
+
+## Install on your PATH
+
+The script is self-contained — make it executable and symlink it somewhere on
+your PATH to run `claude-yolo` from any directory:
+
+```bash
+chmod +x claude-yolo.py
+ln -s "$PWD/claude-yolo.py" ~/.local/bin/claude-yolo   # ~/.local/bin is on PATH if you use uv
+```
+
+A symlink (not a copy) keeps it tracking the repo, so `git pull` updates it. The
+examples below use `./claude-yolo.py`, but once it's on your PATH you can just say
+`claude-yolo`.
 
 ## Usage
 
