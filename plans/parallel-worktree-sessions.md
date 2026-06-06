@@ -17,9 +17,9 @@ cd ~/repo
 ./claude-yolo.py --worktree refactor-db   # terminal 2
 ```
 
-Each session works in `~/repo-fix-auth` / `~/repo-refactor-db`, on branch
-`fix-auth` / `refactor-db`. Commits land in the shared object store immediately;
-the work is later merged locally however the user likes.
+Each session works in `~/repo/.worktrees/fix-auth` / `~/repo/.worktrees/refactor-db`,
+on branch `fix-auth` / `refactor-db`. Commits land in the shared object store
+immediately; the work is later merged locally however the user likes.
 
 ## Decisions (settled with the user)
 
@@ -39,6 +39,16 @@ the work is later merged locally however the user likes.
 - **Mount only the shared `.git`, not the whole main repo.** Surgical: parallel
   sessions can't touch the main checkout. (`git worktree list` will show the main
   worktree as a path with no files — harmless; see Edge cases.)
+- **Worktrees nest under the repo at `<repo>/.worktrees/<name>`** (not as
+  `<repo>-<name>` siblings), to avoid cluttering the repo's parent directory.
+  Because that path is inside the main working tree, the script appends
+  `.worktrees/` to the repo's `.git/info/exclude` (local & untracked — no
+  committed `.gitignore` change) so it doesn't show up as untracked in the main
+  repo. Verified: nesting resolves `git-common-dir` correctly and the mount
+  design is unaffected. (Alternative considered: a centralized location outside
+  the repo such as `~/.claude-yolo/worktrees/<repo>/<name>`, which needs no
+  exclude and has no `git clean` risk but doesn't keep worktrees "with" the repo.
+  Rejected in favor of the nested layout the user asked for.)
 
 ## Why this is simpler than a clone-based approach
 
@@ -54,12 +64,12 @@ A linked worktree is split across **two locations**, joined by **absolute**
 paths. From the live demo:
 
 ```
-~/repo-fix-auth/.git                       <- a FILE, not a dir, containing:
+~/repo/.worktrees/fix-auth/.git            <- a FILE, not a dir, containing:
     gitdir: /Users/peter/repo/.git/worktrees/fix-auth      (ABSOLUTE)
 
 /Users/peter/repo/.git/worktrees/fix-auth/ <- this worktree's private state:
     HEAD, index, logs, ORIG_HEAD, COMMIT_EDITMSG
-    gitdir    -> /Users/peter/repo-fix-auth/.git           (ABSOLUTE back-pointer)
+    gitdir    -> /Users/peter/repo/.worktrees/fix-auth/.git (ABSOLUTE back-pointer)
     commondir -> ../..                                       (RELATIVE -> the shared .git)
 
 /Users/peter/repo/.git/                    <- the SHARED store: objects, refs,
@@ -69,30 +79,35 @@ paths. From the live demo:
 So the data is divided like this:
 
 - **Working-tree files** + the `.git` *pointer file* → live in the **worktree
-  directory** (`~/repo-fix-auth`).
+  directory** (`~/repo/.worktrees/fix-auth`).
 - **Objects, refs, config** (the durable history) **and** this worktree's private
   `HEAD`/`index`/`logs` (under `worktrees/fix-auth/`) → live in the **shared
   `.git`** (`~/repo/.git`).
 
 That means the container needs **two bind mounts**:
 
-1. `-v {worktree}:{worktree}` — e.g. `~/repo-fix-auth` → working files + the
-   `.git` pointer file. (This is just the existing same-path cwd mount, retargeted
-   to the worktree.)
+1. `-v {worktree}:{worktree}` — e.g. `~/repo/.worktrees/fix-auth` → working files
+   + the `.git` pointer file. (This is just the existing same-path cwd mount,
+   retargeted to the worktree.)
 2. `-v {common_git}:{common_git}` — e.g. `~/repo/.git` → objects, refs, **and**
    `worktrees/fix-auth/` (so we get the private HEAD/index for free; no third
    mount needed).
+
+Note the two mount points are now nested (`~/repo/.git` and
+`~/repo/.worktrees/fix-auth` share the `~/repo` prefix); Docker handles
+overlapping/nested bind mounts fine, auto-creating the `~/repo` and
+`~/repo/.worktrees` intermediate dirs inside the container.
 
 **Why both must be mounted at their identical host paths** (this is exactly your
 concern — yes, the worktree has the `.git` location baked into it, and vice
 versa):
 
-- `~/repo-fix-auth/.git` holds the **absolute** path
+- `~/repo/.worktrees/fix-auth/.git` holds the **absolute** path
   `/Users/peter/repo/.git/worktrees/fix-auth`. That only resolves inside the
   container if mount #2 lands at `/Users/peter/repo/.git` — its real host path.
 - The reverse pointer `worktrees/fix-auth/gitdir` holds the **absolute** path
-  `/Users/peter/repo-fix-auth/.git`. That only resolves if mount #1 lands at
-  `/Users/peter/repo-fix-auth` — its real host path.
+  `/Users/peter/repo/.worktrees/fix-auth/.git`. That only resolves if mount #1
+  lands at `/Users/peter/repo/.worktrees/fix-auth` — its real host path.
 - `commondir` is *relative* (`../..`), so it's fine as long as the `.git`
   internal tree is intact (it is — it's all under mount #2).
 
@@ -134,25 +149,30 @@ All of this runs on the **host** before assembling `docker run`:
    main_root  = pathlib.Path(common_git).parent                                # ~/repo
    ```
    Error out clearly if not in a git repo.
-2. **Compute the worktree path** as a sibling of the main repo:
+2. **Compute the worktree path** nested under the main repo:
    ```python
-   worktree = main_root.parent / f"{main_root.name}-{NAME}"   # ~/repo-fix-auth
+   worktree = main_root / ".worktrees" / NAME    # ~/repo/.worktrees/fix-auth
    ```
-3. **Create or reuse the worktree** on the host:
+3. **Keep the nested dir out of the main repo's status** — append `.worktrees/`
+   to `{common_git}/info/exclude` if not already present. This is local and
+   untracked (no committed `.gitignore` change), and is idempotent.
+4. **Create or reuse the worktree** on the host:
    - If `worktree` already exists and is registered → reuse (re-launching the
      same session).
    - Else if branch `NAME` exists → `git worktree add {worktree} {NAME}`.
    - Else → `git worktree add -b {NAME} {worktree}` (new branch off current HEAD,
      no upstream).
-4. **Retarget the container working dir to the worktree** — set the `cwd`
+5. **Retarget the container working dir to the worktree** — set the `cwd`
    variable used for `-w {cwd}` and `-v {cwd}:{cwd}` to `worktree` instead of the
    process cwd.
-5. **Add the shared-`.git` mount**:
+6. **Add the shared-`.git` mount**:
    ```python
    args += ["-v", f"{common_git}:{common_git}"]   # read-write, same path
    ```
-6. **Name things after NAME**: container name suffix `-{NAME}`; pass
-   `--name {NAME}` to Claude (see #3).
+7. **Name things after NAME**: container name suffix `-{NAME}`; pass
+   `--name {NAME}` to Claude (see #3 below). Note the container hostname is
+   already the cwd basename, which becomes `NAME` here — so the status line shows
+   the session name too.
 
 ### 3. Naming the Claude session
 
@@ -168,8 +188,8 @@ existing built-in `--append-system-prompt` (`claude-yolo.py:266`):
 
 Bonus synergy: sessions are bucketed per-cwd, so each worktree already gets its
 own `/resume` list; `--name` just makes the entries human-readable ("fix-auth")
-instead of first-prompt summaries. To reattach later: `cd ~/repo-fix-auth &&
-claude --continue` (or re-run the script with the same `--worktree NAME`, which
+instead of first-prompt summaries. To reattach later: `cd ~/repo/.worktrees/fix-auth
+&& claude --continue` (or re-run the script with the same `--worktree NAME`, which
 reuses the worktree).
 
 ### 4. Composition with existing modes
@@ -208,10 +228,17 @@ Worktrees are designed for concurrent use:
   files, because we didn't mount its working tree. Operations from *our* worktree
   don't need it, so this is cosmetic. If it ever matters, switch to mounting the
   whole main repo (the rejected option-3b).
-- **Re-launch reuses the worktree** (step 3) — must detect an existing/registered
+- **Re-launch reuses the worktree** (step 4) — must detect an existing/registered
   worktree and not error on `git worktree add`.
-- **Cleanup is the user's job** (out of scope): `git worktree remove ~/repo-NAME`
-  and `git branch -d NAME` when done. Consider a future `--rm-worktree` helper.
+- **Nesting under the repo** (`.worktrees/<name>`) has two minor downsides vs
+  siblings: (a) `git clean -fdx` run in the *main* checkout could delete the
+  `.worktrees/` dir along with the worktrees in it — warn the user; (b) tools that
+  recurse the working tree may descend into `.worktrees/` (most respect
+  `.git/info/exclude`, which we set, but not all). If either becomes a problem,
+  the centralized-location alternative (see Decisions) sidesteps both.
+- **Cleanup is the user's job** (out of scope): `git worktree remove
+  ~/repo/.worktrees/NAME` and `git branch -d NAME` when done. Consider a future
+  `--rm-worktree` helper.
 - **`git` dubious-ownership**: with UID matching, the mounted paths are owned by
   the in-container `claude` user, so `safe.directory` likely isn't needed — but
   test, and add it in if it bites.
@@ -222,13 +249,15 @@ Worktrees are designed for concurrent use:
 ## Testing plan
 
 1. In a scratch repo with a couple of commits:
-   `./claude-yolo.py --worktree t1` → confirm `~/repo-t1` exists on host, branch
-   `t1` checked out, container launches there, `git remote -v` / `git status`
-   work, and `git rev-parse --git-common-dir` resolves to the mounted `~/repo/.git`.
+   `./claude-yolo.py --worktree t1` → confirm `~/repo/.worktrees/t1` exists on
+   host, branch `t1` checked out, `.worktrees/` is in `.git/info/exclude` (so the
+   main repo's `git status` is clean), container launches there, `git remote -v` /
+   `git status` work, and `git rev-parse --git-common-dir` resolves to the mounted
+   `~/repo/.git`.
 2. Inside the container, make a commit; **kill the container** (`docker kill`)
    without any push; confirm on the host that the commit exists on branch `t1`
    (durability of committed work) and that uncommitted edits are still in
-   `~/repo-t1` (durability of working tree).
+   `~/repo/.worktrees/t1` (durability of working tree).
 3. Launch a second session `--worktree t2` while `t1` is running; confirm both
    work concurrently and commits from each land on their own branch.
 4. Confirm the Claude session shows the name (prompt box / terminal title) and
