@@ -30,10 +30,15 @@ still works.
 ## How it works
 
 1. **Builds the image** (`build_docker_image`) from an inline
-   `DOCKERFILE_TEMPLATE` written to a temp dir. Ubuntu 24.04 + nodejs/npm +
+   `DOCKERFILE_TEMPLATE` written to a temp dir. Ubuntu 24.04 + nodejs/npm + a few
+   baked-in amenities used across most projects (`ripgrep`, `fd-find` symlinked to
+   `fd`, `build-essential`, and `uv`/`uvx` copied from `ghcr.io/astral-sh/uv`) +
    Claude Code installed via the **native installer**
    (`curl https://claude.ai/install.sh | bash`) at `~/.local/bin/claude`. The
-   image is rebuilt on every run (Docker layer cache makes this cheap).
+   image is rebuilt on every run (Docker layer cache makes this cheap), so baked
+   amenities cost ~nothing per launch and save Claude from re-installing common
+   tools in each ephemeral container. Reserve the image for *cross-cutting* tools;
+   project-specific/heavy ones stay on-demand via `sudo apt` inside the container.
    Do NOT switch to `npm install -g @anthropic-ai/claude-code` — that lands at
    `/usr/local/bin/claude`, which Claude Code's `/doctor` flags as a broken
    install and which self-update can't manage.

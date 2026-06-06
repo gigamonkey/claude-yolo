@@ -21,7 +21,11 @@ DOCKER_IMAGE = "claude-yolo:latest"
 DOCKERFILE_TEMPLATE = """\
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl
+# Baked-in amenities used across most projects, so Claude doesn't re-install them in
+# each ephemeral container. fd-find installs its binary as `fdfind`; symlink it to `fd`.
+RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl ripgrep fd-find build-essential && ln -s /usr/bin/fdfind /usr/local/bin/fd
+# uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 # UID {uid} matches the host user so bind-mounted sockets (e.g. SSH agent) are accessible
 RUN useradd -m -s /bin/bash --uid {uid} claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude

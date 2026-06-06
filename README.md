@@ -92,12 +92,17 @@ When you run the script, it does five things:
 ### 1. Builds the Docker image
 
 It writes an inline Dockerfile to a temp directory and builds it. The image is
-Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, and `jq`, plus Claude Code
-installed via the **native installer** (`curl https://claude.ai/install.sh |
-bash`, landing at `~/.local/bin/claude`).
+Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
+amenities used across most projects — `ripgrep`, `fd` (the `fd-find` package,
+symlinked to `fd`), `build-essential`, and `uv`/`uvx` — plus Claude Code installed
+via the **native installer** (`curl https://claude.ai/install.sh | bash`, landing
+at `~/.local/bin/claude`).
 
 The image is rebuilt on every run, but Docker's layer cache makes that nearly
-instant after the first time.
+instant after the first time — so baked-in tools cost almost nothing per launch
+and spare Claude from re-installing them inside each ephemeral container. Tools
+you only need in one project are better left to on-demand `sudo apt` inside the
+container than added here.
 
 ### 2. Matches your user ID
 
