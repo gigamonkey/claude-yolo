@@ -30,15 +30,25 @@ There is no package, no tests, no build step — just the script. Run it directl
 2. **Substitutes the host UID** into the Dockerfile's `useradd` so the
    in-container `claude` user matches `os.getuid()`. This is what makes
    bind-mounted sockets (SSH agent) accessible inside the container — keep it.
-3. **Extracts credentials** (`extract_credentials`) from the macOS keychain via
+3. **Checks host login** (`ensure_logged_in` / `_is_logged_in`) before launch in
+   the keychain modes (skipped for Bedrock). Runs `claude auth status --json` and
+   reads the `loggedIn` field; if logged out, offers to run `claude auth login`
+   then re-checks. Checks login *status*, not token expiry, on purpose: an expired
+   accessToken is auto-refreshed at runtime via the stored refreshToken, so expiry
+   alone doesn't mean logged out. For an alternate config dir it sets
+   `CLAUDE_CONFIG_DIR` so the check targets the right keychain entry. If host
+   `claude` is missing/too old for `auth`, it returns True and defers to the
+   empty-file check in `extract_credentials`.
+4. **Extracts credentials** (`extract_credentials`) from the macOS keychain via
    the `security` CLI, into a chmod-600 temp file that gets bind-mounted to
    `.credentials.json`. Service name is `Claude Code-credentials` by default,
    or `Claude Code-credentials-{hash8}` for a non-default config dir, where
    `hash8` is the first 8 hex chars of the SHA-256 of the resolved config path.
    This mirrors how Claude Code itself names keychain entries — if that scheme
    changes upstream, this breaks.
-4. **Assembles `docker run` args** and `os.execvp`s into docker (replacing the
-   process, so it's interactive `-it --rm`).
+5. **Assembles `docker run` args** and `os.execvp`s into docker (replacing the
+   process, so it's interactive `-it --rm`). The args also forward the host git
+   identity (`git_identity_args`) and the SSH agent (see gotchas).
 
 ## Three credential modes (mutually exclusive, decided by positional args)
 
@@ -67,6 +77,12 @@ The directory-vs-profile decision hinges on `pathlib.Path(positional[0]).is_dir(
   user-supplied flags win (last-one-wins).
 - **`--append-system-prompt` / `-p`** is repeatable and is added *on top of* a
   built-in prompt telling Claude it's in an ephemeral Ubuntu container.
+- **Git identity is forwarded as env vars, not a mounted gitconfig.**
+  `git_identity_args` reads the host's *effective* `user.name`/`user.email` (so a
+  repo-local identity wins) and exports them as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
+  Mounting `~/.gitconfig` instead would drag in macOS-only bits (osxkeychain
+  credential helper, GPG signing) that break commits in the Linux container. Note
+  these env vars override any repo-local identity set *inside* the container.
 - The container name is the cwd basename, suffixed with the config dir or AWS
   profile name when those modes are active.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
