@@ -86,6 +86,8 @@ It assembles the `docker run` arguments:
 - Forwards your SSH agent socket so Claude can use your SSH keys (e.g. for
   `git push`) without copying any private keys into the container.
 - Mounts your `~/.ssh/known_hosts` read-only so SSH host-key verification works.
+- Forwards your git identity (`user.name`/`user.email`) so commits made in the
+  container are attributed to you (see below).
 - Mounts your config/credentials according to the mode (see below).
 - Sets the container hostname to the project directory name, so Claude Code's
   status line shows it.
@@ -128,6 +130,25 @@ the matching UID the container couldn't open the agent socket.)
 
 The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
 key fingerprint, so connections don't fail or hang on an unknown-host prompt.
+
+#### Why forward the git identity?
+
+Being able to *push* is only half of letting Claude do git work — it also needs
+an identity to *commit* under. A fresh container has no git config, so a commit
+would fail with `Author identity unknown`.
+
+So the script reads your effective `git config user.name` / `user.email` on the
+host (repo-local value if you have one, otherwise the global one — the same
+identity a commit from the host would use) and passes them into the container as
+the `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables. Commits made inside
+the container are then attributed to you, with no extra setup.
+
+It forwards just the identity rather than mounting your whole `~/.gitconfig` on
+purpose: a mounted gitconfig would also pull in macOS-only settings — the
+`osxkeychain` credential helper, GPG commit signing — that don't exist in the
+Linux container and would make commits error or hang. One caveat: because these
+are environment variables, they take precedence over any repo-local identity set
+*inside* the container.
 
 ### 5. Launches Claude
 

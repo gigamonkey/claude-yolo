@@ -128,6 +128,35 @@ def ensure_logged_in(config_dir: str | None) -> None:
         sys.exit("Still not logged in after `claude auth login`; aborting.")
 
 
+def git_identity_args() -> list[str]:
+    """Forward the host's git identity into the container as docker `-e` args.
+
+    Reads the *effective* `user.name`/`user.email` for the current directory (so a
+    repo-local identity wins over the global one, matching what a host commit would
+    use) and exports them as GIT_AUTHOR_*/GIT_COMMITTER_*. This covers commits
+    without mounting the whole ~/.gitconfig, which would also drag in macOS-only
+    bits (osxkeychain credential helper, GPG signing) that break inside the
+    container. Returns [] if git or an identity is unavailable.
+    """
+    def cfg(key: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get", key], capture_output=True, text=True
+            )
+        except FileNotFoundError:
+            return ""
+        return result.stdout.strip()
+
+    name = cfg("user.name")
+    email = cfg("user.email")
+    env_args = []
+    if name:
+        env_args += ["-e", f"GIT_AUTHOR_NAME={name}", "-e", f"GIT_COMMITTER_NAME={name}"]
+    if email:
+        env_args += ["-e", f"GIT_AUTHOR_EMAIL={email}", "-e", f"GIT_COMMITTER_EMAIL={email}"]
+    return env_args
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -188,6 +217,8 @@ def main():
         "-e", "SSH_AUTH_SOCK=/run/ssh-agent",
         # Mount host known_hosts so SSH host key verification succeeds
         "-v", f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
+        # Forward the host git identity so commits made in the container are attributed correctly
+        *git_identity_args(),
     ]
 
     credfile = None
