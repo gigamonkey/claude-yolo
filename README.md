@@ -63,10 +63,14 @@ them out with the `security` CLI into a temporary, `chmod 600` file, then
 bind-mounts that file to `.credentials.json` inside the container. (This step is
 skipped in Bedrock mode, which uses AWS credentials instead.)
 
-claude-yolo does **not** log in for you — it only copies credentials that are
-already in the keychain. So you must have logged into Claude Code on the host at
-least once (run `claude`, then `/login`). If you get prompted to `/login`
-*inside* the container, it means the host keychain had no valid credentials.
+Before extracting, the script runs `claude auth status` on the host to confirm
+you're actually logged in. If you're not, it offers to run `claude auth login`
+for you (the browser OAuth flow) and then re-checks before launching — so a
+logged-out host gets caught up front instead of dropping you into a container
+that immediately prompts for `/login`. It checks login status rather than just
+token expiry on purpose: an expired access token is refreshed automatically at
+runtime via the stored refresh token, so expiry alone doesn't mean you're logged
+out. (This check is skipped in Bedrock mode, which authenticates via AWS.)
 
 The keychain entry is named `Claude Code-credentials` for the default config, or
 `Claude Code-credentials-<hash8>` for an alternate config directory, where
@@ -85,6 +89,22 @@ It assembles the `docker run` arguments:
 - Mounts your config/credentials according to the mode (see below).
 - Sets the container hostname to the project directory name, so Claude Code's
   status line shows it.
+
+#### Why mount at the same path?
+
+The working directory isn't mounted at a tidy container-native location like
+`/workspace` — it's bind-mounted at the **exact same absolute path** it has on the
+host (`-v {cwd}:{cwd}`, with `-w {cwd}`). So if you launch from
+`/Users/peter/hacks/claude-yolo`, that's also the path *inside* the container, and
+it's where Claude starts.
+
+This is deliberate: it keeps paths **consistent across the container boundary**.
+File references, `git`, stack traces, clickable `file:line` links, and Claude
+Code's own session transcript all line up whether you read them inside the
+container or back on the host. (It's why you'll see a macOS-looking path like
+`/Users/...` recorded as the `cwd` in a session file even though the container is
+Linux — that genuinely *is* the working directory inside the container.) Mounting
+at `/workspace` instead would make every recorded path mismatch the host layout.
 
 #### Why forward the SSH agent?
 
@@ -145,10 +165,13 @@ repeated flags, your arguments override the script's defaults:
 
 ## Notes and gotchas
 
-- **Log in on the host first.** claude-yolo copies credentials from the macOS
-  keychain; it can't authenticate on its own. Run `claude` and `/login` on the
-  host once before using it. Being prompted to `/login` inside the container
-  means the host keychain had no valid credentials.
+- **Login is checked up front.** claude-yolo copies credentials from the macOS
+  keychain rather than authenticating inside the container. Before launching it
+  runs `claude auth status`; if you're logged out it offers to run
+  `claude auth login` for you and re-checks. Requires a host `claude` recent
+  enough to have the `auth` subcommand — if it's missing, the check is skipped
+  and the script falls back to erroring out when credential extraction comes up
+  empty.
 - **The `/doctor` "sandbox" warning is expected.** We launch Claude with
   `--dangerously-skip-permissions`, which bypasses Claude Code's in-process OS
   sandbox on purpose — the *container* is the sandbox. Installing `bubblewrap`
