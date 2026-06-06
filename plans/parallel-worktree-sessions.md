@@ -219,6 +219,36 @@ which reuses the worktree).
 default keychain creds and with an alternate config dir. Git identity and SSH
 agent are already forwarded, so commits/pushes from the worktree work.
 
+## Session storage & discovery
+
+Claude buckets session transcripts **strictly by cwd** (`~/.claude/projects/<cwd-slug>/<uuid>.jsonl`),
+and there is **no override** — no `--project` flag, no `CLAUDE_PROJECT_DIR`; only
+`CLAUDE_CONFIG_DIR`, which relocates all of `~/.claude`. So a `--worktree NAME`
+session lands in a bucket derived from the *worktree* path, e.g.
+`~/.claude/projects/-Users-peter--claude-yolo-worktrees--Users-peter-hacks-bells-fix-auth/`,
+**not** the main repo's `-Users-peter-hacks-bells` bucket. This is inherent to
+running in any worktree, not specific to the centralized layout.
+
+**Discoverability is preserved by git, not by path.** The worktree is properly
+registered in `<repo>/.git/worktrees/`, and Claude's session discovery is
+git-metadata-aware (`git worktree list`), so from the **main repo**:
+
+- `/resume` → **Ctrl+W** ("show sessions from all worktrees of the current
+  repository") surfaces these sessions regardless of where the worktree dir
+  physically lives.
+- `claude --resume <name>` resolves by name across the repo and its worktrees —
+  so resuming by our `--name NAME` works from the main checkout.
+
+Because discovery keys off git registration rather than directory location, the
+centralized location costs nothing functionally; only the raw bucket folder name
+is an ugly double-slug. (This is also why the earlier nested-vs-centralized
+"discoverability" worry was moot — git handles it either way.)
+
+**Caveat** (upstream bug anthropics/claude-code#24188): if the repo sets
+`git config worktree.useRelativePaths true`, `git worktree list` returns relative
+paths that slug differently and the all-worktrees view fails to match buckets.
+Git's default is `false`; if it bites, set it false.
+
 ## Durability analysis (the whole point)
 
 - **Committed work**: written to objects in the shared `.git`, which is on the
