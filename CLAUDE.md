@@ -79,13 +79,16 @@ dir, so a container exit loses nothing. Must be run from inside a git repo.
 
 - **macOS-only as written.** Credential extraction uses the macOS `security`
   CLI and `SSH_AUTH_SOCK` is assumed present.
-- **The `/doctor` "sandbox" warning is expected — do not try to fix it.** We
-  launch `claude --dangerously-skip-permissions`, which bypasses Claude Code's
-  in-process OS sandbox entirely; the *container* is the sandbox. Installing
-  `bubblewrap` won't help anyway — a default Docker container can't create
-  unprivileged user namespaces (`bwrap: No permissions to create new
-  namespace`), and granting that capability would weaken the very isolation
-  this tool exists to provide.
+- **In-process sandbox is disabled deliberately — the *container* is the
+  sandbox.** We append `--settings '{"sandbox":{"enabled":false}}'` to the claude
+  args so that, when the mounted `~/.claude/settings.json` has
+  `sandbox.enabled: true`, Claude doesn't warn at startup that `bubblewrap`/`socat`
+  are missing and run unsandboxed. `--settings` is a container-only overlay (host
+  settings untouched). Do NOT instead install `bubblewrap` to "fix" it — a default
+  Docker container can't create unprivileged user namespaces (`bwrap: No
+  permissions to create new namespace`), and granting that capability would weaken
+  the very isolation this tool exists to provide. (A `/doctor` sandbox note may
+  still appear; that's expected.)
 - **Argument splitting:** `main` splits `sys.argv` on `--` *before* argparse
   sees it. Everything after `--` is appended to `docker run` last, so
   user-supplied flags win (last-one-wins).

@@ -224,12 +224,15 @@ repeated flags, your arguments override the script's defaults:
   enough to have the `auth` subcommand — if it's missing, the check is skipped
   and the script falls back to erroring out when credential extraction comes up
   empty.
-- **The `/doctor` "sandbox" warning is expected.** We launch Claude with
-  `--dangerously-skip-permissions`, which bypasses Claude Code's in-process OS
-  sandbox on purpose — the *container* is the sandbox. Installing `bubblewrap`
-  won't help: a default Docker container can't create unprivileged user
+- **The in-process sandbox is disabled on purpose** — the *container* is the
+  sandbox. If your `~/.claude/settings.json` has `sandbox.enabled: true`, Claude
+  would otherwise warn at startup that `bubblewrap`/`socat` are missing and run
+  unsandboxed. claude-yolo suppresses that by passing
+  `--settings '{"sandbox":{"enabled":false}}'` to Claude — a container-only
+  override, so your host settings are untouched. Installing `bubblewrap` wouldn't
+  help anyway: a default Docker container can't create unprivileged user
   namespaces, and granting that capability would weaken the very isolation this
-  tool provides.
+  tool provides. (A `/doctor` sandbox note may still appear; that's expected.)
 - **Don't switch to `npm install -g`.** The npm global install lands at
   `/usr/local/bin/claude`, which `/doctor` flags as a broken install and which
   self-update can't manage. The native installer is deliberate.

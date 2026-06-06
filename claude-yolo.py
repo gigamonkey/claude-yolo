@@ -324,7 +324,15 @@ def main():
         *parsed.append_system_prompts,
     ]
 
-    claude_args = ["--append-system-prompt", "... ".join(extra_system_prompt)]
+    claude_args = [
+        # The container is the sandbox, so disable Claude's in-process OS sandbox.
+        # Otherwise it warns at startup that bubblewrap/socat are missing (they're
+        # deliberately not installed — they can't create namespaces in a container
+        # anyway). This overrides sandbox.enabled from the mounted settings.json for
+        # this container only; the host's settings are untouched.
+        "--settings", '{"sandbox":{"enabled":false}}',
+        "--append-system-prompt", "... ".join(extra_system_prompt),
+    ]
     if worktree_name:
         # Name the Claude session so it's identifiable in the prompt box / /resume picker
         claude_args = ["--name", worktree_name, *claude_args]
