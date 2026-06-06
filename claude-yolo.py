@@ -2,6 +2,7 @@
 # https://claude.ai/chat/df7c14a7-6410-4b98-9799-1c9821557b81
 import argparse
 import hashlib
+import json
 import os
 import pathlib
 import subprocess
@@ -78,6 +79,55 @@ def extract_credentials(config_dir: str | None) -> str:
     return tmp.name
 
 
+def _is_logged_in(env: dict) -> bool:
+    """Return True if `claude auth status` reports an active login.
+
+    We check the `loggedIn` field rather than relying on the exit code (its
+    behaviour isn't guaranteed). If the host has no `claude` binary (or one too
+    old for the `auth` subcommand), we return True and defer to the empty-file
+    check in `extract_credentials` rather than blocking here.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except FileNotFoundError:
+        return True
+    try:
+        return json.loads(result.stdout).get("loggedIn") is True
+    except (json.JSONDecodeError, AttributeError):
+        return result.returncode == 0
+
+
+def ensure_logged_in(config_dir: str | None) -> None:
+    """Verify the host is logged in to Claude Code; offer to log in if not.
+
+    Uses `claude auth status` (which reads the same macOS keychain we extract
+    from) rather than inspecting the credentials blob: an expired accessToken is
+    refreshed automatically at runtime via the stored refreshToken, so token
+    expiry alone does not mean the user is logged out. For an alternate config
+    directory we point CLAUDE_CONFIG_DIR at it so the check (and any login) target
+    the right keychain entry. Not called in Bedrock mode, which uses AWS creds.
+    """
+    env = os.environ.copy()
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = str(pathlib.Path(config_dir).resolve())
+
+    if _is_logged_in(env):
+        return
+
+    print("Not logged in to Claude Code on the host.", file=sys.stderr)
+    if input("Run `claude auth login` now? [y/N] ").strip().lower() != "y":
+        sys.exit("Aborting: log in with `claude auth login` and try again.")
+
+    subprocess.run(["claude", "auth", "login"], env=env, check=True)
+    if not _is_logged_in(env):
+        sys.exit("Still not logged in after `claude auth login`; aborting.")
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -141,6 +191,10 @@ def main():
     ]
 
     credfile = None
+
+    # Bedrock mode authenticates via AWS, so there's no Claude login to check.
+    if not aws_profile:
+        ensure_logged_in(config_dir)
 
     if config_dir:
         # First arg is a directory like ~/.claude-something
