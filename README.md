@@ -27,6 +27,7 @@ standard library. There's no package to install and nothing to build.
 ./claude-yolo.py                              # default ~/.claude credentials
 ./claude-yolo.py ~/.claude-work               # use an alternate config directory
 ./claude-yolo.py myprofile us-west-2 model.id # run against AWS Bedrock
+./claude-yolo.py --worktree fix-auth          # run in a fresh git worktree (see below)
 ./claude-yolo.py -- --network host            # pass extra args to `docker run`
 ```
 
@@ -35,6 +36,36 @@ container's working directory and is the only host path Claude can modify.
 
 You can also add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to
 tack extra instructions onto Claude's system prompt.
+
+## Parallel sessions with `--worktree`
+
+`--worktree NAME` lets you run several Claude containers on the **same repo at
+once**, each in its own directory, without them stepping on each other — and
+without risking work if a container exits at a bad moment:
+
+```bash
+cd ~/hacks/bells
+./claude-yolo.py --worktree fix-auth      # terminal 1
+./claude-yolo.py --worktree refactor-db   # terminal 2
+```
+
+Each invocation creates (or reuses) a git **worktree** on a new branch named
+`NAME`, branched off your current `HEAD` with no upstream, and launches Claude in
+it. The worktrees live in a central spot keyed by a slug of the repo path:
+`~/.claude-yolo/worktrees/<repo-slug>/<NAME>` — so they clutter neither the repo
+nor its parent directory.
+
+Because the worktree directory **and** the repo's shared `.git` both live on the
+host and are bind-mounted in, **nothing is lost when the container exits**:
+commits land in the shared `.git` immediately, and even uncommitted edits are on
+host disk. Merge or rebase the branch back into your main line locally whenever
+you're done.
+
+The session is also named `NAME` (`claude --name`), so it's labeled in the prompt
+box and the `/resume` picker. To reattach, re-run with the same `--worktree NAME`,
+or from the main repo use `/resume` → Ctrl+W ("all worktrees") or
+`claude --resume NAME`. Cleanup is manual: `git worktree remove
+~/.claude-yolo/worktrees/<repo-slug>/NAME` and `git branch -d NAME`.
 
 ## How it works
 

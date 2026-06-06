@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -157,6 +158,44 @@ def git_identity_args() -> list[str]:
     return env_args
 
 
+def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Create or reuse a host git worktree for a parallel session.
+
+    The worktree lives in a centralized state dir keyed by a slug of the main repo
+    path (the same slug scheme Claude Code uses under ~/.claude/projects/). Returns
+    (worktree_path, common_git, main_root). The caller bind-mounts both the worktree
+    dir and the shared .git at their identical host paths, because the worktree
+    records an absolute path to the shared .git and vice versa — so same-path
+    mounting is what makes git work inside the container. Branch NAME is created off
+    the current HEAD with no upstream (a stray `git push` can't hit main); commits
+    land in the shared .git on the host, so work survives container exit.
+    """
+    try:
+        common_git_out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        sys.exit("--worktree must be run from inside a git repository.")
+
+    common_git = pathlib.Path(common_git_out)
+    main_root = common_git.parent
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
+    worktree = home / ".claude-yolo" / "worktrees" / slug / name
+
+    if not worktree.exists():
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        branch_exists = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]
+        ).returncode == 0
+        if branch_exists:
+            subprocess.run(["git", "worktree", "add", str(worktree), name], check=True)
+        else:
+            subprocess.run(["git", "worktree", "add", "-b", name, str(worktree)], check=True)
+
+    return worktree, common_git, main_root
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -180,6 +219,13 @@ PARSER.add_argument(
     metavar="PROMPT",
     help="Extra --append-system-prompt value passed to claude inside the container repeatable in addition to one about the container itself",
 )
+PARSER.add_argument(
+    "--worktree",
+    metavar="NAME",
+    help="Create/reuse a git worktree NAME (branch NAME) under "
+         "~/.claude-yolo/worktrees/, run Claude in it, and name the session NAME. "
+         "For parallel sessions on one repo without losing uncommitted work.",
+)
 
 
 def main():
@@ -202,9 +248,19 @@ def main():
     aws_region       = positional[1] if aws_profile and len(positional) >= 2 else None
     bedrock_model_id = positional[2] if aws_profile and len(positional) >= 3 else None
 
-    cwd = pathlib.Path.cwd()
     home = pathlib.Path.home()
-    container = cwd.name
+    cwd = pathlib.Path.cwd()
+
+    # --worktree: run the session in a host-managed git worktree (durable) so you
+    # can work on one repo in parallel containers without a data-loss window. We
+    # retarget cwd to the worktree; the shared .git is mounted below.
+    common_git = None
+    worktree_name = parsed.worktree
+    if worktree_name:
+        cwd, common_git, main_root = setup_worktree(worktree_name, home)
+        container = f"{main_root.name}-{worktree_name}"
+    else:
+        container = cwd.name
 
     args = [
         "-w", str(cwd),
@@ -220,6 +276,11 @@ def main():
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
     ]
+
+    # Worktree mode: mount the shared .git at its real host path so the worktree's
+    # absolute gitdir pointers resolve and commits persist to the host.
+    if common_git:
+        args += ["-v", f"{common_git}:{common_git}"]
 
     credfile = None
 
@@ -263,7 +324,12 @@ def main():
         *parsed.append_system_prompts,
     ]
 
-    run_cmd = ["docker", "run", "-it", "--rm", "--name", container, *args, *docker_args, DOCKER_IMAGE, "--append-system-prompt", "... ".join(extra_system_prompt)]
+    claude_args = ["--append-system-prompt", "... ".join(extra_system_prompt)]
+    if worktree_name:
+        # Name the Claude session so it's identifiable in the prompt box / /resume picker
+        claude_args = ["--name", worktree_name, *claude_args]
+
+    run_cmd = ["docker", "run", "-it", "--rm", "--name", container, *args, *docker_args, DOCKER_IMAGE, *claude_args]
 
     sep = "- " * 40
     print(sep)

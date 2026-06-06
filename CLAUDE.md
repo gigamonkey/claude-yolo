@@ -61,6 +61,20 @@ There is no package, no tests, no build step — just the script. Run it directl
 
 The directory-vs-profile decision hinges on `pathlib.Path(positional[0]).is_dir()`.
 
+## `--worktree NAME` (parallel sessions on one repo)
+
+Orthogonal to the credential modes (composes with any of them). `setup_worktree`
+creates/reuses a git worktree on branch `NAME` (off current `HEAD`, no upstream)
+at `~/.claude-yolo/worktrees/<repo-slug>/NAME`, where `<repo-slug>` is the main
+repo path slugified the way Claude names `~/.claude/projects/` buckets
+(`re.sub(r"[^a-zA-Z0-9]", "-", path)`). `main` then retargets `cwd` to the
+worktree (so `-w` and the `{cwd}:{cwd}` mount point there) and **additionally
+mounts the shared `.git` at its identical host path** — both same-path mounts are
+required because a linked worktree stores *absolute* paths to its `.git` and back.
+The session is named via `claude --name NAME`. Durability is the point: commits
+land in the host's shared `.git` and uncommitted edits live in the host worktree
+dir, so a container exit loses nothing. Must be run from inside a git repo.
+
 ## Conventions / gotchas
 
 - **macOS-only as written.** Credential extraction uses the macOS `security`
@@ -84,7 +98,8 @@ The directory-vs-profile decision hinges on `pathlib.Path(positional[0]).is_dir(
   credential helper, GPG signing) that break commits in the Linux container. Note
   these env vars override any repo-local identity set *inside* the container.
 - The container name is the cwd basename, suffixed with the config dir or AWS
-  profile name when those modes are active.
+  profile name when those modes are active; in `--worktree` mode it's
+  `{main_repo_name}-{NAME}`.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.
