@@ -15,16 +15,18 @@ DOCKER_IMAGE = "claude-yolo:latest"
 DOCKERFILE_TEMPLATE = """\
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y nodejs npm sudo jq
-RUN npm install -g @anthropic-ai/claude-code
+RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl
 # UID {uid} matches the host user so bind-mounted sockets (e.g. SSH agent) are accessible
 RUN useradd -m -s /bin/bash --uid {uid} claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
 
-RUN apt-get update && apt-get install -y git curl
-
 USER claude
+# Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
+# install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken
+# install and which self-update can't manage. The native binary is standalone (no node needed).
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH=/home/claude/.local/bin:$PATH
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
 
