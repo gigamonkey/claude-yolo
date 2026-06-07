@@ -123,6 +123,17 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
   `useradd -G root` puts `claude` in group 0, granting the socket's group-rw. No
   real privilege added (the user already has NOPASSWD sudo; the container is the
   sandbox).
+- **GitHub HTTPS git is rewritten to SSH so it reuses the agent.** The image bakes
+  `git config --system url."git@github.com:".insteadOf "https://github.com/"`, so
+  in-container git operations on `https://github.com/...` remotes (fetch *and* push)
+  transparently route over SSH and authenticate via the forwarded ssh-agent — **no
+  token ever enters the container**. This is the only HTTPS-auth approach that keeps
+  the secret-never-in-container property: HTTPS auth is a bearer token (the token
+  must reach whoever makes the request), whereas SSH is challenge-response (the key
+  stays on the host, the agent only signs). The host's `osxkeychain` credential
+  helper is a macOS binary backed by the macOS Keychain — neither exists in the
+  Linux container, which is the other reason plain HTTPS push can't work here. Host
+  config is untouched (we never mount `~/.gitconfig`); remotes can stay HTTPS.
 - **In-process sandbox is disabled deliberately — the *container* is the
   sandbox.** We append `--settings '{"sandbox":{"enabled":false}}'` to the claude
   args so that, when the mounted `~/.claude/settings.json` has

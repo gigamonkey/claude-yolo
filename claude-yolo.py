@@ -36,6 +36,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 RUN useradd -m -s /bin/bash --uid {uid} -G root claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
+# Route GitHub HTTPS git operations over SSH so they reuse the forwarded ssh-agent — no
+# tokens ever enter the container (HTTPS auth is a bearer token, which would have to; SSH is
+# challenge-response, so the key stays on the host). Remotes can stay https://github.com/...;
+# git rewrites them to git@github.com: before connecting. --system so it applies to the claude
+# user without mounting any gitconfig (the host's ~/.gitconfig is deliberately never mounted).
+RUN git config --system url."git@github.com:".insteadOf "https://github.com/"
 
 USER claude
 # Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
