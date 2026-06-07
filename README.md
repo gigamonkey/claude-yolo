@@ -43,7 +43,7 @@ uv tool upgrade claude-yolo                                    # later, to updat
 ```
 
 You can also run it once without installing: `uvx --from
-git+https://github.com/<you>/claude-yolo yolo`.
+git+https://github.com/gigamonkey/claude-yolo yolo`.
 
 **Standalone** — the file self-runs under uv via its PEP 723 header, so you can
 skip the build entirely and just symlink it; a symlink (not a copy) keeps it
