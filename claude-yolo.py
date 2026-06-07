@@ -219,20 +219,57 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
-        "Positional args: [CONFIG_DIR | AWS_PROFILE [AWS_REGION [BEDROCK_MODEL_ID]]].\n"
         "Arguments after -- are passed directly to docker run "
         "(last-one-wins, so they override defaults)."
     ),
 )
 PARSER.add_argument(
-    "positional",
-    nargs="*",
-    metavar="ARG",
-    help="CONFIG_DIR, or AWS_PROFILE [AWS_REGION [BEDROCK_MODEL_ID]]",
+    "--config-dir",
+    metavar="PATH",
+    help="Config directory to mount at /home/claude/.claude "
+         "(default: ~/.claude). Credentials are pulled from the keychain entry "
+         "for this directory.",
 )
 PARSER.add_argument(
-    "--append-system-prompt",        
-    "-p",                                                                                                                                                                     
+    "--bedrock",
+    action="store_true",
+    help="Authenticate/bill via AWS Bedrock instead of the Claude keychain. "
+         "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1.",
+)
+PARSER.add_argument(
+    "--aws-profile",
+    metavar="NAME",
+    help="AWS profile to use (requires --bedrock). If omitted, the AWS SDK's "
+         "default profile / env credentials are used.",
+)
+PARSER.add_argument(
+    "--aws-region",
+    metavar="REGION",
+    help="AWS region for Bedrock (requires --bedrock; default: us-east-1).",
+)
+PARSER.add_argument(
+    "--bedrock-model",
+    metavar="ID",
+    help="Bedrock model id (requires --bedrock).",
+)
+PARSER.add_argument(
+    "--claude-json",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Mount the host ~/.claude.json into the container (default: on). "
+         "Use --no-claude-json for a cleanly isolated profile (e.g. with an "
+         "alternate --config-dir).",
+)
+PARSER.add_argument(
+    "--ssh-agent",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Forward the host ssh-agent socket into the container (default: on). "
+         "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
+)
+PARSER.add_argument(
+    "--append-system-prompt",
+    "-p",
     dest="append_system_prompts",
     action="append",
     default=[],
@@ -282,13 +319,13 @@ def main():
         docker_args = []
 
     parsed = PARSER.parse_args(script_argv)
-    positional = parsed.positional
 
-    is_dir = len(positional) >= 1 and pathlib.Path(positional[0]).is_dir()
-    config_dir       = positional[0] if is_dir else None
-    aws_profile      = positional[0] if not is_dir and len(positional) >= 1 else None
-    aws_region       = positional[1] if aws_profile and len(positional) >= 2 else None
-    bedrock_model_id = positional[2] if aws_profile and len(positional) >= 3 else None
+    # Validate cross-flag constraints argparse can't express on its own.
+    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
+        sys.exit("--aws-profile/--aws-region/--bedrock-model require --bedrock.")
+    config_dir = parsed.config_dir   # None => default ~/.claude
+    if config_dir and not pathlib.Path(config_dir).is_dir():
+        sys.exit(f"--config-dir: not a directory: {config_dir}")
 
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
@@ -309,59 +346,68 @@ def main():
         "-v", f"{cwd}:{cwd}",
         # Hostname set to working dir basename so Claude Code status line shows project name without git
         "--hostname", cwd.name,
+        # Forward the host git identity so commits made in the container are attributed correctly
+        *git_identity_args(),
+    ]
+
+    if parsed.ssh_agent:
         # Forward the host ssh-agent via Docker Desktop's magic socket. We canNOT bind-mount
         # the raw host $SSH_AUTH_SOCK: that socket's listener lives in the macOS kernel, while
         # the container runs in Docker Desktop's Linux VM, so the mounted inode is dead
         # (connect() -> ECONNREFUSED). /run/host-services/ssh-auth.sock is a socket the VM
         # itself listens on and proxies through to the host agent. It's mounted srw-rw----
         # root:root, so the claude user must be in group 0 to connect (see the useradd line).
-        "-v", "/run/host-services/ssh-auth.sock:/run/ssh-agent",
-        "-e", "SSH_AUTH_SOCK=/run/ssh-agent",
-        # Mount host known_hosts so SSH host key verification succeeds
-        "-v", f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
-        # Forward the host git identity so commits made in the container are attributed correctly
-        *git_identity_args(),
-    ]
+        # --no-ssh-agent skips all of this; in-container GitHub git auth won't work then,
+        # since the baked HTTPS->SSH rewrite relies on the forwarded agent.
+        args += [
+            "-v", "/run/host-services/ssh-auth.sock:/run/ssh-agent",
+            "-e", "SSH_AUTH_SOCK=/run/ssh-agent",
+            # Mount host known_hosts so SSH host key verification succeeds
+            "-v", f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
+        ]
 
     # Worktree mode: mount the shared .git at its real host path so the worktree's
     # absolute gitdir pointers resolve and commits persist to the host.
     if common_git:
         args += ["-v", f"{common_git}:{common_git}"]
 
-    credfile = None
+    # The four credential/config axes are independent (not mutually exclusive):
+    #   (a) which config dir to mount        -- --config-dir
+    #   (b) whether to mount ~/.claude.json   -- --claude-json/--no-claude-json
+    #   (c) keychain creds (only non-Bedrock) -- derived from --bedrock
+    #   (d) Bedrock env + ~/.aws              -- --bedrock (+ --aws-* / --bedrock-model)
 
-    # Bedrock mode authenticates via AWS, so there's no Claude login to check.
-    if not aws_profile:
-        ensure_logged_in(config_dir)
-
+    # (a) Config dir. Always mounted at /home/claude/.claude (= the claude user's
+    # $HOME/.claude, i.e. Claude Code's default), so no CLAUDE_CONFIG_DIR is needed.
     if config_dir:
-        # First arg is a directory like ~/.claude-something
         configpath = pathlib.Path(config_dir).resolve()
         container = f"{container}-{configpath.name}"
-        credfile = extract_credentials(config_dir)
         args += ["-v", f"{config_dir}:/home/claude/.claude"]
-        args += ["-e", "CLAUDE_CONFIG_DIR=/home/claude/.claude"]
-
-    elif aws_profile:
-        # First arg is an AWS profile name, optionally followed by region and model ID
-        container = f"{container}-{aws_profile}"
-        args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
+    else:
         args += ["-v", f"{home}/.claude:/home/claude/.claude"]
+
+    # (b) ~/.claude.json (global config: MCP servers, project history/trust). Always at
+    # $HOME/.claude.json on the host (it ignores CLAUDE_CONFIG_DIR). Opt out with
+    # --no-claude-json to keep an alternate --config-dir profile cleanly isolated.
+    if parsed.claude_json:
+        args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
+
+    # (c) Keychain credentials, only when NOT using Bedrock (Bedrock authenticates via AWS).
+    if not parsed.bedrock:
+        ensure_logged_in(config_dir)
+        credfile = extract_credentials(config_dir)
+        args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
+
+    # (d) Bedrock: AWS creds + env. Composes with any config dir / claude-json choice.
+    if parsed.bedrock:
+        container = f"{container}-{parsed.aws_profile or 'bedrock'}"
         args += ["-v", f"{home}/.aws:/home/claude/.aws:ro"]
         args += ["-e", "CLAUDE_CODE_USE_BEDROCK=1"]
-        args += ["-e", f"AWS_PROFILE={aws_profile}"]
-        args += ["-e", f"AWS_REGION={aws_region or 'us-east-1'}"]
-        if bedrock_model_id:
-            args += ["-e", f"BEDROCK_MODEL_ID={bedrock_model_id}"]
-
-    else:
-        # No args: use default ~/.claude
-        credfile = extract_credentials(None)
-        args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
-        args += ["-v", f"{home}/.claude:/home/claude/.claude"]
-
-    if credfile:
-        args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
+        if parsed.aws_profile:
+            args += ["-e", f"AWS_PROFILE={parsed.aws_profile}"]
+        args += ["-e", f"AWS_REGION={parsed.aws_region or 'us-east-1'}"]
+        if parsed.bedrock_model:
+            args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
 
     build_docker_image()
     

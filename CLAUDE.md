@@ -11,14 +11,21 @@ touching the host beyond the bind-mounted working directory.
 There is no package, no tests, no build step — just the script. Run it directly:
 
 ```bash
-./claude-yolo.py                 # default ~/.claude credentials
-./claude-yolo.py ~/.claude-work  # alternate config dir
-./claude-yolo.py myprofile us-west-2 some.model.id   # AWS Bedrock
-./claude-yolo.py -- --network host                   # extra docker run args
-./claude-yolo.py -c               # resume most recent session in this dir
-./claude-yolo.py -r               # interactive session picker
-./claude-yolo.py -r SESSION_ID    # resume a specific session
+./claude-yolo.py                          # default ~/.claude credentials
+./claude-yolo.py --config-dir ~/.claude-work          # alternate config dir
+./claude-yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
+./claude-yolo.py --bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
+./claude-yolo.py --no-claude-json         # don't mount the host ~/.claude.json
+./claude-yolo.py --no-ssh-agent           # don't forward the host ssh-agent
+./claude-yolo.py -- --network host        # extra docker run args
+./claude-yolo.py -c                       # resume most recent session in this dir
+./claude-yolo.py -r                       # interactive session picker
+./claude-yolo.py -r SESSION_ID            # resume a specific session
 ```
+
+All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`, and
+`--ssh-agent` are **orthogonal flags** — any reasonable combination is valid.
+There are no positional args anymore.
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
 (`requires-python = ">=3.10"`, no dependencies), so the script self-runs under
@@ -53,7 +60,7 @@ still works.
    reads the `loggedIn` field; if logged out, offers to run `claude auth login`
    then re-checks. Checks login *status*, not token expiry, on purpose: an expired
    accessToken is auto-refreshed at runtime via the stored refreshToken, so expiry
-   alone doesn't mean logged out. For an alternate config dir it sets
+   alone doesn't mean logged out. For an alternate `--config-dir` it sets host-side
    `CLAUDE_CONFIG_DIR` so the check targets the right keychain entry. If host
    `claude` is missing/too old for `auth`, it returns True and defers to the
    empty-file check in `extract_credentials`.
@@ -68,16 +75,37 @@ still works.
    process, so it's interactive `-it --rm`). The args also forward the host git
    identity (`git_identity_args`) and the SSH agent (see gotchas).
 
-## Three credential modes (mutually exclusive, decided by positional args)
+## Four orthogonal config/credential axes (all flags, freely combinable)
 
-- **No args** → default `~/.claude` + keychain credentials.
-- **First arg is a directory** → alternate config dir; mounted at
-  `/home/claude/.claude`, credentials pulled with the hashed service name.
-- **First arg is NOT a directory** → treated as an AWS profile name, with
-  optional region and Bedrock model ID. Sets `CLAUDE_CODE_USE_BEDROCK=1` and
-  mounts `~/.aws` read-only. No keychain extraction in this mode.
+The old single overloaded positional (config dir *or* AWS profile, decided by
+`is_dir()`) is gone. `main` now assembles the credential/config args from four
+independent blocks, none mutually exclusive:
 
-The directory-vs-profile decision hinges on `pathlib.Path(positional[0]).is_dir()`.
+- **`--config-dir PATH`** (default `~/.claude`) → mounted at `/home/claude/.claude`.
+  When set, credentials are pulled with the hashed service name and the container
+  name gets a `-{basename}` suffix. The mount is *always* at `/home/claude/.claude`
+  (= the `claude` user's `$HOME/.claude`, Claude Code's default), so **no in-container
+  `CLAUDE_CONFIG_DIR` is set** — it would be redundant.
+- **`--claude-json` / `--no-claude-json`** (default on) → whether to mount the host
+  `~/.claude.json` (global config: MCP servers, project history/trust). It lives at
+  `$HOME/.claude.json` regardless of `CLAUDE_CONFIG_DIR`, so there's only ever one.
+  `--no-claude-json` gives a cleanly isolated profile — the intended pairing with an
+  alternate `--config-dir`.
+- **`--bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
+  `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
+  and **skips keychain extraction and the login check** (AWS creds instead). Container
+  name gets a `-{profile-or-bedrock}` suffix. The three AWS sub-flags require
+  `--bedrock` (validated in `main`); `--aws-profile` is optional (SDK default creds
+  used if omitted).
+- **`--ssh-agent` / `--no-ssh-agent`** (default on) → forward the host ssh-agent
+  socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
+  the `known_hosts` mount; in-container GitHub git auth then won't work, since the
+  baked HTTPS→SSH rewrite relies on the agent.
+
+Keychain credential extraction happens **iff not `--bedrock`**; the config-dir mount,
+the `~/.claude.json` mount, and the Bedrock env are otherwise independent — so e.g.
+`--bedrock --config-dir ~/.claude-bdr` (Bedrock auth, separate profile) now works,
+which the old positional scheme could not express.
 
 ## `--worktree NAME` (parallel sessions on one repo)
 
@@ -111,7 +139,8 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
 ## Conventions / gotchas
 
 - **macOS + Docker Desktop only as written.** Credential extraction uses the
-  macOS `security` CLI. SSH agent forwarding mounts Docker Desktop's
+  macOS `security` CLI. SSH agent forwarding (on by default, disabled with
+  `--no-ssh-agent`) mounts Docker Desktop's
   `/run/host-services/ssh-auth.sock` (the VM-side socket the Desktop proxies to
   the host agent), NOT the raw host `$SSH_AUTH_SOCK` — that socket's listener
   lives in the macOS kernel and is unreachable from the container's Linux VM
@@ -155,9 +184,10 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
   Mounting `~/.gitconfig` instead would drag in macOS-only bits (osxkeychain
   credential helper, GPG signing) that break commits in the Linux container. Note
   these env vars override any repo-local identity set *inside* the container.
-- The container name is the cwd basename, suffixed with the config dir or AWS
-  profile name when those modes are active; in `--worktree` mode it's
-  `{main_repo_name}-{NAME}`.
+- The container name is the cwd basename (or `{main_repo_name}-{NAME}` in
+  `--worktree` mode), then suffixed with `-{config-dir-basename}` when
+  `--config-dir` is set and `-{aws-profile-or-"bedrock"}` when `--bedrock` is
+  set. Suffixes stack, so the axes compose in the name too.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.
