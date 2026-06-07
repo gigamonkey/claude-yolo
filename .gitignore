@@ -1,3 +1,8 @@
 # Python bytecode cache (e.g. from `python3 -m py_compile claude-yolo.py`)
 __pycache__/
 *.pyc
+
+# uv-managed dev environment and tool caches (uv.lock IS committed)
+.venv/
+.pytest_cache/
+.ruff_cache/

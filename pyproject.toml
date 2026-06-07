@@ -1,0 +1,33 @@
+[project]
+name = "claude-yolo"
+version = "0.1.0"
+description = "Run Claude Code in an ephemeral Docker container (yolo mode)."
+requires-python = ">=3.10"
+dependencies = []
+
+# claude-yolo.py is run as a standalone PEP 723 script (`uv run --script`), not
+# installed as a package — this project exists only to manage dev tooling and the
+# test environment. `package = false` tells uv not to try to build/install it.
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I import-sort, UP pyupgrade, B bugbear.
+select = ["E", "W", "F", "I", "UP", "B"]
+# Long lines are intentional here: the inline Dockerfile RUN commands, argparse
+# help strings, and the docker-run echo are clearer unwrapped.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

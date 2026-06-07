@@ -8,7 +8,11 @@ stdlib) that runs Claude Code inside an ephemeral Docker container with
 is the whole point: Claude can run unattended inside the container without
 touching the host beyond the bind-mounted working directory.
 
-There is no package, no tests, no build step — just the script. Run it directly:
+The script itself is **stdlib-only and standalone** — it ships as one PEP 723
+file with no runtime dependencies and is run directly. The repo *also* carries a
+small uv-managed dev setup (`pyproject.toml`, `tests/`) for linting and tests;
+that tooling is never needed to *run* the script, only to develop it (see
+**Development** below). Run it directly:
 
 ```bash
 ./claude-yolo.py                          # default ~/.claude credentials
@@ -256,3 +260,28 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.
+
+## Development
+
+`pyproject.toml` defines a **uv-managed, non-packaged** project (`[tool.uv]
+package = false`) whose only purpose is dev tooling — `ruff` and `pytest` live in
+the `dev` dependency group. The runtime script stays stdlib-only; this never adds
+a runtime dependency. `uv.lock` is committed; `.venv/` and the tool caches are
+gitignored.
+
+```bash
+uv sync                 # create/refresh .venv with the dev tools
+uv run pytest           # run the test suite (tests/)
+uv run ruff check .     # lint
+uv run ruff format .    # format
+```
+
+Tests load `claude-yolo.py` via `importlib` (the hyphenated filename isn't a
+normal importable module) and get a **fresh module per test** — `main()` mutates
+the module-global `PARSER` through `set_defaults`, so isolation matters. They
+never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
+`build_docker_image`, `ensure_logged_in`, `extract_credentials`,
+`git_identity_args`, and `os.execvp`, then asserts on the captured `docker run`
+argv. `test_config.py` covers `.yolo.json` parsing/merging and the `init`
+scaffold; `test_cli.py` covers verb dispatch and arg assembly across the
+credential/config axes. Keep them green when changing flags or mounts.

@@ -85,9 +85,7 @@ def extract_credentials(config_dir: str | None) -> str:
         capture_output=True,
     )
 
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="claude-credentials-", suffix=".json", delete=False
-    )
+    tmp = tempfile.NamedTemporaryFile(prefix="claude-credentials-", suffix=".json", delete=False)
     tmp.write(result.stdout)
     tmp.close()
 
@@ -159,11 +157,10 @@ def git_identity_args() -> list[str]:
     bits (osxkeychain credential helper, GPG signing) that break inside the
     container. Returns [] if git or an identity is unavailable.
     """
+
     def cfg(key: str) -> str:
         try:
-            result = subprocess.run(
-                ["git", "config", "--get", key], capture_output=True, text=True
-            )
+            result = subprocess.run(["git", "config", "--get", key], capture_output=True, text=True)
         except FileNotFoundError:
             return ""
         return result.stdout.strip()
@@ -178,7 +175,9 @@ def git_identity_args() -> list[str]:
     return env_args
 
 
-def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+def setup_worktree(
+    name: str, home: pathlib.Path
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     """Create or reuse a host git worktree for a parallel session.
 
     The worktree lives in a centralized state dir keyed by a slug of the main repo
@@ -193,7 +192,9 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
     try:
         common_git_out = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
         sys.exit("--worktree must be run from inside a git repository.")
@@ -205,9 +206,12 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
 
     if not worktree.exists():
         worktree.parent.mkdir(parents=True, exist_ok=True)
-        branch_exists = subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]
-        ).returncode == 0
+        branch_exists = (
+            subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]
+            ).returncode
+            == 0
+        )
         if branch_exists:
             subprocess.run(["git", "worktree", "add", str(worktree), name], check=True)
         else:
@@ -221,13 +225,13 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
 # --resume) are intentionally CLI-only and rejected if they appear in a .yolo.json.
 # "path" values get ~ expanded (a JSON file can't rely on shell expansion).
 YOLO_KEYS = {
-    "config_dir":           ("config_dir", "path"),
-    "bedrock":              ("bedrock", "bool"),
-    "aws_profile":          ("aws_profile", "str"),
-    "aws_region":           ("aws_region", "str"),
-    "bedrock_model":        ("bedrock_model", "str"),
-    "claude_json":          ("claude_json", "bool"),
-    "ssh_agent":            ("ssh_agent", "bool"),
+    "config_dir": ("config_dir", "path"),
+    "bedrock": ("bedrock", "bool"),
+    "aws_profile": ("aws_profile", "str"),
+    "aws_region": ("aws_region", "str"),
+    "bedrock_model": ("bedrock_model", "str"),
+    "claude_json": ("claude_json", "bool"),
+    "ssh_agent": ("ssh_agent", "bool"),
     "append_system_prompt": ("append_system_prompts", "list"),
 }
 
@@ -235,13 +239,13 @@ YOLO_KEYS = {
 # flags). null means "leave at the built-in default" — the loader skips nulls —
 # so a freshly-init'd file round-trips to "no config" until the user edits it.
 YOLO_INIT_DEFAULTS = {
-    "config-dir":           None,
-    "bedrock":              False,
-    "aws-profile":          None,
-    "aws-region":           None,
-    "bedrock-model":        None,
-    "claude-json":          True,
-    "ssh-agent":            True,
+    "config-dir": None,
+    "bedrock": False,
+    "aws-profile": None,
+    "aws-region": None,
+    "bedrock-model": None,
+    "claude-json": True,
+    "ssh-agent": True,
     "append-system-prompt": [],
 }
 
@@ -336,28 +340,28 @@ PARSER.add_argument(
     nargs="?",
     choices=["init"],
     help="Optional subcommand. 'init' writes a .yolo.json of default values into "
-         "the current directory and exits; omit it to run Claude in a container.",
+    "the current directory and exits; omit it to run Claude in a container.",
 )
 PARSER.add_argument(
     "--config-dir",
     metavar="PATH",
     help="Config directory to mount at /home/claude/.claude "
-         "(default: ~/.claude). Credentials are pulled from the keychain entry "
-         "for this directory.",
+    "(default: ~/.claude). Credentials are pulled from the keychain entry "
+    "for this directory.",
 )
 PARSER.add_argument(
     "--bedrock",
     action=argparse.BooleanOptionalAction,
     default=False,
     help="Authenticate/bill via AWS Bedrock instead of the Claude keychain. "
-         "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1. "
-         "Use --no-bedrock to override a .yolo.json that enables it.",
+    "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1. "
+    "Use --no-bedrock to override a .yolo.json that enables it.",
 )
 PARSER.add_argument(
     "--aws-profile",
     metavar="NAME",
     help="AWS profile to use (requires --bedrock). If omitted, the AWS SDK's "
-         "default profile / env credentials are used.",
+    "default profile / env credentials are used.",
 )
 PARSER.add_argument(
     "--aws-region",
@@ -374,15 +378,15 @@ PARSER.add_argument(
     action=argparse.BooleanOptionalAction,
     default=True,
     help="Mount the host ~/.claude.json into the container (default: on). "
-         "Use --no-claude-json for a cleanly isolated profile (e.g. with an "
-         "alternate --config-dir).",
+    "Use --no-claude-json for a cleanly isolated profile (e.g. with an "
+    "alternate --config-dir).",
 )
 PARSER.add_argument(
     "--ssh-agent",
     action=argparse.BooleanOptionalAction,
     default=True,
     help="Forward the host ssh-agent socket into the container (default: on). "
-         "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
+    "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
 )
 PARSER.add_argument(
     "--append-system-prompt",
@@ -397,8 +401,8 @@ PARSER.add_argument(
     "--worktree",
     metavar="NAME",
     help="Create/reuse a git worktree NAME (branch NAME) under "
-         "~/.claude-yolo/worktrees/, run Claude in it, and name the session NAME. "
-         "For parallel sessions on one repo without losing uncommitted work.",
+    "~/.claude-yolo/worktrees/, run Claude in it, and name the session NAME. "
+    "For parallel sessions on one repo without losing uncommitted work.",
 )
 # Resume a prior session. Session history lives in the bind-mounted ~/.claude/projects/
 # and is keyed by the project path, which matches between host and container (cwd is mounted
@@ -420,7 +424,7 @@ RESUME_GROUP.add_argument(
     default=None,
     metavar="SESSION_ID",
     help="Resume a Claude session by SESSION_ID, or omit it for an interactive picker "
-         "(claude --resume).",
+    "(claude --resume).",
 )
 
 
@@ -430,7 +434,7 @@ def main():
     if "--" in sys.argv:
         sep_idx = sys.argv.index("--")
         script_argv = sys.argv[1:sep_idx]
-        docker_args = sys.argv[sep_idx + 1:]
+        docker_args = sys.argv[sep_idx + 1 :]
     else:
         script_argv = sys.argv[1:]
         docker_args = []
@@ -457,9 +461,11 @@ def main():
     # consumer), so just warn rather than failing — bedrock may be toggled off via
     # --no-bedrock over a .yolo.json that sets it.
     if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
-        print("warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
-              file=sys.stderr)
-    config_dir = parsed.config_dir   # None => default ~/.claude
+        print(
+            "warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
+            file=sys.stderr,
+        )
+    config_dir = parsed.config_dir  # None => default ~/.claude
     if config_dir and not pathlib.Path(config_dir).is_dir():
         sys.exit(f"config-dir: not a directory: {config_dir}")
 
@@ -475,10 +481,13 @@ def main():
         container = cwd.name
 
     args = [
-        "-w", str(cwd),
-        "-v", f"{cwd}:{cwd}",
+        "-w",
+        str(cwd),
+        "-v",
+        f"{cwd}:{cwd}",
         # Hostname set to working dir basename so Claude Code status line shows project name without git
-        "--hostname", cwd.name,
+        "--hostname",
+        cwd.name,
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
     ]
@@ -493,10 +502,13 @@ def main():
         # --no-ssh-agent skips all of this; in-container GitHub git auth won't work then,
         # since the baked HTTPS->SSH rewrite relies on the forwarded agent.
         args += [
-            "-v", "/run/host-services/ssh-auth.sock:/run/ssh-agent",
-            "-e", "SSH_AUTH_SOCK=/run/ssh-agent",
+            "-v",
+            "/run/host-services/ssh-auth.sock:/run/ssh-agent",
+            "-e",
+            "SSH_AUTH_SOCK=/run/ssh-agent",
             # Mount host known_hosts so SSH host key verification succeeds
-            "-v", f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
+            "-v",
+            f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
         ]
 
     # Worktree mode: mount the shared .git at its real host path so the worktree's
@@ -543,7 +555,7 @@ def main():
             args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
 
     build_docker_image()
-    
+
     extra_system_prompt = [
         "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
         *parsed.append_system_prompts,
@@ -555,8 +567,10 @@ def main():
         # deliberately not installed — they can't create namespaces in a container
         # anyway). This overrides sandbox.enabled from the mounted settings.json for
         # this container only; the host's settings are untouched.
-        "--settings", '{"sandbox":{"enabled":false}}',
-        "--append-system-prompt", "... ".join(extra_system_prompt),
+        "--settings",
+        '{"sandbox":{"enabled":false}}',
+        "--append-system-prompt",
+        "... ".join(extra_system_prompt),
     ]
 
     # Forward a resume/continue flag to claude. The two are mutually exclusive (argparse
@@ -573,7 +587,18 @@ def main():
         # rejects --name alongside --continue/--resume.
         claude_args = ["--name", worktree_name, *claude_args]
 
-    run_cmd = ["docker", "run", "-it", "--rm", "--name", container, *args, *docker_args, DOCKER_IMAGE, *claude_args]
+    run_cmd = [
+        "docker",
+        "run",
+        "-it",
+        "--rm",
+        "--name",
+        container,
+        *args,
+        *docker_args,
+        DOCKER_IMAGE,
+        *claude_args,
+    ]
 
     sep = "- " * 40
     print(sep)
