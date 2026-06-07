@@ -207,10 +207,12 @@ name) and run from inside a git repo.
   the kept branch is pushed.
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
-  whether the branch is an ancestor of **`base`** (default `HEAD` = the main
-  checkout; honours `.yolo.json`/`--base`). Ancestry-based, so squash-merges read
-  as `unmerged`. `do_list` runs the merge check in the main repo (not the
-  worktree) so a `HEAD` base resolves to the main checkout.
+  whether the branch is reachable from **`base`** — exactly `git branch --merged
+  <base>` (default `base` is `HEAD` = the main checkout; honours
+  `.yolo.json`/`--base`). So a fast-forward-merged or never-diverged branch reads
+  `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
+  the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
+  to the main checkout, not the worktree's own branch.
 
 Implementation shape:
 

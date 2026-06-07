@@ -722,15 +722,15 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
 
 
 def _branch_merged(branch: str, base: str) -> bool:
-    """Whether `branch` is fully merged into `base` (the integration ref).
+    """Whether `branch` is already contained in `base` (the integration ref).
 
-    Run from the current dir (the main repo), so a `base` like HEAD resolves to
-    the main checkout — not a worktree's own branch. "Merged" = the branch tip is
-    an ancestor of `base` *and* `base` has moved past it, so the branch's work is
-    contained in `base` with nothing left to merge. The second clause excludes a
-    freshly-started branch that simply hasn't diverged yet (tip == base). Ancestry
-    can't see *squash*-merges (they create a new commit), so this errs toward a
-    false negative — fine for a display hint, never a false "safe".
+    Matches `git branch --merged <base>`: true when the branch tip is reachable
+    from `base`. Run from the current dir (the main repo) so a `base` like HEAD
+    resolves to the main checkout — not a worktree's own branch. A branch that
+    hasn't diverged from `base` — just-created, or **fast-forward**-merged (tip ==
+    base) — therefore reads as merged, exactly as git reports it. A *squash*-merge
+    creates a new commit, so the tip isn't reachable and reads as unmerged (a safe
+    false negative for a display hint).
     """
     exists = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", base],
@@ -739,16 +739,13 @@ def _branch_merged(branch: str, base: str) -> bool:
     )
     if exists.returncode != 0:
         return False
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", branch, base],
-        capture_output=True,
+    return (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", branch, base],
+            capture_output=True,
+        ).returncode
+        == 0
     )
-    ahead = subprocess.run(
-        ["git", "rev-list", "--count", f"{branch}..{base}"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return ancestor.returncode == 0 and ahead not in ("0", "")
 
 
 def do_list(home: pathlib.Path, base: str) -> None:

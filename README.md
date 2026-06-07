@@ -109,8 +109,9 @@ refactor-db` in another) on the **same repo** without them stepping on each othe
 - **`list`** shows the repo's worktrees (TOPIC / BRANCH / STATUS / DIRECTORY).
   STATUS is `running`, `dirty` (uncommitted changes), or — when a worktree is
   idle and clean — `merged`/`unmerged` depending on whether its branch is already
-  contained in the base branch (so `merged` means it's ready to `finish`). The
-  merge target is `--base`/`base` (default `HEAD`, i.e. the main checkout).
+  contained in the base branch (`git branch --merged` semantics, so `merged`
+  means it's ready to `finish`). The merge target is `--base`/`base` (default
+  `HEAD`, i.e. the main checkout). Squash-merges read as `unmerged`.
 
 The worktrees live in a central spot keyed by a slug of the repo path,
 `~/.claude-yolo/worktrees/<repo-slug>/<TOPIC>`, so they clutter neither the repo

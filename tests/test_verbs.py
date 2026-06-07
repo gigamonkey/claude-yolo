@@ -237,12 +237,28 @@ def test_list_unmerged_branch(cy, run_cli, repo, capsys):
     assert _status_for(capsys.readouterr().out, "wip") == "unmerged"
 
 
-def test_list_fresh_branch_is_unmerged(cy, run_cli, repo, capsys):
+def test_list_fast_forward_merge_reads_merged(cy, run_cli, repo, capsys):
+    """A fast-forward merge leaves tip == base; it must still read `merged`."""
+    r, home = repo
+    run_cli(["start", "ff"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("ff"))
+    (wt / "x").write_text("x")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    git(r, "merge", "ff")  # fast-forward: main had not moved, so main tip == ff tip
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "ff") == "merged"
+
+
+def test_list_fresh_branch_reads_merged(cy, run_cli, repo, capsys):
+    # A never-diverged branch (tip == base) is "contained" — git branch --merged
+    # reports it merged too, and we match that.
     r, home = repo
     run_cli(["start", "fresh"], home=home, cwd=r)  # no commits, tip == base
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    assert _status_for(capsys.readouterr().out, "fresh") == "unmerged"
+    assert _status_for(capsys.readouterr().out, "fresh") == "merged"
 
 
 def test_list_merged_uses_base_target(cy, run_cli, repo, capsys):
