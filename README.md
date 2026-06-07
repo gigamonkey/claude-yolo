@@ -47,12 +47,18 @@ examples below use `./claude-yolo.py`, but once it's on your PATH you can just s
 ./claude-yolo.py                                   # default ~/.claude credentials
 ./claude-yolo.py --config-dir ~/.claude-work       # use an alternate config directory
 ./claude-yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-./claude-yolo.py --worktree fix-auth               # run in a fresh git worktree (see below)
 ./claude-yolo.py --no-ssh-agent                    # don't forward the host SSH agent
 ./claude-yolo.py -c                                # resume the most recent session here
 ./claude-yolo.py -r [SESSION_ID]                   # pick / resume a session
 ./claude-yolo.py init                              # write a .yolo.json of defaults, then exit
 ./claude-yolo.py -- --network host                 # pass extra args to `docker run`
+
+# the worktree workflow (see below):
+./claude-yolo.py start fix-auth                    # new worktree+branch, launch a session
+./claude-yolo.py resume fix-auth                   # re-enter it, continue the session
+./claude-yolo.py shell fix-auth                    # open a bash shell in its container
+./claude-yolo.py finish fix-auth                   # remove the worktree, keep the branch
+./claude-yolo.py list                              # show this repo's worktrees
 ```
 
 Run it from the directory you want Claude to work in. That directory becomes the
@@ -61,40 +67,58 @@ container's working directory and is the only host path Claude can modify.
 `--config-dir`, `--bedrock`, `--claude-json`, `--ssh-agent`, and `--worktree` are
 **orthogonal flags** — combine them however you like (see
 [Configuration & credential options](#configuration--credential-options)). The
-only positional argument is the optional `init` verb. You can also add
-`--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
-instructions onto Claude's system prompt, and set defaults for any of these in a
+positional arguments are an optional verb
+(`init`/`start`/`resume`/`shell`/`finish`/`list`) and its topic name. You can also
+add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
+instructions onto Claude's system prompt, and set defaults for most flags in a
 [`.yolo.json` file](#configuring-defaults-with-yolojson).
 
-## Parallel sessions with `--worktree`
+## The worktree workflow
 
-`--worktree NAME` lets you run several Claude containers on the **same repo at
-once**, each in its own directory, without them stepping on each other — and
-without risking work if a container exits at a bad moment:
+Most work with `claude-yolo` is meant to land on a branch you can merge or open a
+PR from. The verbs make that the path of least resistance — each takes a `TOPIC`
+(which becomes both the git worktree and the branch name) and runs from inside a
+repo:
 
 ```bash
 cd ~/hacks/bells
-./claude-yolo.py --worktree fix-auth      # terminal 1
-./claude-yolo.py --worktree refactor-db   # terminal 2
+./claude-yolo.py start fix-auth       # new worktree + branch `fix-auth`, fresh session
+# ...work, exit the container...
+./claude-yolo.py resume fix-auth      # back into it, continuing where you left off
+./claude-yolo.py shell fix-auth       # a bash shell in that worktree (poke around)
+./claude-yolo.py list                 # what worktrees exist, and which are running
+./claude-yolo.py finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
 ```
 
-Each invocation creates (or reuses) a git **worktree** on a new branch named
-`NAME`, branched off your current `HEAD` with no upstream, and launches Claude in
-it. The worktrees live in a central spot keyed by a slug of the repo path:
-`~/.claude-yolo/worktrees/<repo-slug>/<NAME>` — so they clutter neither the repo
-nor its parent directory.
+You can run several at once (`start fix-auth` in one terminal, `start
+refactor-db` in another) on the **same repo** without them stepping on each other.
 
-Because the worktree directory **and** the repo's shared `.git` both live on the
-host and are bind-mounted in, **nothing is lost when the container exits**:
-commits land in the shared `.git` immediately, and even uncommitted edits are on
-host disk. Merge or rebase the branch back into your main line locally whenever
-you're done.
+- **`start TOPIC`** creates a git **worktree** on a new branch `TOPIC`, branched
+  off `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
+  set `"base"` in `.yolo.json`), and launches a fresh session named `TOPIC`. It
+  errors if that topic already exists — use `resume`.
+- **`resume TOPIC`** re-enters an existing worktree and, by default, continues its
+  most recent session. `--new` starts a fresh session instead; `-r [SESSION_ID]`
+  picks a specific one. Errors if the worktree doesn't exist — use `start`.
+- **`shell TOPIC`** drops you into a bash shell on the worktree: into the
+  **running** container if one is up (handy while a session works in another
+  terminal), otherwise a fresh throwaway container.
+- **`finish TOPIC`** removes the worktree but **keeps the branch** (for you to
+  merge or push). It refuses if a container is still running, or if there are
+  uncommitted changes (override with `--force`).
+- **`list`** shows the repo's worktrees with `dirty`/`running` flags.
 
-The session is also named `NAME` (`claude --name`), so it's labeled in the prompt
-box and the `/resume` picker. To reattach, re-run with the same `--worktree NAME`,
-or from the main repo use `/resume` → Ctrl+W ("all worktrees") or
-`claude --resume NAME`. Cleanup is manual: `git worktree remove
-~/.claude-yolo/worktrees/<repo-slug>/NAME` and `git branch -d NAME`.
+The worktrees live in a central spot keyed by a slug of the repo path,
+`~/.claude-yolo/worktrees/<repo-slug>/<TOPIC>`, so they clutter neither the repo
+nor its parent. Because the worktree directory **and** the repo's shared `.git`
+are both bind-mounted in, **nothing is lost when the container exits**: commits
+land in the shared `.git` immediately, and uncommitted edits are on host disk.
+Containers themselves are disposable (`docker run --rm`); `start`/`resume` just
+launch a fresh one each time. `finish` is the cleanup `git worktree remove` +
+keeping the branch, so you no longer have to do that by hand.
+
+(`--worktree NAME` is still available as the underlying flag — `start`/`resume`
+are sugar over it — and composes with all the credential options below.)
 
 ## How it works
 
@@ -272,10 +296,11 @@ wins, and a project file overrides your global one per key (`append-system-promp
 is the exception: prompts from all layers accumulate).
 
 Supported keys: `config-dir`, `bedrock`, `aws-profile`, `aws-region`,
-`bedrock-model`, `claude-json`, `ssh-agent`, and `append-system-prompt` (a string
-or list of strings). A `null` value leaves a key at its built-in default. The
-per-invocation actions (`--worktree`, `--continue`, `--resume`) are deliberately
-**not** config keys.
+`bedrock-model`, `claude-json`, `ssh-agent`, `base` (the default branch point for
+`start`), and `append-system-prompt` (a string or list of strings). A `null`
+value leaves a key at its built-in default. The per-invocation actions
+(`--worktree`, `--continue`, `--resume`, and the verbs) are deliberately **not**
+config keys.
 
 To get started, `claude-yolo.py init` writes a `.yolo.json` of default values
 into the current directory (it won't overwrite an existing one), which you can

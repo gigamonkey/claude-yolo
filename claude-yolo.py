@@ -175,19 +175,13 @@ def git_identity_args() -> list[str]:
     return env_args
 
 
-def setup_worktree(
-    name: str, home: pathlib.Path
-) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Create or reuse a host git worktree for a parallel session.
+def _repo_paths() -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Return (common_git, main_root, slug) for the repo containing the cwd.
 
-    The worktree lives in a centralized state dir keyed by a slug of the main repo
-    path (the same slug scheme Claude Code uses under ~/.claude/projects/). Returns
-    (worktree_path, common_git, main_root). The caller bind-mounts both the worktree
-    dir and the shared .git at their identical host paths, because the worktree
-    records an absolute path to the shared .git and vice versa — so same-path
-    mounting is what makes git work inside the container. Branch NAME is created off
-    the current HEAD with no upstream (a stray `git push` can't hit main); commits
-    land in the shared .git on the host, so work survives container exit.
+    Exits if the cwd isn't in a git repo. `slug` is the main repo path run through
+    the same scheme Claude Code uses for ~/.claude/projects/ buckets; it keys both
+    the worktree state dir (~/.claude-yolo/worktrees/<slug>/) and the docker labels
+    used to find a topic's container.
     """
     try:
         common_git_out = subprocess.run(
@@ -197,25 +191,62 @@ def setup_worktree(
             check=True,
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
-        sys.exit("--worktree must be run from inside a git repository.")
-
+        sys.exit("must be run from inside a git repository.")
     common_git = pathlib.Path(common_git_out)
     main_root = common_git.parent
-    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
+    return common_git, main_root, re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
+
+
+def _repo_slug_or_none() -> str | None:
+    """The repo slug for the cwd, or None when the cwd isn't a git repo.
+
+    Used to label bare (non-worktree) launches that happen to be inside a repo,
+    without erroring out when they aren't.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    return re.sub(r"[^a-zA-Z0-9]", "-", str(pathlib.Path(out).parent))
+
+
+def _branch_exists(name: str) -> bool:
+    return (
+        subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]).returncode
+        == 0
+    )
+
+
+def setup_worktree(
+    name: str, home: pathlib.Path, base: str = "HEAD"
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Create or reuse a host git worktree for a parallel session.
+
+    The worktree lives in a centralized state dir keyed by a slug of the main repo
+    path (the same slug scheme Claude Code uses under ~/.claude/projects/). Returns
+    (worktree_path, common_git, main_root). The caller bind-mounts both the worktree
+    dir and the shared .git at their identical host paths, because the worktree
+    records an absolute path to the shared .git and vice versa — so same-path
+    mounting is what makes git work inside the container. A new branch NAME is
+    created off `base` (default the current HEAD) with no upstream (a stray
+    `git push` can't hit main); commits land in the shared .git on the host, so work
+    survives container exit. An already-existing branch NAME is checked out as-is
+    (base ignored).
+    """
+    common_git, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / name
 
     if not worktree.exists():
         worktree.parent.mkdir(parents=True, exist_ok=True)
-        branch_exists = (
-            subprocess.run(
-                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]
-            ).returncode
-            == 0
-        )
-        if branch_exists:
+        if _branch_exists(name):
             subprocess.run(["git", "worktree", "add", str(worktree), name], check=True)
         else:
-            subprocess.run(["git", "worktree", "add", "-b", name, str(worktree)], check=True)
+            subprocess.run(["git", "worktree", "add", "-b", name, str(worktree), base], check=True)
 
     return worktree, common_git, main_root
 
@@ -232,6 +263,7 @@ YOLO_KEYS = {
     "bedrock_model": ("bedrock_model", "str"),
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
+    "base": ("base", "str"),
     "append_system_prompt": ("append_system_prompts", "list"),
 }
 
@@ -246,6 +278,7 @@ YOLO_INIT_DEFAULTS = {
     "bedrock-model": None,
     "claude-json": True,
     "ssh-agent": True,
+    "base": "HEAD",
     "append-system-prompt": [],
 }
 
@@ -338,9 +371,33 @@ PARSER = argparse.ArgumentParser(
 PARSER.add_argument(
     "verb",
     nargs="?",
-    choices=["init"],
-    help="Optional subcommand. 'init' writes a .yolo.json of default values into "
-    "the current directory and exits; omit it to run Claude in a container.",
+    choices=["init", "start", "resume", "shell", "finish", "list"],
+    help="Optional subcommand. start/resume/shell/finish take a TOPIC (a worktree "
+    "name): start a new worktree+branch, resume/open a shell in an existing one, or "
+    "finish (remove) one. 'list' shows this repo's worktrees; 'init' writes a "
+    ".yolo.json. Omit the verb to run Claude in the current directory.",
+)
+PARSER.add_argument(
+    "topic",
+    nargs="?",
+    help="Worktree/branch name for start/resume/shell/finish.",
+)
+PARSER.add_argument(
+    "--base",
+    metavar="REF",
+    default="HEAD",
+    help="For `start`: git ref the new branch is created from (default: HEAD). "
+    'Also settable as `base` in .yolo.json (e.g. "origin/main").',
+)
+PARSER.add_argument(
+    "--new",
+    action="store_true",
+    help="For `resume`: start a fresh session in the worktree instead of continuing.",
+)
+PARSER.add_argument(
+    "--force",
+    action="store_true",
+    help="For `finish`: remove the worktree even with uncommitted changes.",
 )
 PARSER.add_argument(
     "--config-dir",
@@ -428,58 +485,93 @@ RESUME_GROUP.add_argument(
 )
 
 
-def main():
-    # Split on "--" before argparse sees argv so docker_args don't confuse it
-    # docker_args come after $ARGS so last-one-wins gives user-supplied flags precedence
-    if "--" in sys.argv:
-        sep_idx = sys.argv.index("--")
-        script_argv = sys.argv[1:sep_idx]
-        docker_args = sys.argv[sep_idx + 1 :]
-    else:
-        script_argv = sys.argv[1:]
-        docker_args = []
+def running_container_for(slug: str, topic: str) -> str | None:
+    """The id of a running yolo container for this repo+topic, or None.
 
-    home = pathlib.Path.home()
-    cwd = pathlib.Path.cwd()
+    Containers are tagged with yolo.repo / yolo.worktree labels at launch, so we
+    find them by label rather than reconstructing the (suffix-laden) name.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "--filter",
+                f"label=yolo.repo={slug}",
+                "--filter",
+                f"label=yolo.worktree={topic}",
+                "--format",
+                "{{.ID}}",
+            ],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except FileNotFoundError:
+        return None
+    return out.splitlines()[0] if out else None
 
-    # Parse once with built-in defaults to dispatch the verb. `init` is terminal
-    # and independent of any existing .yolo.json (it writes one), so handle it
-    # before layering config defaults — a broken ancestor config shouldn't block
-    # scaffolding a fresh one.
-    parsed = PARSER.parse_args(script_argv)
-    if parsed.verb == "init":
-        write_default_yolo(cwd)
-        return
 
-    # Run path: layer .yolo.json defaults under the CLI flags, then re-parse so
-    # explicit flags still win. Nearest .yolo.json at/above the real cwd, overlaid
-    # on ~/.yolo.json; uses the real cwd, before any --worktree retargeting below.
-    PARSER.set_defaults(**load_yolo_config(cwd, home))
-    parsed = PARSER.parse_args(script_argv)
+def build_claude_args(
+    append_system_prompts: list,
+    *,
+    continue_session: bool = False,
+    resume=None,
+    name: str | None = None,
+) -> list[str]:
+    """The args passed to `claude` inside the container (everything after the image).
 
-    # AWS knobs are inert without bedrock mode (the bedrock block below is the only
-    # consumer), so just warn rather than failing — bedrock may be toggled off via
-    # --no-bedrock over a .yolo.json that sets it.
-    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
-        print(
-            "warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
-            file=sys.stderr,
-        )
-    config_dir = parsed.config_dir  # None => default ~/.claude
-    if config_dir and not pathlib.Path(config_dir).is_dir():
-        sys.exit(f"config-dir: not a directory: {config_dir}")
+    Always includes the container-only sandbox override and the built-in
+    "you're in a container" system prompt (plus any -p additions). Optionally adds
+    --continue / --resume [ID] and a session --name.
+    """
+    extra_system_prompt = [
+        "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
+        *append_system_prompts,
+    ]
+    args = [
+        # The container is the sandbox, so disable Claude's in-process OS sandbox.
+        # Otherwise it warns at startup that bubblewrap/socat are missing (they're
+        # deliberately not installed — they can't create namespaces in a container
+        # anyway). This overrides sandbox.enabled from the mounted settings.json for
+        # this container only; the host's settings are untouched.
+        "--settings",
+        '{"sandbox":{"enabled":false}}',
+        "--append-system-prompt",
+        "... ".join(extra_system_prompt),
+    ]
+    if continue_session:
+        args += ["--continue"]
+    elif resume is not None:
+        args += ["--resume"] + ([resume] if isinstance(resume, str) else [])
+    if name:
+        # Name the Claude session so it's identifiable in the prompt box / picker.
+        # Only for a fresh session: claude rejects --name alongside --continue/--resume.
+        args = ["--name", name, *args]
+    return args
 
-    # --worktree: run the session in a host-managed git worktree (durable) so you
-    # can work on one repo in parallel containers without a data-loss window. We
-    # retarget cwd to the worktree; the shared .git is mounted below.
-    common_git = None
-    worktree_name = parsed.worktree
-    if worktree_name:
-        cwd, common_git, main_root = setup_worktree(worktree_name, home)
-        container = f"{main_root.name}-{worktree_name}"
-    else:
-        container = cwd.name
 
+def launch_container(
+    parsed,
+    *,
+    home: pathlib.Path,
+    cwd: pathlib.Path,
+    common_git: pathlib.Path | None,
+    worktree_name: str | None,
+    slug: str | None,
+    container_base: str,
+    command: list,
+    entrypoint: str | None = None,
+    docker_args=(),
+) -> None:
+    """Assemble the `docker run` argv from the credential/config flags and exec it.
+
+    Shared by every launch path (start / resume / shell / --worktree / bare). The
+    container name starts from container_base and gains -{config}/-{profile}
+    suffixes; yolo.repo / yolo.worktree labels are stamped so the verbs can find
+    the container later. `command` is the args after the image; `entrypoint`
+    overrides the image ENTRYPOINT (used to drop into bash for `shell`).
+    """
+    container = container_base
     args = [
         "-w",
         str(cwd),
@@ -524,6 +616,7 @@ def main():
 
     # (a) Config dir. Always mounted at /home/claude/.claude (= the claude user's
     # $HOME/.claude, i.e. Claude Code's default), so no CLAUDE_CONFIG_DIR is needed.
+    config_dir = parsed.config_dir
     if config_dir:
         configpath = pathlib.Path(config_dir).resolve()
         container = f"{container}-{configpath.name}"
@@ -554,39 +647,16 @@ def main():
         if parsed.bedrock_model:
             args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
 
+    # Labels let the verbs (shell/finish/list) find this container later, regardless
+    # of the name suffixes above.
+    if slug:
+        args += ["--label", f"yolo.repo={slug}"]
+    if worktree_name:
+        args += ["--label", f"yolo.worktree={worktree_name}"]
+
     build_docker_image()
 
-    extra_system_prompt = [
-        "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
-        *parsed.append_system_prompts,
-    ]
-
-    claude_args = [
-        # The container is the sandbox, so disable Claude's in-process OS sandbox.
-        # Otherwise it warns at startup that bubblewrap/socat are missing (they're
-        # deliberately not installed — they can't create namespaces in a container
-        # anyway). This overrides sandbox.enabled from the mounted settings.json for
-        # this container only; the host's settings are untouched.
-        "--settings",
-        '{"sandbox":{"enabled":false}}',
-        "--append-system-prompt",
-        "... ".join(extra_system_prompt),
-    ]
-
-    # Forward a resume/continue flag to claude. The two are mutually exclusive (argparse
-    # enforces it). --resume takes an optional SESSION_ID; bare --resume (const True) opens
-    # claude's interactive picker, which works because we run -it.
-    if parsed.continue_session:
-        claude_args += ["--continue"]
-    elif parsed.resume is not None:
-        claude_args += ["--resume"] + ([parsed.resume] if isinstance(parsed.resume, str) else [])
-
-    if worktree_name and not (parsed.continue_session or parsed.resume is not None):
-        # Name the Claude session so it's identifiable in the prompt box / /resume picker.
-        # Skipped when resuming: the session already exists with its own name, and claude
-        # rejects --name alongside --continue/--resume.
-        claude_args = ["--name", worktree_name, *claude_args]
-
+    entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
         "docker",
         "run",
@@ -595,9 +665,10 @@ def main():
         "--name",
         container,
         *args,
+        *entry,
         *docker_args,
         DOCKER_IMAGE,
-        *claude_args,
+        *command,
     ]
 
     sep = "- " * 40
@@ -605,6 +676,227 @@ def main():
     print(" ".join(run_cmd))
     print(sep)
     os.execvp("docker", run_cmd)
+
+
+def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
+    """`finish` verb: remove a worktree, keep its branch.
+
+    Guards against the real loss vectors — a running container holding the mount,
+    and uncommitted changes (unless --force) — then removes the worktree and prints
+    a reminder that the branch is kept (and whether it's been pushed).
+    """
+    _, _, slug = _repo_paths()
+    worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    if not worktree.is_dir():
+        sys.exit(f"no worktree '{topic}'; nothing to finish.")
+    if running_container_for(slug, topic):
+        sys.exit(f"a container is running for '{topic}'; exit it first.")
+    dirty = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if dirty and not force:
+        sys.exit(f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force.")
+
+    remove = ["git", "worktree", "remove"] + (["--force"] if force else []) + [str(worktree)]
+    subprocess.run(remove, check=True)
+    subprocess.run(["git", "worktree", "prune"])
+
+    # Best-effort note about where the (kept) branch stands relative to its upstream.
+    upstream = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", f"{topic}@{{upstream}}"],
+        capture_output=True,
+        text=True,
+    )
+    if upstream.returncode == 0:
+        unpushed = subprocess.run(
+            ["git", "rev-list", "--count", f"{upstream.stdout.strip()}..{topic}"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        note = "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
+    else:
+        note = "local only — push it to open a PR"
+    print(f"Removed worktree for '{topic}'. Branch '{topic}' kept ({note}).")
+
+
+def do_list(home: pathlib.Path) -> None:
+    """`list` verb: show this repo's worktrees, their branch, and running state."""
+    _, _, slug = _repo_paths()
+    root = home / ".claude-yolo" / "worktrees" / slug
+    topics = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    if not topics:
+        print("No worktrees for this repo.")
+        return
+    for wt in topics:
+        topic = wt.name
+        branch = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(wt), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        running = running_container_for(slug, topic)
+        flags = "".join(
+            f"  {f}" for f in (["dirty"] if dirty else []) + (["running"] if running else [])
+        )
+        print(f"{topic}  [{branch}]{flags}")
+
+
+def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """(worktree_path, main_root, slug) for an existing topic; doesn't create it."""
+    common_git, main_root, slug = _repo_paths()
+    return home / ".claude-yolo" / "worktrees" / slug / topic, main_root, slug
+
+
+def main():
+    # Split on "--" before argparse sees argv so docker_args don't confuse it
+    # docker_args come after $ARGS so last-one-wins gives user-supplied flags precedence
+    if "--" in sys.argv:
+        sep_idx = sys.argv.index("--")
+        script_argv = sys.argv[1:sep_idx]
+        docker_args = sys.argv[sep_idx + 1 :]
+    else:
+        script_argv = sys.argv[1:]
+        docker_args = []
+
+    home = pathlib.Path.home()
+    cwd = pathlib.Path.cwd()
+
+    # Parse once with built-in defaults to dispatch the verb. The terminal verbs
+    # (init/list/finish, and shell's exec-into-running case) don't need credential
+    # config, so they run here, before .yolo.json is layered in.
+    parsed = PARSER.parse_args(script_argv)
+    verb, topic = parsed.verb, parsed.topic
+
+    if verb in ("start", "resume", "shell", "finish") and not topic:
+        sys.exit(f"`{verb}` needs a topic name, e.g. `claude-yolo {verb} my-topic`.")
+    if topic and verb not in ("start", "resume", "shell", "finish"):
+        sys.exit(f"unexpected argument: {topic!r}")
+    if parsed.new and verb != "resume":
+        sys.exit("--new only applies to `resume`.")
+    if parsed.force and verb != "finish":
+        sys.exit("--force only applies to `finish`.")
+
+    if verb == "init":
+        write_default_yolo(cwd)
+        return
+    if verb == "list":
+        do_list(home)
+        return
+    if verb == "finish":
+        do_finish(topic, home, force=parsed.force)
+        return
+    if verb == "shell":
+        worktree, _, slug = _worktree_dir(topic, home)
+        if not worktree.is_dir():
+            sys.exit(f"no worktree '{topic}'; start one with `claude-yolo start {topic}`.")
+        cid = running_container_for(slug, topic)
+        if cid:
+            print(f"Opening a shell in the running container for '{topic}' ({cid[:12]}).")
+            os.execvp("docker", ["docker", "exec", "-it", cid, "/bin/bash"])
+            return  # execvp doesn't return on success; guard the stubbed/failed case
+        # No container running: fall through to launch a fresh bash container below.
+
+    # Launch path (start / resume / shell-fresh / --worktree / bare): layer the
+    # .yolo.json defaults under the CLI flags, then re-parse so explicit flags win.
+    # Uses the real cwd, before any worktree retargeting below.
+    PARSER.set_defaults(**load_yolo_config(cwd, home))
+    parsed = PARSER.parse_args(script_argv)
+
+    # AWS knobs are inert without bedrock mode (the bedrock block is the only
+    # consumer), so just warn rather than failing — bedrock may be toggled off via
+    # --no-bedrock over a .yolo.json that sets it.
+    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
+        print(
+            "warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
+            file=sys.stderr,
+        )
+    if parsed.config_dir and not pathlib.Path(parsed.config_dir).is_dir():
+        sys.exit(f"config-dir: not a directory: {parsed.config_dir}")
+
+    # Resolve the worktree (if any) and the trailing command per verb.
+    common_git = None
+    slug = None
+    worktree_name = None
+    entrypoint = None
+
+    if verb == "start":
+        worktree, main_root, slug = _worktree_dir(topic, home)
+        if worktree.exists() or _branch_exists(topic):
+            sys.exit(f"'{topic}' already exists; resume it with `claude-yolo resume {topic}`.")
+        cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
+        worktree_name = topic
+        container_base = f"{main_root.name}-{topic}"
+        command = build_claude_args(parsed.append_system_prompts, name=topic)
+
+    elif verb == "resume":
+        worktree, main_root, slug = _worktree_dir(topic, home)
+        if not worktree.is_dir():
+            sys.exit(f"no worktree '{topic}'; start one with `claude-yolo start {topic}`.")
+        if parsed.new and (parsed.continue_session or parsed.resume is not None):
+            sys.exit("--new can't be combined with --continue/--resume.")
+        cwd, common_git = worktree, _repo_paths()[0]
+        worktree_name = topic
+        container_base = f"{main_root.name}-{topic}"
+        if parsed.new:
+            command = build_claude_args(parsed.append_system_prompts, name=topic)
+        elif parsed.resume is not None:
+            command = build_claude_args(parsed.append_system_prompts, resume=parsed.resume)
+        else:
+            command = build_claude_args(parsed.append_system_prompts, continue_session=True)
+
+    elif verb == "shell":
+        # Fresh bash container (the exec-into-running case already returned above).
+        worktree, main_root, slug = _worktree_dir(topic, home)
+        cwd, common_git = worktree, _repo_paths()[0]
+        worktree_name = topic
+        container_base = f"{main_root.name}-{topic}"
+        command = []
+        entrypoint = "/bin/bash"
+
+    else:
+        # Bare launch, or the legacy --worktree flag.
+        worktree_name = parsed.worktree
+        if worktree_name:
+            cwd, common_git, main_root = setup_worktree(worktree_name, home, base=parsed.base)
+            slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
+            container_base = f"{main_root.name}-{worktree_name}"
+            name = (
+                worktree_name
+                if not (parsed.continue_session or parsed.resume is not None)
+                else None
+            )
+        else:
+            slug = _repo_slug_or_none()
+            container_base = cwd.name
+            name = None
+        command = build_claude_args(
+            parsed.append_system_prompts,
+            continue_session=parsed.continue_session,
+            resume=parsed.resume,
+            name=name,
+        )
+
+    launch_container(
+        parsed,
+        home=home,
+        cwd=cwd,
+        common_git=common_git,
+        worktree_name=worktree_name,
+        slug=slug,
+        container_base=container_base,
+        command=command,
+        entrypoint=entrypoint,
+        docker_args=docker_args,
+    )
 
 
 if __name__ == "__main__":

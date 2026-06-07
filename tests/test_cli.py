@@ -195,7 +195,7 @@ def test_worktree_mounts_shared_git_and_names_session(
     git = main_root / ".git"
     for d in (home, work, wt, git):
         d.mkdir(parents=True)
-    monkeypatch.setattr(cy, "setup_worktree", lambda name, h: (wt, git, main_root))
+    monkeypatch.setattr(cy, "setup_worktree", lambda name, h, base="HEAD": (wt, git, main_root))
 
     argv = run_cli(["--worktree", "feat"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")

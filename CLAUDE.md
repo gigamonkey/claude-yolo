@@ -25,11 +25,17 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./claude-yolo.py -c                       # resume most recent session in this dir
 ./claude-yolo.py -r                       # interactive session picker
 ./claude-yolo.py -r SESSION_ID            # resume a specific session
+./claude-yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
+./claude-yolo.py resume fix-auth          # re-enter that worktree, continue the session
+./claude-yolo.py shell fix-auth           # bash shell in that worktree's container
+./claude-yolo.py finish fix-auth          # remove the worktree, keep the branch
+./claude-yolo.py list                     # this repo's worktrees
 ```
 
 All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`, and
-`--ssh-agent` are **orthogonal flags** — any reasonable combination is valid.
-There are no positional args anymore.
+`--ssh-agent` are **orthogonal flags** — any reasonable combination is valid. The
+only positional args are an optional `verb` (`init`/`start`/`resume`/`shell`/
+`finish`/`list`) and its `TOPIC`; see [Worktree workflow verbs](#worktree-workflow-verbs).
 
 Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
@@ -143,9 +149,10 @@ accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `bedrock`, `aws-profile`, `aws-region`, `bedrock-model`,
-`claude-json`, `ssh-agent`, `append-system-prompt` (string or list of strings).
-Per-invocation **actions** — `--worktree`, `--continue`, `--resume` — are
-deliberately **not** config keys; putting them in a `.yolo.json` is a hard error.
+`claude-json`, `ssh-agent`, `base`, `append-system-prompt` (string or list of
+strings). Per-invocation **actions** — `--worktree`, `--continue`, `--resume`,
+and the verbs — are deliberately **not** config keys; putting them in a
+`.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
 Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
 at the built-in default" (the loader skips it). Unknown keys, wrong types, and
@@ -154,8 +161,9 @@ malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
 ### `init` verb
 
 `claude-yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
-values into the cwd, then exits — it does **not** run a container. `init` is the
-sole value of an optional positional `verb` (`choices=["init"]`); with no verb,
+values into the cwd, then exits — it does **not** run a container. `init` is one
+value of the optional positional `verb` (`choices=["init", "start", "resume",
+"shell", "finish", "list"]`; see [verbs](#worktree-workflow-verbs)); with no verb,
 `main` proceeds to the run path. The verb is dispatched off a *first* `parse_args`
 **before** any `.yolo.json` is loaded — so a broken ancestor/global config can't
 block scaffolding a fresh one — and the run path then re-parses with the config
@@ -164,7 +172,7 @@ defaults layered in. `init` refuses to overwrite an existing `.yolo.json`.
 The scaffold lists every key. Keys whose default is unset (`config-dir`,
 `aws-profile`, `aws-region`, `bedrock-model`) are written as `null`; the rest
 get their real defaults (`bedrock: false`, `claude-json`/`ssh-agent: true`,
-`append-system-prompt: []`). So an *unedited* scaffold is inert at the top level
+`base: "HEAD"`, `append-system-prompt: []`). So an *unedited* scaffold is inert at the top level
 (it just restates the defaults) — but note those non-null booleans, being
 explicit, would **override** a `~/.yolo.json` that set them differently, since a
 project `.yolo.json` is the higher-precedence layer. The `YOLO_INIT_DEFAULTS`
@@ -176,19 +184,66 @@ to override it back off. AWS sub-keys without bedrock mode now just **warn** (an
 are ignored) rather than erroring, since bedrock may legitimately be toggled off
 on the CLI over a `.yolo.json` that set the AWS knobs.
 
-## `--worktree NAME` (parallel sessions on one repo)
+## Worktree workflow verbs
 
-Orthogonal to the credential modes (composes with any of them). `setup_worktree`
-creates/reuses a git worktree on branch `NAME` (off current `HEAD`, no upstream)
-at `~/.claude-yolo/worktrees/<repo-slug>/NAME`, where `<repo-slug>` is the main
-repo path slugified the way Claude names `~/.claude/projects/` buckets
-(`re.sub(r"[^a-zA-Z0-9]", "-", path)`). `main` then retargets `cwd` to the
-worktree (so `-w` and the `{cwd}:{cwd}` mount point there) and **additionally
-mounts the shared `.git` at its identical host path** — both same-path mounts are
-required because a linked worktree stores *absolute* paths to its `.git` and back.
-The session is named via `claude --name NAME`. Durability is the point: commits
-land in the host's shared `.git` and uncommitted edits live in the host worktree
-dir, so a container exit loses nothing. Must be run from inside a git repo.
+The opinionated front door to the worktree machinery: most work is meant to land
+on a branch that can be merged or PR'd. All take a `TOPIC` (the worktree/branch
+name) and run from inside a git repo.
+
+- **`start TOPIC`** — create a new worktree + branch `TOPIC` off `--base`
+  (default `HEAD`; see `base` below) and launch a container with a fresh session
+  named `TOPIC`. **Errors if the worktree or branch already exists** (use
+  `resume`).
+- **`resume TOPIC`** — launch a container on an existing worktree. Default
+  `claude --continue` (most recent session); `--new` starts a fresh named
+  session; `-r [ID]` resumes a specific one / opens the picker. **Errors if the
+  worktree doesn't exist** (use `start`).
+- **`shell TOPIC`** — a bash shell on the worktree. If a container is **running**
+  for it (label match) → `docker exec -it <id> /bin/bash`; otherwise a fresh
+  ephemeral container with `--entrypoint /bin/bash`.
+- **`finish TOPIC`** — `git worktree remove` the worktree, **keep the branch**.
+  Refuses if a container is running, or on uncommitted changes (unless `--force`).
+  Leaves transcripts (they self-expire via `cleanupPeriodDays`). Prints whether
+  the kept branch is pushed.
+- **`list`** — the repo's worktrees with branch + `dirty`/`running` flags.
+
+Implementation shape:
+
+- **Dispatch is two-tier** (`main`). Terminal verbs (`init`, `list`, `finish`,
+  and `shell`'s exec-into-running case) run off the *first* `parse_args`, before
+  `.yolo.json` is layered — they don't need credential config. Launch verbs
+  (`start`, `resume`, `shell`-fresh, `--worktree`, bare) then load config,
+  re-parse, and call `launch_container`.
+- **`launch_container`** is the single assembly+exec path shared by every launch
+  (extracted from the old inline `main`): mounts, ssh-agent block, the four
+  credential/config blocks, labels, `--entrypoint` override, then `os.execvp`. It
+  takes `container_base`, `command` (args after the image), and optional
+  `entrypoint`. `build_claude_args` builds the `claude` command (settings,
+  built-in prompt, `--continue`/`--resume`, `--name`).
+- **Containers are found by docker label, not name.** Every launch is stamped
+  `--label yolo.repo=<repo-slug>` (and `yolo.worktree=<topic>` for worktrees);
+  `running_container_for(slug, topic)` queries `docker ps --filter label=…`. This
+  is robust to the `-{config}`/`-{profile}` name suffixes. `shell`/`finish`/`list`
+  rely on it.
+- Verb-only flags: `--base REF` (config-backed via the `base` key; consumed only
+  by `start`/`--worktree`), `--new` (resume), `--force` (finish). `--new`/`--force`
+  are validated against their verb in dispatch.
+
+## `--worktree NAME` (the underlying primitive)
+
+`start`/`resume` are sugar over this. Orthogonal to the credential modes (composes
+with any of them). `setup_worktree` creates/reuses a git worktree on branch `NAME`
+(off `base`, default current `HEAD`, no upstream) at
+`~/.claude-yolo/worktrees/<repo-slug>/NAME`, where `<repo-slug>` is the main repo
+path slugified the way Claude names `~/.claude/projects/` buckets
+(`re.sub(r"[^a-zA-Z0-9]", "-", path)`, factored into `_repo_paths`). `main` then
+retargets `cwd` to the worktree (so `-w` and the `{cwd}:{cwd}` mount point there)
+and **additionally mounts the shared `.git` at its identical host path** — both
+same-path mounts are required because a linked worktree stores *absolute* paths to
+its `.git` and back. The session is named via `claude --name NAME`. Durability is
+the point: commits land in the host's shared `.git` and uncommitted edits live in
+the host worktree dir, so a container exit loses nothing. Must be run from inside
+a git repo.
 
 ## `--continue` / `-c` and `--resume [SESSION_ID]` / `-r` (resume a session)
 
@@ -284,4 +339,7 @@ never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `git_identity_args`, and `os.execvp`, then asserts on the captured `docker run`
 argv. `test_config.py` covers `.yolo.json` parsing/merging and the `init`
 scaffold; `test_cli.py` covers verb dispatch and arg assembly across the
-credential/config axes. Keep them green when changing flags or mounts.
+credential/config axes. `test_verbs.py` covers the worktree verbs against a
+**real throwaway git repo** (so the actual `git worktree` machinery runs),
+stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
+Keep them green when changing flags or mounts.
