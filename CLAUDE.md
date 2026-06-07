@@ -88,8 +88,11 @@ both paths run identical code.
    `/usr/local/bin/claude`, which Claude Code's `/doctor` flags as a broken
    install and which self-update can't manage.
 2. **Substitutes the host UID** into the Dockerfile's `useradd` so the
-   in-container `claude` user matches `os.getuid()`. This is what makes
-   bind-mounted sockets (SSH agent) accessible inside the container — keep it.
+   in-container `claude` user matches `os.getuid()`. This keeps bind-mount file
+   ownership correct: working-dir edits land on the host owned by the user, and
+   the chmod-600 credentials file and mounted `~/.claude` stay readable inside —
+   keep it. (SSH-agent socket access is *not* what needs this; that's granted
+   separately by group-0 membership — see the gotchas.)
 3. **Checks host login** (`ensure_logged_in` / `_is_logged_in`) before launch in
    the keychain modes (skipped for Bedrock). Runs `claude auth status --json` and
    reads the `loggedIn` field; if logged out, offers to run `claude auth login`

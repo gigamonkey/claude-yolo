@@ -162,8 +162,12 @@ container than added here.
 ### 2. Matches your user ID
 
 The Dockerfile creates a `claude` user whose UID is substituted at build time to
-match your host UID (`os.getuid()`). This is what lets bind-mounted sockets — like
-your SSH agent — actually be readable inside the container.
+match your host UID (`os.getuid()`). This keeps file ownership straight across the
+bind mounts: anything Claude writes in the working directory lands on the host
+owned by *you*, and the container can in turn read host-owned files — including the
+`chmod 600` credentials file and your mounted `~/.claude` config. (The user is also
+added to group 0 so it can reach the SSH agent socket — see
+[below](#why-forward-the-ssh-agent).)
 
 ### 3. Extracts your credentials
 
@@ -233,9 +237,11 @@ hands back the *signature*. The key itself never leaves the agent.
 claude-yolo bind-mounts that socket into the container and sets `SSH_AUTH_SOCK`
 inside it to point at the mount. So `ssh` (and `git` over SSH) inside the
 container authenticates through your host agent — Claude can push to a private
-repo, but it never gets to read the private key. (This is also why step 2 matches
-the container user's UID to yours: socket permissions are UID-based, so without
-the matching UID the container couldn't open the agent socket.)
+repo, but it never gets to read the private key. (The socket Docker Desktop
+exposes is owned `root:root` with mode `srw-rw----`, so the container's `claude`
+user is added to group 0 — root's group — to get the group-write permission that
+`connect()` needs. This adds no real privilege: the user already has passwordless
+`sudo`, and the container is the sandbox.)
 
 The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
 key fingerprint, so connections don't fail or hang on an unknown-host prompt.
