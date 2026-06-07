@@ -722,13 +722,15 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
 
 
 def do_list(home: pathlib.Path) -> None:
-    """`list` verb: show this repo's worktrees, their branch, and running state."""
+    """`list` verb: show this repo's worktrees, their branch, status, and directory."""
     _, _, slug = _repo_paths()
     root = home / ".claude-yolo" / "worktrees" / slug
     topics = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
     if not topics:
         print("No worktrees for this repo.")
         return
+
+    rows = []
     for wt in topics:
         topic = wt.name
         branch = subprocess.run(
@@ -744,10 +746,25 @@ def do_list(home: pathlib.Path) -> None:
             ).stdout.strip()
         )
         running = running_container_for(slug, topic)
-        flags = "".join(
-            f"  {f}" for f in (["dirty"] if dirty else []) + (["running"] if running else [])
+        status = ", ".join((["dirty"] if dirty else []) + (["running"] if running else [])) or "-"
+        try:
+            directory = "~/" + str(wt.relative_to(home))
+        except ValueError:
+            directory = str(wt)
+        rows.append((topic, branch, status, directory))
+
+    headers = ("TOPIC", "BRANCH", "STATUS", "DIRECTORY")
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+
+    def fmt(cols):
+        # pad every column except the last so there's no trailing whitespace
+        return "  ".join(
+            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
         )
-        print(f"{topic}  [{branch}]{flags}")
+
+    print(fmt(headers))
+    for row in rows:
+        print(fmt(row))
 
 
 def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:

@@ -187,8 +187,12 @@ def test_list_shows_worktrees(cy, run_cli, repo, capsys):
     run_cli(["start", "beta"], home=home, cwd=r)
     capsys.readouterr()  # clear
     run_cli(["list"], home=home, cwd=r)
-    out = capsys.readouterr().out
-    assert "alpha" in out and "beta" in out
+    lines = capsys.readouterr().out.splitlines()
+    # header row, then one row per topic, each showing its worktree directory
+    assert lines[0].split() == ["TOPIC", "BRANCH", "STATUS", "DIRECTORY"]
+    body = "\n".join(lines[1:])
+    assert "alpha" in body and "beta" in body
+    assert "~/.claude-yolo/worktrees" in body  # the worktree directory column
 
 
 def test_list_empty(cy, run_cli, repo, capsys):
