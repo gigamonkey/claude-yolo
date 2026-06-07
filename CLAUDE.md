@@ -110,8 +110,19 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
 
 ## Conventions / gotchas
 
-- **macOS-only as written.** Credential extraction uses the macOS `security`
-  CLI and `SSH_AUTH_SOCK` is assumed present.
+- **macOS + Docker Desktop only as written.** Credential extraction uses the
+  macOS `security` CLI. SSH agent forwarding mounts Docker Desktop's
+  `/run/host-services/ssh-auth.sock` (the VM-side socket the Desktop proxies to
+  the host agent), NOT the raw host `$SSH_AUTH_SOCK` — that socket's listener
+  lives in the macOS kernel and is unreachable from the container's Linux VM
+  (the mounted inode is dead: `connect()` → ECONNREFUSED). The host must have a
+  running ssh-agent for forwarding to work. The Desktop socket is mounted
+  `srw-rw---- root:root`, so the in-container `claude` user (uid = host uid, a
+  non-root gid) can't `connect()` to it by default — `connect()` needs write
+  perm on the socket inode, and the user is neither owner nor in group 0. Fix:
+  `useradd -G root` puts `claude` in group 0, granting the socket's group-rw. No
+  real privilege added (the user already has NOPASSWD sudo; the container is the
+  sandbox).
 - **In-process sandbox is disabled deliberately — the *container* is the
   sandbox.** We append `--settings '{"sandbox":{"enabled":false}}'` to the claude
   args so that, when the mounted `~/.claude/settings.json` has

@@ -17,7 +17,9 @@ import tempfile
 DOCKER_IMAGE = "claude-yolo:latest"
 
 # Dockerfile template — uid is substituted at runtime to match the host user so that
-# bind-mounted sockets (e.g. SSH agent) are accessible inside the container.
+# files in the bind-mounted working directory are owned by (and writable as) the in-container
+# user. The user is also put in group 0 so it can connect to Docker Desktop's root-owned
+# ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below).
 DOCKERFILE_TEMPLATE = """\
 FROM ubuntu:24.04
 
@@ -26,8 +28,12 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl ripgrep fd-find build-essential vim && ln -s /usr/bin/fdfind /usr/local/bin/fd
 # uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-# UID {uid} matches the host user so bind-mounted sockets (e.g. SSH agent) are accessible
-RUN useradd -m -s /bin/bash --uid {uid} claude
+# UID {uid} matches the host user so bind-mounted working-dir files are owned/writable.
+# Group 0 (root) membership grants access to Docker Desktop's ssh-auth.sock, which is
+# mounted srw-rw---- root:root — without it a non-root user gets EACCES on connect(). This
+# adds no real privilege: the claude user already has NOPASSWD sudo, and the container is
+# the sandbox.
+RUN useradd -m -s /bin/bash --uid {uid} -G root claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
 
@@ -297,9 +303,13 @@ def main():
         "-v", f"{cwd}:{cwd}",
         # Hostname set to working dir basename so Claude Code status line shows project name without git
         "--hostname", cwd.name,
-        # Forward host ssh-agent into the container using the live socket path
-        # Claude user ID in container is set to os.getuid() at build time so the socket is accessible
-        "-v", f"{os.environ['SSH_AUTH_SOCK']}:/run/ssh-agent",
+        # Forward the host ssh-agent via Docker Desktop's magic socket. We canNOT bind-mount
+        # the raw host $SSH_AUTH_SOCK: that socket's listener lives in the macOS kernel, while
+        # the container runs in Docker Desktop's Linux VM, so the mounted inode is dead
+        # (connect() -> ECONNREFUSED). /run/host-services/ssh-auth.sock is a socket the VM
+        # itself listens on and proxies through to the host agent. It's mounted srw-rw----
+        # root:root, so the claude user must be in group 0 to connect (see the useradd line).
+        "-v", "/run/host-services/ssh-auth.sock:/run/ssh-agent",
         "-e", "SSH_AUTH_SOCK=/run/ssh-agent",
         # Mount host known_hosts so SSH host key verification succeeds
         "-v", f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
