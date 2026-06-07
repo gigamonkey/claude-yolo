@@ -216,9 +216,9 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
     return worktree, common_git, main_root
 
 
-# .yolo config keys -> (argparse dest, kind). These are standing environment /
+# .yolo.json config keys -> (argparse dest, kind). These are standing environment /
 # credential preferences only; per-invocation *actions* (--worktree, --continue,
-# --resume) are intentionally CLI-only and rejected if they appear in a .yolo.
+# --resume) are intentionally CLI-only and rejected if they appear in a .yolo.json.
 # "path" values get ~ expanded (a JSON file can't rely on shell expansion).
 YOLO_KEYS = {
     "config_dir":           ("config_dir", "path"),
@@ -233,19 +233,19 @@ YOLO_KEYS = {
 
 
 def _parse_yolo_file(path: pathlib.Path) -> dict:
-    """Parse one .yolo JSON file into {argparse_dest: value}, type-checked."""
+    """Parse one .yolo.json file into {argparse_dest: value}, type-checked."""
     try:
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as e:
-        sys.exit(f"{path}: cannot read .yolo config: {e}")
+        sys.exit(f"{path}: cannot read .yolo.json config: {e}")
     if not isinstance(raw, dict):
-        sys.exit(f"{path}: .yolo must contain a JSON object")
+        sys.exit(f"{path}: .yolo.json must contain a JSON object")
 
     out = {}
     for key, val in raw.items():
         norm = key.replace("-", "_")
         if norm not in YOLO_KEYS:
-            sys.exit(f"{path}: unknown .yolo option {key!r}")
+            sys.exit(f"{path}: unknown .yolo.json option {key!r}")
         dest, kind = YOLO_KEYS[norm]
         if kind == "bool":
             if not isinstance(val, bool):
@@ -265,23 +265,23 @@ def _parse_yolo_file(path: pathlib.Path) -> dict:
 
 
 def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> dict:
-    """Merge ~/.yolo (base) with the nearest .yolo at/above `start` (overlay).
+    """Merge ~/.yolo.json (base) with the nearest .yolo.json at/above `start`.
 
-    Precedence low->high: ~/.yolo < nearest .yolo < CLI args (the caller applies
-    the returned dict via PARSER.set_defaults, so explicit flags still win).
+    Precedence low->high: ~/.yolo.json < nearest .yolo.json < CLI args (the caller
+    applies the returned dict via PARSER.set_defaults, so explicit flags still win).
     append_system_prompts concatenates across the two files; every other key is
     overridden by the higher-precedence layer. The two files may be the same path
-    (e.g. cwd is under $HOME with no closer .yolo); it's then loaded once.
+    (e.g. cwd is under $HOME with no closer .yolo.json); it's then loaded once.
     """
     files = []
-    home_file = home / ".yolo"
+    home_file = home / ".yolo.json"
     if home_file.is_file():
         files.append(home_file.resolve())
     for cur in [start.resolve(), *start.resolve().parents]:
-        cand = cur / ".yolo"
+        cand = cur / ".yolo.json"
         if cand.is_file():
             if cand.resolve() not in files:
-                files.append(cand.resolve())  # nearest overlays ~/.yolo
+                files.append(cand.resolve())  # nearest overlays ~/.yolo.json
             break
 
     merged = {}
@@ -297,8 +297,8 @@ def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> dict:
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
-        "Defaults can be set in a .yolo JSON file (nearest at/above the cwd, "
-        "overlaid on ~/.yolo); CLI flags override it. Arguments after -- are "
+        "Defaults can be set in a .yolo.json file (nearest at/above the cwd, "
+        "overlaid on ~/.yolo.json); CLI flags override it. Arguments after -- are "
         "passed directly to docker run (last-one-wins, so they override defaults)."
     ),
 )
@@ -315,7 +315,7 @@ PARSER.add_argument(
     default=False,
     help="Authenticate/bill via AWS Bedrock instead of the Claude keychain. "
          "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1. "
-         "Use --no-bedrock to override a .yolo that enables it.",
+         "Use --no-bedrock to override a .yolo.json that enables it.",
 )
 PARSER.add_argument(
     "--aws-profile",
@@ -402,15 +402,15 @@ def main():
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
 
-    # Load .yolo config (nearest .yolo at/above the cwd, overlaid on ~/.yolo) and
-    # apply it as argparse defaults, so explicit CLI flags still win. Uses the real
-    # cwd, before any --worktree retargeting below.
+    # Load .yolo.json config (nearest at/above the cwd, overlaid on ~/.yolo.json)
+    # and apply it as argparse defaults, so explicit CLI flags still win. Uses the
+    # real cwd, before any --worktree retargeting below.
     PARSER.set_defaults(**load_yolo_config(cwd, home))
     parsed = PARSER.parse_args(script_argv)
 
     # AWS knobs are inert without bedrock mode (the bedrock block below is the only
     # consumer), so just warn rather than failing — bedrock may be toggled off via
-    # --no-bedrock over a .yolo that sets it.
+    # --no-bedrock over a .yolo.json that sets it.
     if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
         print("warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
               file=sys.stderr)

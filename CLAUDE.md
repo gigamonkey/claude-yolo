@@ -27,12 +27,12 @@ All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`, and
 `--ssh-agent` are **orthogonal flags** — any reasonable combination is valid.
 There are no positional args anymore.
 
-Defaults for most flags can also live in a `.yolo` JSON file (see the config
+Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
 
 ```bash
-echo '{"config-dir": "~/.claude-work", "ssh-agent": false}' > .yolo
-./claude-yolo.py                 # picks up .yolo; equivalent to passing those flags
+echo '{"config-dir": "~/.claude-work", "ssh-agent": false}' > .yolo.json
+./claude-yolo.py                 # picks up .yolo.json; equals passing those flags
 ./claude-yolo.py --ssh-agent     # explicit flag still overrides the file
 ```
 
@@ -115,40 +115,41 @@ Keychain credential extraction happens **iff not `--bedrock`**; the config-dir m
 the `~/.claude.json` mount, and the Bedrock env are otherwise independent — so e.g.
 `--bedrock --config-dir ~/.claude-bdr` (Bedrock auth, separate profile) now works,
 which the old positional scheme could not express. `--bedrock` is a
-`BooleanOptionalAction`, so `--no-bedrock` can turn off a `.yolo` that enables it.
+`BooleanOptionalAction`, so `--no-bedrock` can turn off a `.yolo.json` that
+enables it.
 
-## `.yolo` config file (flag defaults)
+## `.yolo.json` config file (flag defaults)
 
-A `.yolo` **JSON object** supplies defaults for most flags. `load_yolo_config`
-applies them via `PARSER.set_defaults` *before* `parse_args`, so explicit CLI
-flags still win. Two layers, merged low→high:
+A `.yolo.json` **JSON object** supplies defaults for most flags.
+`load_yolo_config` applies them via `PARSER.set_defaults` *before* `parse_args`,
+so explicit CLI flags still win. Two layers, merged low→high:
 
-1. `~/.yolo` (the base), then
-2. the **nearest `.yolo` at or above the cwd** (the overlay) — found by walking
-   cwd's ancestors and taking the first hit; only that one project file is used,
-   not every ancestor. Searched against the *real* cwd, before any `--worktree`
-   retargeting. If the nearest file *is* `~/.yolo` (cwd under `$HOME`, nothing
-   closer), it's loaded once.
+1. `~/.yolo.json` (the base), then
+2. the **nearest `.yolo.json` at or above the cwd** (the overlay) — found by
+   walking cwd's ancestors and taking the first hit; only that one project file
+   is used, not every ancestor. Searched against the *real* cwd, before any
+   `--worktree` retargeting. If the nearest file *is* `~/.yolo.json` (cwd under
+   `$HOME`, nothing closer), it's loaded once.
 
-Precedence overall: `~/.yolo` < nearest `.yolo` < CLI flags. Per key the higher
-layer **overrides**, except `append-system-prompt`, which **concatenates** across
-both files and then the CLI `-p` values (so prompts accumulate; everything else
-replaces).
+Precedence overall: `~/.yolo.json` < nearest `.yolo.json` < CLI flags. Per key
+the higher layer **overrides**, except `append-system-prompt`, which
+**concatenates** across both files and then the CLI `-p` values (so prompts
+accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `bedrock`, `aws-profile`, `aws-region`, `bedrock-model`,
 `claude-json`, `ssh-agent`, `append-system-prompt` (string or list of strings).
 Per-invocation **actions** — `--worktree`, `--continue`, `--resume` — are
-deliberately **not** config keys; putting them in a `.yolo` is a hard error.
+deliberately **not** config keys; putting them in a `.yolo.json` is a hard error.
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
 Booleans must be JSON `true`/`false`. Unknown keys, wrong types, and malformed
 JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
 
 Note `--bedrock` is a `BooleanOptionalAction` partly *because* of this file: a
-`.yolo` can set `"bedrock": true`, and `--no-bedrock` is then the only way to
-override it back off. AWS sub-keys without bedrock mode now just **warn** (and
+`.yolo.json` can set `"bedrock": true`, and `--no-bedrock` is then the only way
+to override it back off. AWS sub-keys without bedrock mode now just **warn** (and
 are ignored) rather than erroring, since bedrock may legitimately be toggled off
-on the CLI over a `.yolo` that set the AWS knobs.
+on the CLI over a `.yolo.json` that set the AWS knobs.
 
 ## `--worktree NAME` (parallel sessions on one repo)
 
