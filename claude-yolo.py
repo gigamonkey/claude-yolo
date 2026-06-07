@@ -216,11 +216,90 @@ def setup_worktree(name: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
     return worktree, common_git, main_root
 
 
+# .yolo config keys -> (argparse dest, kind). These are standing environment /
+# credential preferences only; per-invocation *actions* (--worktree, --continue,
+# --resume) are intentionally CLI-only and rejected if they appear in a .yolo.
+# "path" values get ~ expanded (a JSON file can't rely on shell expansion).
+YOLO_KEYS = {
+    "config_dir":           ("config_dir", "path"),
+    "bedrock":              ("bedrock", "bool"),
+    "aws_profile":          ("aws_profile", "str"),
+    "aws_region":           ("aws_region", "str"),
+    "bedrock_model":        ("bedrock_model", "str"),
+    "claude_json":          ("claude_json", "bool"),
+    "ssh_agent":            ("ssh_agent", "bool"),
+    "append_system_prompt": ("append_system_prompts", "list"),
+}
+
+
+def _parse_yolo_file(path: pathlib.Path) -> dict:
+    """Parse one .yolo JSON file into {argparse_dest: value}, type-checked."""
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"{path}: cannot read .yolo config: {e}")
+    if not isinstance(raw, dict):
+        sys.exit(f"{path}: .yolo must contain a JSON object")
+
+    out = {}
+    for key, val in raw.items():
+        norm = key.replace("-", "_")
+        if norm not in YOLO_KEYS:
+            sys.exit(f"{path}: unknown .yolo option {key!r}")
+        dest, kind = YOLO_KEYS[norm]
+        if kind == "bool":
+            if not isinstance(val, bool):
+                sys.exit(f"{path}: {key!r} must be true or false")
+            out[dest] = val
+        elif kind in ("str", "path"):
+            if not isinstance(val, str):
+                sys.exit(f"{path}: {key!r} must be a string")
+            out[dest] = os.path.expanduser(val) if kind == "path" else val
+        else:  # "list" (append_system_prompts): a string or list of strings
+            if isinstance(val, str):
+                val = [val]
+            if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+                sys.exit(f"{path}: {key!r} must be a string or list of strings")
+            out[dest] = val
+    return out
+
+
+def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> dict:
+    """Merge ~/.yolo (base) with the nearest .yolo at/above `start` (overlay).
+
+    Precedence low->high: ~/.yolo < nearest .yolo < CLI args (the caller applies
+    the returned dict via PARSER.set_defaults, so explicit flags still win).
+    append_system_prompts concatenates across the two files; every other key is
+    overridden by the higher-precedence layer. The two files may be the same path
+    (e.g. cwd is under $HOME with no closer .yolo); it's then loaded once.
+    """
+    files = []
+    home_file = home / ".yolo"
+    if home_file.is_file():
+        files.append(home_file.resolve())
+    for cur in [start.resolve(), *start.resolve().parents]:
+        cand = cur / ".yolo"
+        if cand.is_file():
+            if cand.resolve() not in files:
+                files.append(cand.resolve())  # nearest overlays ~/.yolo
+            break
+
+    merged = {}
+    for path in files:
+        for dest, val in _parse_yolo_file(path).items():
+            if dest == "append_system_prompts":
+                merged[dest] = merged.get(dest, []) + val
+            else:
+                merged[dest] = val
+    return merged
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
-        "Arguments after -- are passed directly to docker run "
-        "(last-one-wins, so they override defaults)."
+        "Defaults can be set in a .yolo JSON file (nearest at/above the cwd, "
+        "overlaid on ~/.yolo); CLI flags override it. Arguments after -- are "
+        "passed directly to docker run (last-one-wins, so they override defaults)."
     ),
 )
 PARSER.add_argument(
@@ -232,9 +311,11 @@ PARSER.add_argument(
 )
 PARSER.add_argument(
     "--bedrock",
-    action="store_true",
+    action=argparse.BooleanOptionalAction,
+    default=False,
     help="Authenticate/bill via AWS Bedrock instead of the Claude keychain. "
-         "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1.",
+         "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1. "
+         "Use --no-bedrock to override a .yolo that enables it.",
 )
 PARSER.add_argument(
     "--aws-profile",
@@ -318,17 +399,24 @@ def main():
         script_argv = sys.argv[1:]
         docker_args = []
 
-    parsed = PARSER.parse_args(script_argv)
-
-    # Validate cross-flag constraints argparse can't express on its own.
-    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
-        sys.exit("--aws-profile/--aws-region/--bedrock-model require --bedrock.")
-    config_dir = parsed.config_dir   # None => default ~/.claude
-    if config_dir and not pathlib.Path(config_dir).is_dir():
-        sys.exit(f"--config-dir: not a directory: {config_dir}")
-
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
+
+    # Load .yolo config (nearest .yolo at/above the cwd, overlaid on ~/.yolo) and
+    # apply it as argparse defaults, so explicit CLI flags still win. Uses the real
+    # cwd, before any --worktree retargeting below.
+    PARSER.set_defaults(**load_yolo_config(cwd, home))
+    parsed = PARSER.parse_args(script_argv)
+
+    # AWS knobs are inert without bedrock mode (the bedrock block below is the only
+    # consumer), so just warn rather than failing — bedrock may be toggled off via
+    # --no-bedrock over a .yolo that sets it.
+    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
+        print("warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
+              file=sys.stderr)
+    config_dir = parsed.config_dir   # None => default ~/.claude
+    if config_dir and not pathlib.Path(config_dir).is_dir():
+        sys.exit(f"config-dir: not a directory: {config_dir}")
 
     # --worktree: run the session in a host-managed git worktree (durable) so you
     # can work on one repo in parallel containers without a data-loss window. We
