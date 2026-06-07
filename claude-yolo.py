@@ -231,6 +231,20 @@ YOLO_KEYS = {
     "append_system_prompt": ("append_system_prompts", "list"),
 }
 
+# Scaffold written by the `init` verb. Mirrors YOLO_KEYS (dash form, like the
+# flags). null means "leave at the built-in default" — the loader skips nulls —
+# so a freshly-init'd file round-trips to "no config" until the user edits it.
+YOLO_INIT_DEFAULTS = {
+    "config-dir":           None,
+    "bedrock":              False,
+    "aws-profile":          None,
+    "aws-region":           None,
+    "bedrock-model":        None,
+    "claude-json":          True,
+    "ssh-agent":            True,
+    "append-system-prompt": [],
+}
+
 
 def _parse_yolo_file(path: pathlib.Path) -> dict:
     """Parse one .yolo.json file into {argparse_dest: value}, type-checked."""
@@ -247,6 +261,8 @@ def _parse_yolo_file(path: pathlib.Path) -> dict:
         if norm not in YOLO_KEYS:
             sys.exit(f"{path}: unknown .yolo.json option {key!r}")
         dest, kind = YOLO_KEYS[norm]
+        if val is None:
+            continue  # explicit null = leave the key at its built-in default
         if kind == "bool":
             if not isinstance(val, bool):
                 sys.exit(f"{path}: {key!r} must be true or false")
@@ -294,6 +310,19 @@ def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> dict:
     return merged
 
 
+def write_default_yolo(dest_dir: pathlib.Path) -> None:
+    """`init` verb: scaffold a .yolo.json of default values into dest_dir.
+
+    Refuses to clobber an existing file. The scaffold's null values round-trip to
+    "no config" (the loader skips nulls), so it's a safe, editable starting point.
+    """
+    path = dest_dir / ".yolo.json"
+    if path.exists():
+        sys.exit(f"{path} already exists; not overwriting.")
+    path.write_text(json.dumps(YOLO_INIT_DEFAULTS, indent=2) + "\n")
+    print(f"Wrote {path}")
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -301,6 +330,13 @@ PARSER = argparse.ArgumentParser(
         "overlaid on ~/.yolo.json); CLI flags override it. Arguments after -- are "
         "passed directly to docker run (last-one-wins, so they override defaults)."
     ),
+)
+PARSER.add_argument(
+    "verb",
+    nargs="?",
+    choices=["init"],
+    help="Optional subcommand. 'init' writes a .yolo.json of default values into "
+         "the current directory and exits; omit it to run Claude in a container.",
 )
 PARSER.add_argument(
     "--config-dir",
@@ -402,9 +438,18 @@ def main():
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
 
-    # Load .yolo.json config (nearest at/above the cwd, overlaid on ~/.yolo.json)
-    # and apply it as argparse defaults, so explicit CLI flags still win. Uses the
-    # real cwd, before any --worktree retargeting below.
+    # Parse once with built-in defaults to dispatch the verb. `init` is terminal
+    # and independent of any existing .yolo.json (it writes one), so handle it
+    # before layering config defaults — a broken ancestor config shouldn't block
+    # scaffolding a fresh one.
+    parsed = PARSER.parse_args(script_argv)
+    if parsed.verb == "init":
+        write_default_yolo(cwd)
+        return
+
+    # Run path: layer .yolo.json defaults under the CLI flags, then re-parse so
+    # explicit flags still win. Nearest .yolo.json at/above the real cwd, overlaid
+    # on ~/.yolo.json; uses the real cwd, before any --worktree retargeting below.
     PARSER.set_defaults(**load_yolo_config(cwd, home))
     parsed = PARSER.parse_args(script_argv)
 

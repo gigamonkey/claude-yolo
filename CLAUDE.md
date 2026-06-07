@@ -31,6 +31,7 @@ Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
 
 ```bash
+./claude-yolo.py init            # scaffold a .yolo.json of defaults in the cwd
 echo '{"config-dir": "~/.claude-work", "ssh-agent": false}' > .yolo.json
 ./claude-yolo.py                 # picks up .yolo.json; equals passing those flags
 ./claude-yolo.py --ssh-agent     # explicit flag still overrides the file
@@ -142,8 +143,28 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 Per-invocation **actions** — `--worktree`, `--continue`, `--resume` — are
 deliberately **not** config keys; putting them in a `.yolo.json` is a hard error.
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
-Booleans must be JSON `true`/`false`. Unknown keys, wrong types, and malformed
-JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
+Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
+at the built-in default" (the loader skips it). Unknown keys, wrong types, and
+malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
+
+### `init` verb
+
+`claude-yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
+values into the cwd, then exits — it does **not** run a container. `init` is the
+sole value of an optional positional `verb` (`choices=["init"]`); with no verb,
+`main` proceeds to the run path. The verb is dispatched off a *first* `parse_args`
+**before** any `.yolo.json` is loaded — so a broken ancestor/global config can't
+block scaffolding a fresh one — and the run path then re-parses with the config
+defaults layered in. `init` refuses to overwrite an existing `.yolo.json`.
+
+The scaffold lists every key. Keys whose default is unset (`config-dir`,
+`aws-profile`, `aws-region`, `bedrock-model`) are written as `null`; the rest
+get their real defaults (`bedrock: false`, `claude-json`/`ssh-agent: true`,
+`append-system-prompt: []`). So an *unedited* scaffold is inert at the top level
+(it just restates the defaults) — but note those non-null booleans, being
+explicit, would **override** a `~/.yolo.json` that set them differently, since a
+project `.yolo.json` is the higher-precedence layer. The `YOLO_INIT_DEFAULTS`
+literal must stay in sync with `YOLO_KEYS`.
 
 Note `--bedrock` is a `BooleanOptionalAction` partly *because* of this file: a
 `.yolo.json` can set `"bedrock": true`, and `--no-bedrock` is then the only way
