@@ -1,9 +1,10 @@
 """Shared fixtures for the claude-yolo test suite.
 
-The script under test is `claude-yolo.py` — a hyphenated filename that can't be
-imported normally, so we load it via importlib. Each test gets a *fresh* module
-instance because `main()` mutates the module-global argparse PARSER (via
-`set_defaults`); a fresh load keeps that state from leaking between tests.
+The script under test is `yolo.py`. We load it via importlib from the file path
+(rather than a plain `import yolo`) so each test gets a *fresh* module instance:
+`main()` mutates the module-global argparse PARSER (via `set_defaults`), and a
+fresh load keeps that state from leaking between tests. Loading from the path
+also pins the tests to the source file regardless of any installed `yolo`.
 """
 
 import importlib.util
@@ -12,11 +13,11 @@ import pathlib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "claude-yolo.py"
+SCRIPT = ROOT / "yolo.py"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("claude_yolo", SCRIPT)
+    spec = importlib.util.spec_from_file_location("yolo", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -24,7 +25,7 @@ def _load_module():
 
 @pytest.fixture
 def cy():
-    """A freshly-loaded claude-yolo module (isolated global PARSER)."""
+    """A freshly-loaded yolo module (isolated global PARSER)."""
     return _load_module()
 
 
@@ -45,7 +46,7 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "ensure_logged_in", lambda c: None)
         monkeypatch.setattr(cy, "extract_credentials", lambda c: creds_path)
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
-        monkeypatch.setattr(cy.sys, "argv", ["claude-yolo.py", *argv])
+        monkeypatch.setattr(cy.sys, "argv", ["yolo", *argv])
 
         captured = {}
         monkeypatch.setattr(cy.os, "execvp", lambda file, args: captured.__setitem__("argv", args))

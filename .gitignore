@@ -1,6 +1,10 @@
-# Python bytecode cache (e.g. from `python3 -m py_compile claude-yolo.py`)
+# Python bytecode cache (e.g. from `python3 -m py_compile yolo.py`)
 __pycache__/
 *.pyc
+
+# Build artifacts from `uv build`
+dist/
+*.egg-info/
 
 # uv-managed dev environment and tool caches (uv.lock IS committed)
 .venv/

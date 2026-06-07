@@ -2,7 +2,7 @@
 
 ## What this is
 
-`claude-yolo.py` is a single-file Python script (no dependencies beyond the
+`yolo.py` is a single-file Python script (no dependencies beyond the
 stdlib) that runs Claude Code inside an ephemeral Docker container with
 `--dangerously-skip-permissions`. Containing the blast radius of "yolo mode"
 is the whole point: Claude can run unattended inside the container without
@@ -15,21 +15,21 @@ that tooling is never needed to *run* the script, only to develop it (see
 **Development** below). Run it directly:
 
 ```bash
-./claude-yolo.py                          # default ~/.claude credentials
-./claude-yolo.py --config-dir ~/.claude-work          # alternate config dir
-./claude-yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
-./claude-yolo.py --bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
-./claude-yolo.py --no-claude-json         # don't mount the host ~/.claude.json
-./claude-yolo.py --no-ssh-agent           # don't forward the host ssh-agent
-./claude-yolo.py -- --network host        # extra docker run args
-./claude-yolo.py -c                       # resume most recent session in this dir
-./claude-yolo.py -r                       # interactive session picker
-./claude-yolo.py -r SESSION_ID            # resume a specific session
-./claude-yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
-./claude-yolo.py resume fix-auth          # re-enter that worktree, continue the session
-./claude-yolo.py shell fix-auth           # bash shell in that worktree's container
-./claude-yolo.py finish fix-auth          # remove the worktree, keep the branch
-./claude-yolo.py list                     # this repo's worktrees
+./yolo.py                          # default ~/.claude credentials
+./yolo.py --config-dir ~/.claude-work          # alternate config dir
+./yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
+./yolo.py --bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
+./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
+./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
+./yolo.py -- --network host        # extra docker run args
+./yolo.py -c                       # resume most recent session in this dir
+./yolo.py -r                       # interactive session picker
+./yolo.py -r SESSION_ID            # resume a specific session
+./yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
+./yolo.py resume fix-auth          # re-enter that worktree, continue the session
+./yolo.py shell fix-auth           # bash shell in that worktree's container
+./yolo.py finish fix-auth          # remove the worktree, keep the branch
+./yolo.py list                     # this repo's worktrees
 ```
 
 All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`, and
@@ -41,21 +41,36 @@ Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
 
 ```bash
-./claude-yolo.py init            # scaffold a .yolo.json of defaults in the cwd
+./yolo.py init            # scaffold a .yolo.json of defaults in the cwd
 echo '{"config-dir": "~/.claude-work", "ssh-agent": false}' > .yolo.json
-./claude-yolo.py                 # picks up .yolo.json; equals passing those flags
-./claude-yolo.py --ssh-agent     # explicit flag still overrides the file
+./yolo.py                 # picks up .yolo.json; equals passing those flags
+./yolo.py --ssh-agent     # explicit flag still overrides the file
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
 (`requires-python = ">=3.10"`, no dependencies), so the script self-runs under
 **uv**, which guarantees a Python ≥3.10 (the `str | None` annotations need it;
 macOS system `python3` is often 3.9). Running it therefore requires `uv` to be
-installed. It's still stdlib-only — uv just selects the interpreter. To run it
-from anywhere, `chmod +x claude-yolo.py` and symlink it onto PATH (e.g.
-`ln -s "$PWD/claude-yolo.py" ~/.local/bin/claude-yolo`); a symlink keeps it
-tracking the repo. uv preserves the `--` separator, so docker-arg passthrough
-still works.
+installed. It's still stdlib-only — uv just selects the interpreter. uv preserves
+the `--` separator, so docker-arg passthrough still works.
+
+`yolo.py` is dual-purpose — the *same file* is both the standalone PEP 723 script
+and an importable module with a `main()` entry point. So there are two ways to run
+it from anywhere:
+
+- **Installed** (preferred): `uv tool install <repo-or-PyPI>` (or `pipx install`)
+  builds the wheel and puts a `yolo` executable on PATH in its own isolated venv,
+  pulling in zero runtime deps. `uv tool upgrade claude-yolo` updates it. The
+  console-script wiring is `[project.scripts] yolo = "yolo:main"` in
+  `pyproject.toml`; the wheel ships only `yolo.py` (`[tool.hatch.build.targets.wheel]
+  only-include`).
+- **Standalone**: `chmod +x yolo.py` and symlink it onto PATH
+  (`ln -s "$PWD/yolo.py" ~/.local/bin/yolo`); the PEP 723 header makes it self-run,
+  and a symlink keeps it tracking the repo with no build step.
+
+The PyPI/dist name is `claude-yolo`; the command it installs is `yolo`. `main()`
+is the console-script entry point *and* the `if __name__ == "__main__"` target, so
+both paths run identical code.
 
 ## How it works
 
@@ -160,7 +175,7 @@ malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
 
 ### `init` verb
 
-`claude-yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
+`yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
 values into the cwd, then exits — it does **not** run a container. `init` is one
 value of the optional positional `verb` (`choices=["init", "start", "resume",
 "shell", "finish", "list"]`; see [verbs](#worktree-workflow-verbs)); with no verb,
@@ -325,22 +340,26 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
 
 ## Development
 
-`pyproject.toml` defines a **uv-managed, non-packaged** project (`[tool.uv]
-package = false`) whose only purpose is dev tooling — `ruff` and `pytest` live in
-the `dev` dependency group. The runtime script stays stdlib-only; this never adds
-a runtime dependency. `uv.lock` is committed; `.venv/` and the tool caches are
-gitignored.
+`pyproject.toml` defines a **uv-managed project** with no runtime dependencies.
+Its `dev` dependency group carries the only deps — `ruff` and `pytest`. The
+project *is* packaged (hatchling build backend, `[project.scripts] yolo =
+"yolo:main"`, wheel ships only `yolo.py`) so it can `uv tool install`, but the
+runtime module stays stdlib-only — packaging adds no runtime dependency. `uv.lock`
+is committed; `.venv/`, `dist/`, and the tool caches are gitignored.
 
 ```bash
 uv sync                 # create/refresh .venv with the dev tools
 uv run pytest           # run the test suite (tests/)
 uv run ruff check .     # lint
 uv run ruff format .    # format
+uv build                # build the wheel/sdist into dist/ (for publishing)
 ```
 
-Tests load `claude-yolo.py` via `importlib` (the hyphenated filename isn't a
-normal importable module) and get a **fresh module per test** — `main()` mutates
-the module-global `PARSER` through `set_defaults`, so isolation matters. They
+Tests load `yolo.py` via `importlib` **from its file path** (not a plain
+`import yolo`) so each test gets a **fresh module instance** — `main()` mutates
+the module-global `PARSER` through `set_defaults`, so isolation matters; loading
+from the path also pins the tests to the source file regardless of any installed
+`yolo`. They
 never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
 `git_identity_args`, and `os.execvp`, then asserts on the captured `docker run`

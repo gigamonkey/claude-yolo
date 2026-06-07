@@ -830,7 +830,7 @@ def main():
     verb, topic = parsed.verb, parsed.topic
 
     if verb in ("start", "resume", "shell", "finish") and not topic:
-        sys.exit(f"`{verb}` needs a topic name, e.g. `claude-yolo {verb} my-topic`.")
+        sys.exit(f"`{verb}` needs a topic name, e.g. `yolo {verb} my-topic`.")
     if topic and verb not in ("start", "resume", "shell", "finish"):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
@@ -858,7 +858,7 @@ def main():
     if verb == "shell":
         worktree, _, slug = _worktree_dir(topic, home)
         if not worktree.is_dir():
-            sys.exit(f"no worktree '{topic}'; start one with `claude-yolo start {topic}`.")
+            sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
         cid = running_container_for(slug, topic)
         if cid:
             print(f"Opening a shell in the running container for '{topic}' ({cid[:12]}).")
@@ -886,7 +886,7 @@ def main():
     if verb == "start":
         worktree, main_root, slug = _worktree_dir(topic, home)
         if worktree.exists() or _branch_exists(topic):
-            sys.exit(f"'{topic}' already exists; resume it with `claude-yolo resume {topic}`.")
+            sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
         cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
@@ -895,7 +895,7 @@ def main():
     elif verb == "resume":
         worktree, main_root, slug = _worktree_dir(topic, home)
         if not worktree.is_dir():
-            sys.exit(f"no worktree '{topic}'; start one with `claude-yolo start {topic}`.")
+            sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
         if parsed.new and (parsed.continue_session or parsed.resume is not None):
             sys.exit("--new can't be combined with --continue/--resume.")
         cwd, common_git = worktree, _repo_paths()[0]
