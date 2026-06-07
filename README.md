@@ -9,14 +9,16 @@ commands, and edit files unattended — but the only part of your host it can to
 is the directory you launch it from (which is bind-mounted in). Everything else
 stays on the other side of the container wall.
 
-It's a single self-contained Python script with no dependencies beyond the
-standard library. There's no package to install and nothing to build.
+It's a single self-contained Python script with no runtime dependencies beyond
+the standard library — there's no package to install and nothing to build to
+*run* it. (The repo also carries a small uv-managed test/lint setup for working
+on the script; see [Development](#development).)
 
 ## Requirements
 
 - **macOS.** Credential extraction reads from the macOS keychain via the
-  `security` CLI, and the script assumes an SSH agent is running
-  (`SSH_AUTH_SOCK`).
+  `security` CLI. By default the script also forwards your running SSH agent
+  into the container (disable with `--no-ssh-agent`).
 - **Docker** installed and running.
 - **[uv](https://docs.astral.sh/uv/)** installed. The script's shebang is
   `#!/usr/bin/env -S uv run --script`, so it self-runs under uv, which guarantees
@@ -42,18 +44,27 @@ examples below use `./claude-yolo.py`, but once it's on your PATH you can just s
 ## Usage
 
 ```bash
-./claude-yolo.py                              # default ~/.claude credentials
-./claude-yolo.py ~/.claude-work               # use an alternate config directory
-./claude-yolo.py myprofile us-west-2 model.id # run against AWS Bedrock
-./claude-yolo.py --worktree fix-auth          # run in a fresh git worktree (see below)
-./claude-yolo.py -- --network host            # pass extra args to `docker run`
+./claude-yolo.py                                   # default ~/.claude credentials
+./claude-yolo.py --config-dir ~/.claude-work       # use an alternate config directory
+./claude-yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
+./claude-yolo.py --worktree fix-auth               # run in a fresh git worktree (see below)
+./claude-yolo.py --no-ssh-agent                    # don't forward the host SSH agent
+./claude-yolo.py -c                                # resume the most recent session here
+./claude-yolo.py -r [SESSION_ID]                   # pick / resume a session
+./claude-yolo.py init                              # write a .yolo.json of defaults, then exit
+./claude-yolo.py -- --network host                 # pass extra args to `docker run`
 ```
 
 Run it from the directory you want Claude to work in. That directory becomes the
 container's working directory and is the only host path Claude can modify.
 
-You can also add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to
-tack extra instructions onto Claude's system prompt.
+`--config-dir`, `--bedrock`, `--claude-json`, `--ssh-agent`, and `--worktree` are
+**orthogonal flags** — combine them however you like (see
+[Configuration & credential options](#configuration--credential-options)). The
+only positional argument is the optional `init` verb. You can also add
+`--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
+instructions onto Claude's system prompt, and set defaults for any of these in a
+[`.yolo.json` file](#configuring-defaults-with-yolojson).
 
 ## Parallel sessions with `--worktree`
 
@@ -185,6 +196,18 @@ the matching UID the container couldn't open the agent socket.)
 The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
 key fingerprint, so connections don't fail or hang on an unknown-host prompt.
 
+The image also configures git to rewrite GitHub **HTTPS** remote URLs to SSH
+(`git config --system url."git@github.com:".insteadOf "https://github.com/"`), so
+`git` operations against `https://github.com/...` remotes transparently route over
+SSH and authenticate through the forwarded agent — **no access token ever enters
+the container**. (HTTPS auth is a bearer token that would have to be handed in;
+SSH is challenge-response, so the key stays on the host.)
+
+You can turn all of this off with `--no-ssh-agent`, which drops the agent socket,
+`SSH_AUTH_SOCK`, and the `known_hosts` mount. With it off, in-container git
+operations against GitHub won't authenticate (since the HTTPS→SSH rewrite relies
+on the agent), so use it only when you don't need network git from inside.
+
 #### Why forward the git identity?
 
 Being able to *push* is only half of letting Claude do git work — it also needs
@@ -215,18 +238,48 @@ added). When you exit, `--rm` cleans up the container.
 The full `docker run` command is printed (between two dashed lines) before
 launch, so you can see exactly what's happening.
 
-## Three credential modes
+## Configuration & credential options
 
-The first positional argument decides the mode:
+Four independent flags control where Claude's config comes from and how it
+authenticates. They're **orthogonal** — any combination is valid (for example
+`--bedrock --config-dir ~/.claude-bdr` runs Bedrock against a separate config
+directory):
 
-| You pass | Mode | What happens |
+| Flag | Default | Effect |
 | --- | --- | --- |
-| *(nothing)* | **Default** | Uses `~/.claude` + keychain credentials. |
-| A path that **is a directory** | **Alternate config** | Mounts that directory at `/home/claude/.claude`; pulls credentials with the hashed keychain name. |
-| A name that is **not a directory** | **AWS Bedrock** | Treats it as an AWS profile (with optional region and Bedrock model ID). Sets `CLAUDE_CODE_USE_BEDROCK=1` and mounts `~/.aws` read-only. No keychain extraction. |
+| `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. Credentials are pulled from the keychain entry for that directory (the hashed name described above). |
+| `--bedrock` (+ `--aws-profile`, `--aws-region`, `--bedrock-model`) | off → keychain | Authenticate and bill via **AWS Bedrock** instead of the keychain. Sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only, and skips keychain extraction. `--aws-profile` is optional (the AWS SDK's default credentials are used otherwise); region defaults to `us-east-1`. Override a config-set value with `--no-bedrock`. |
+| `--claude-json` / `--no-claude-json` | on | Whether to mount the host `~/.claude.json` (global config: MCP servers, project history/trust). Turn it off for a cleanly isolated profile alongside an alternate `--config-dir`. |
+| `--ssh-agent` / `--no-ssh-agent` | on | Whether to forward the host SSH agent (see [above](#why-forward-the-ssh-agent)). |
 
-The decision hinges purely on whether the first argument is an existing
-directory.
+## Configuring defaults with `.yolo.json`
+
+Rather than re-typing the same flags every time, put their defaults in a
+`.yolo.json` file — a JSON object whose keys mirror the flag names:
+
+```json
+{
+  "config-dir": "~/.claude-work",
+  "ssh-agent": false,
+  "append-system-prompt": ["Prefer the standard library."]
+}
+```
+
+The script reads the **nearest `.yolo.json` at or above the directory you launch
+from**, overlaid on a global **`~/.yolo.json`**. Precedence runs low to high:
+`~/.yolo.json` < the project `.yolo.json` < explicit CLI flags — so a flag always
+wins, and a project file overrides your global one per key (`append-system-prompt`
+is the exception: prompts from all layers accumulate).
+
+Supported keys: `config-dir`, `bedrock`, `aws-profile`, `aws-region`,
+`bedrock-model`, `claude-json`, `ssh-agent`, and `append-system-prompt` (a string
+or list of strings). A `null` value leaves a key at its built-in default. The
+per-invocation actions (`--worktree`, `--continue`, `--resume`) are deliberately
+**not** config keys.
+
+To get started, `claude-yolo.py init` writes a `.yolo.json` of default values
+into the current directory (it won't overwrite an existing one), which you can
+then edit down to the settings you care about.
 
 ## Extra `docker run` arguments
 
@@ -260,6 +313,23 @@ repeated flags, your arguments override the script's defaults:
   `/usr/local/bin/claude`, which `/doctor` flags as a broken install and which
   self-update can't manage. The native installer is deliberate.
 - **macOS-only as written**, because of the keychain and SSH-agent assumptions.
+
+## Development
+
+The script is stdlib-only and needs nothing installed to run. For working on it,
+the repo includes a [uv](https://docs.astral.sh/uv/)-managed dev setup
+(`pyproject.toml`) with `ruff` and `pytest`:
+
+```bash
+uv sync                 # set up .venv with the dev tools
+uv run pytest           # run the test suite (tests/)
+uv run ruff check .     # lint
+uv run ruff format .    # format
+```
+
+The tests stub out Docker, the keychain, and `os.execvp`, so they assert on the
+`docker run` command the script *would* build without touching the host or
+launching anything.
 
 ## Provenance
 
