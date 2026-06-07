@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-# https://claude.ai/chat/df7c14a7-6410-4b98-9799-1c9821557b81
+
 import argparse
 import hashlib
 import json

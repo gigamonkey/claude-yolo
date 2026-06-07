@@ -3,7 +3,7 @@
 Run [Claude Code](https://claude.com/claude-code) in full "yolo mode"
 (`--dangerously-skip-permissions`) without giving it free rein over your laptop.
 
-The whole point is **blast-radius containment**: `yolo.py` launches Claude
+The whole point is **blast-radius containment**: `yolo` launches Claude
 Code inside a throwaway Docker container. Claude can install packages, run
 commands, and edit files unattended — but the only part of your host it can touch
 is the directory you launch it from (which is bind-mounted in). Everything else
@@ -54,27 +54,26 @@ chmod +x yolo.py
 ln -s "$PWD/yolo.py" ~/.local/bin/yolo   # ~/.local/bin is on PATH if you use uv
 ```
 
-Either way the command is `yolo`. The examples below run the file in-place as
-`./yolo.py` (handy from a checkout); once it's installed, just say `yolo`.
+You can also run it in place as `./yolo.py` (handy from a checkout).
 
 ## Usage
 
 ```bash
-./yolo.py                                   # default ~/.claude credentials
-./yolo.py --config-dir ~/.claude-work       # use an alternate config directory
-./yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-./yolo.py --no-ssh-agent                    # don't forward the host SSH agent
-./yolo.py -c                                # resume the most recent session here
-./yolo.py -r [SESSION_ID]                   # pick / resume a session
-./yolo.py init                              # write a .yolo.json of defaults, then exit
-./yolo.py -- --network host                 # pass extra args to `docker run`
+yolo                                   # default ~/.claude credentials
+yolo --config-dir ~/.claude-work       # use an alternate config directory
+yolo --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
+yolo --no-ssh-agent                    # don't forward the host SSH agent
+yolo -c                                # resume the most recent session here
+yolo -r [SESSION_ID]                   # pick / resume a session
+yolo init                              # write a .yolo.json of defaults, then exit
+yolo -- --network host                 # pass extra args to `docker run`
 
 # the worktree workflow (see below):
-./yolo.py start fix-auth                    # new worktree+branch, launch a session
-./yolo.py resume fix-auth                   # re-enter it, continue the session
-./yolo.py shell fix-auth                    # open a bash shell in its container
-./yolo.py finish fix-auth                   # remove the worktree, keep the branch
-./yolo.py list                              # show this repo's worktrees
+yolo start fix-auth                    # new worktree+branch, launch a session
+yolo resume fix-auth                   # re-enter it, continue the session
+yolo shell fix-auth                    # open a bash shell in its container
+yolo finish fix-auth                   # remove the worktree, keep the branch
+yolo list                              # show this repo's worktrees
 ```
 
 Run it from the directory you want Claude to work in. That directory becomes the
@@ -98,12 +97,12 @@ repo:
 
 ```bash
 cd ~/hacks/bells
-./yolo.py start fix-auth       # new worktree + branch `fix-auth`, fresh session
+yolo start fix-auth       # new worktree + branch `fix-auth`, fresh session
 # ...work, exit the container...
-./yolo.py resume fix-auth      # back into it, continuing where you left off
-./yolo.py shell fix-auth       # a bash shell in that worktree (poke around)
-./yolo.py list                 # what worktrees exist, and which are running
-./yolo.py finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
+yolo resume fix-auth      # back into it, continuing where you left off
+yolo shell fix-auth       # a bash shell in that worktree (poke around)
+yolo list                 # what worktrees exist, and which are running
+yolo finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
 ```
 
 You can run several at once (`start fix-auth` in one terminal, `start
@@ -323,7 +322,7 @@ value leaves a key at its built-in default. The per-invocation actions
 (`--worktree`, `--continue`, `--resume`, and the verbs) are deliberately **not**
 config keys.
 
-To get started, `yolo.py init` writes a `.yolo.json` of default values
+To get started, `yolo init` writes a `.yolo.json` of default values
 into the current directory (it won't overwrite an existing one), which you can
 then edit down to the settings you care about.
 
@@ -334,7 +333,7 @@ Anything after a `--` separator is appended to the `docker run` command verbatim
 repeated flags, your arguments override the script's defaults:
 
 ```bash
-./yolo.py -- --network host --memory 4g
+yolo -- --network host --memory 4g
 ```
 
 ## Notes and gotchas
@@ -382,5 +381,3 @@ launching anything.
 
 This started life as
 [Michal Migurski's gist](https://gist.github.com/migurski/6d7b718b364dfa4e7c8c63cd643ede2c).
-The `https://claude.ai/chat/...` URL near the top of the script and the gist
-reference in the git history are kept as a record of where it came from.
