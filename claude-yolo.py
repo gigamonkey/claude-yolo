@@ -234,6 +234,28 @@ PARSER.add_argument(
          "~/.claude-yolo/worktrees/, run Claude in it, and name the session NAME. "
          "For parallel sessions on one repo without losing uncommitted work.",
 )
+# Resume a prior session. Session history lives in the bind-mounted ~/.claude/projects/
+# and is keyed by the project path, which matches between host and container (cwd is mounted
+# at its identical path), so sessions started in a yolo container are resumable here.
+RESUME_GROUP = PARSER.add_mutually_exclusive_group()
+RESUME_GROUP.add_argument(
+    "--continue",
+    "-c",
+    dest="continue_session",
+    action="store_true",
+    help="Resume the most recent Claude session for this directory (claude --continue).",
+)
+RESUME_GROUP.add_argument(
+    "--resume",
+    "-r",
+    dest="resume",
+    nargs="?",
+    const=True,
+    default=None,
+    metavar="SESSION_ID",
+    help="Resume a Claude session by SESSION_ID, or omit it for an interactive picker "
+         "(claude --resume).",
+)
 
 
 def main():
@@ -341,8 +363,19 @@ def main():
         "--settings", '{"sandbox":{"enabled":false}}',
         "--append-system-prompt", "... ".join(extra_system_prompt),
     ]
-    if worktree_name:
-        # Name the Claude session so it's identifiable in the prompt box / /resume picker
+
+    # Forward a resume/continue flag to claude. The two are mutually exclusive (argparse
+    # enforces it). --resume takes an optional SESSION_ID; bare --resume (const True) opens
+    # claude's interactive picker, which works because we run -it.
+    if parsed.continue_session:
+        claude_args += ["--continue"]
+    elif parsed.resume is not None:
+        claude_args += ["--resume"] + ([parsed.resume] if isinstance(parsed.resume, str) else [])
+
+    if worktree_name and not (parsed.continue_session or parsed.resume is not None):
+        # Name the Claude session so it's identifiable in the prompt box / /resume picker.
+        # Skipped when resuming: the session already exists with its own name, and claude
+        # rejects --name alongside --continue/--resume.
         claude_args = ["--name", worktree_name, *claude_args]
 
     run_cmd = ["docker", "run", "-it", "--rm", "--name", container, *args, *docker_args, DOCKER_IMAGE, *claude_args]

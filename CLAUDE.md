@@ -15,6 +15,9 @@ There is no package, no tests, no build step — just the script. Run it directl
 ./claude-yolo.py ~/.claude-work  # alternate config dir
 ./claude-yolo.py myprofile us-west-2 some.model.id   # AWS Bedrock
 ./claude-yolo.py -- --network host                   # extra docker run args
+./claude-yolo.py -c               # resume most recent session in this dir
+./claude-yolo.py -r               # interactive session picker
+./claude-yolo.py -r SESSION_ID    # resume a specific session
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
@@ -89,6 +92,21 @@ required because a linked worktree stores *absolute* paths to its `.git` and bac
 The session is named via `claude --name NAME`. Durability is the point: commits
 land in the host's shared `.git` and uncommitted edits live in the host worktree
 dir, so a container exit loses nothing. Must be run from inside a git repo.
+
+## `--continue` / `-c` and `--resume [SESSION_ID]` / `-r` (resume a session)
+
+Mutually exclusive (argparse-enforced); both just forward the matching flag to
+`claude` inside the container. They need no new mounts: session transcripts live
+in `~/.claude/projects/<slug>/*.jsonl`, which is already bind-mounted, and the
+slug is derived from the project path — which matches host↔container because the
+cwd is mounted at its identical path. So a session started in a yolo container
+(or even on the host, same dir) is resumable. `--continue` resumes the most
+recent session for the cwd; `--resume` takes an optional `SESSION_ID`, and bare
+`--resume` opens Claude's interactive picker (works because we run `-it`).
+Composes with all credential modes and with `--worktree` (resume is keyed to the
+worktree's path). In worktree mode the `--name NAME` injection is **suppressed**
+when resuming, because `claude` rejects `--name` alongside `--continue`/`--resume`
+(the session already has its identity).
 
 ## Conventions / gotchas
 
