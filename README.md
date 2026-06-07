@@ -38,8 +38,8 @@ an isolated venv and drops a `yolo` executable on your PATH, with zero runtime
 dependencies:
 
 ```bash
-uv tool install git+https://github.com/<you>/claude-yolo   # from the repo
-uv tool upgrade claude-yolo                                 # later, to update
+uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
+uv tool upgrade claude-yolo                                    # later, to update
 ```
 
 You can also run it once without installing: `uvx --from
