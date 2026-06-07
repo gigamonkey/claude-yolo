@@ -32,7 +32,7 @@ still works.
 1. **Builds the image** (`build_docker_image`) from an inline
    `DOCKERFILE_TEMPLATE` written to a temp dir. Ubuntu 24.04 + nodejs/npm + a few
    baked-in amenities used across most projects (`ripgrep`, `fd-find` symlinked to
-   `fd`, `build-essential`, and `uv`/`uvx` copied from `ghcr.io/astral-sh/uv`) +
+   `fd`, `build-essential`, `vim`, and `uv`/`uvx` copied from `ghcr.io/astral-sh/uv`) +
    Claude Code installed via the **native installer**
    (`curl https://claude.ai/install.sh | bash`) at `~/.local/bin/claude`. The
    image is rebuilt on every run (Docker layer cache makes this cheap), so baked
