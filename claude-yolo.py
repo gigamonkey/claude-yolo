@@ -721,6 +721,38 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
     print(f"Removed worktree for '{topic}'. Branch '{topic}' kept ({note}).")
 
 
+def _branch_merged(worktree: pathlib.Path, branch: str) -> bool:
+    """Whether `branch` is fully merged into main / origin/main.
+
+    "Merged" = the branch's tip is an ancestor of the integration branch *and*
+    that branch has moved past it — so the branch's work is contained in main and
+    there's nothing left to merge. The second clause excludes a freshly-started
+    branch that simply hasn't diverged yet (tip == main), which isn't "merged".
+    Ancestry can't see *squash*-merges (they create a new commit), so this errs
+    toward a false negative — fine for a display hint, never a false "safe".
+    """
+    for ref in ("main", "origin/main"):
+        exists = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True,
+            text=True,
+        )
+        if exists.returncode != 0:
+            continue
+        ancestor = subprocess.run(
+            ["git", "-C", str(worktree), "merge-base", "--is-ancestor", branch, ref],
+            capture_output=True,
+        )
+        ahead = subprocess.run(
+            ["git", "-C", str(worktree), "rev-list", "--count", f"{branch}..{ref}"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if ancestor.returncode == 0 and ahead not in ("0", ""):
+            return True
+    return False
+
+
 def do_list(home: pathlib.Path) -> None:
     """`list` verb: show this repo's worktrees, their branch, status, and directory."""
     _, _, slug = _repo_paths()
@@ -746,7 +778,11 @@ def do_list(home: pathlib.Path) -> None:
             ).stdout.strip()
         )
         running = running_container_for(slug, topic)
-        status = ", ".join((["dirty"] if dirty else []) + (["running"] if running else [])) or "-"
+        flags = (["running"] if running else []) + (["dirty"] if dirty else [])
+        # `merged` only when it's idle and clean — i.e. ready to `finish`.
+        if not flags and _branch_merged(wt, branch):
+            flags.append("merged")
+        status = ", ".join(flags) or "-"
         try:
             directory = "~/" + str(wt.relative_to(home))
         except ValueError:

@@ -106,7 +106,10 @@ refactor-db` in another) on the **same repo** without them stepping on each othe
 - **`finish TOPIC`** removes the worktree but **keeps the branch** (for you to
   merge or push). It refuses if a container is still running, or if there are
   uncommitted changes (override with `--force`).
-- **`list`** shows the repo's worktrees with `dirty`/`running` flags.
+- **`list`** shows the repo's worktrees (TOPIC / BRANCH / STATUS / DIRECTORY).
+  STATUS is `running`, `dirty` (uncommitted changes), or — when a worktree is
+  idle and clean — `merged` if its branch is already in `main` (i.e. ready to
+  `finish`).
 
 The worktrees live in a central spot keyed by a slug of the repo path,
 `~/.claude-yolo/worktrees/<repo-slug>/<TOPIC>`, so they clutter neither the repo

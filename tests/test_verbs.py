@@ -202,6 +202,49 @@ def test_list_empty(cy, run_cli, repo, capsys):
     assert "No worktrees" in capsys.readouterr().out
 
 
+def _status_for(out, topic):
+    """The STATUS column value for `topic` from `list` output."""
+    for line in out.splitlines()[1:]:  # skip header
+        cols = line.split()
+        if cols and cols[0] == topic:
+            return cols[2]  # TOPIC BRANCH STATUS DIRECTORY
+    raise AssertionError(f"{topic} not in list output")
+
+
+def test_list_marks_merged_branch(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "done"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("done"))
+    # commit on the branch, then merge it into main
+    (wt / "x").write_text("x")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    git(r, "merge", "--no-ff", "-m", "merge done", "done")
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "done") == "merged"
+
+
+def test_list_unmerged_branch_is_dash(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "wip"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("wip"))
+    (wt / "x").write_text("x")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "unmerged work")  # committed but NOT merged
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "wip") == "-"
+
+
+def test_list_fresh_branch_not_marked_merged(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "fresh"], home=home, cwd=r)  # no commits, tip == main
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "fresh") == "-"
+
+
 # --- dispatch guards --------------------------------------------------------
 
 

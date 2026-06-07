@@ -205,7 +205,9 @@ name) and run from inside a git repo.
   Refuses if a container is running, or on uncommitted changes (unless `--force`).
   Leaves transcripts (they self-expire via `cleanupPeriodDays`). Prints whether
   the kept branch is pushed.
-- **`list`** — the repo's worktrees with branch + `dirty`/`running` flags.
+- **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
+  STATUS is `running`/`dirty`, or `merged` when idle+clean and the branch is an
+  ancestor of `main`/`origin/main` (ancestry, so squash-merges read as `-`).
 
 Implementation shape:
 
