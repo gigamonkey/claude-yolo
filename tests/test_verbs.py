@@ -225,7 +225,7 @@ def test_list_marks_merged_branch(cy, run_cli, repo, capsys):
     assert _status_for(capsys.readouterr().out, "done") == "merged"
 
 
-def test_list_unmerged_branch_is_dash(cy, run_cli, repo, capsys):
+def test_list_unmerged_branch(cy, run_cli, repo, capsys):
     r, home = repo
     run_cli(["start", "wip"], home=home, cwd=r)
     wt = next((home / ".claude-yolo" / "worktrees").rglob("wip"))
@@ -234,15 +234,38 @@ def test_list_unmerged_branch_is_dash(cy, run_cli, repo, capsys):
     git(wt, "commit", "-qm", "unmerged work")  # committed but NOT merged
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    assert _status_for(capsys.readouterr().out, "wip") == "-"
+    assert _status_for(capsys.readouterr().out, "wip") == "unmerged"
 
 
-def test_list_fresh_branch_not_marked_merged(cy, run_cli, repo, capsys):
+def test_list_fresh_branch_is_unmerged(cy, run_cli, repo, capsys):
     r, home = repo
-    run_cli(["start", "fresh"], home=home, cwd=r)  # no commits, tip == main
+    run_cli(["start", "fresh"], home=home, cwd=r)  # no commits, tip == base
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    assert _status_for(capsys.readouterr().out, "fresh") == "-"
+    assert _status_for(capsys.readouterr().out, "fresh") == "unmerged"
+
+
+def test_list_merged_uses_base_target(cy, run_cli, repo, capsys):
+    """`merged` is judged against --base, not a hardcoded main."""
+    r, home = repo
+    # an integration branch that is NOT main
+    git(r, "branch", "release")
+    run_cli(["start", "feat", "--base", "release"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("feat"))
+    (wt / "x").write_text("x")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    # merge feat into release in the main checkout, then return to main
+    git(r, "checkout", "-q", "release")
+    git(r, "merge", "--no-ff", "-m", "merge feat", "feat")
+    git(r, "checkout", "-q", "main")
+    capsys.readouterr()
+    # not merged into main (HEAD), but merged into release
+    run_cli(["list"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "feat") == "unmerged"  # vs main
+    capsys.readouterr()
+    run_cli(["list", "--base", "release"], home=home, cwd=r)
+    assert _status_for(capsys.readouterr().out, "feat") == "merged"  # vs release
 
 
 # --- dispatch guards --------------------------------------------------------

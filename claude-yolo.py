@@ -721,40 +721,42 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
     print(f"Removed worktree for '{topic}'. Branch '{topic}' kept ({note}).")
 
 
-def _branch_merged(worktree: pathlib.Path, branch: str) -> bool:
-    """Whether `branch` is fully merged into main / origin/main.
+def _branch_merged(branch: str, base: str) -> bool:
+    """Whether `branch` is fully merged into `base` (the integration ref).
 
-    "Merged" = the branch's tip is an ancestor of the integration branch *and*
-    that branch has moved past it — so the branch's work is contained in main and
-    there's nothing left to merge. The second clause excludes a freshly-started
-    branch that simply hasn't diverged yet (tip == main), which isn't "merged".
-    Ancestry can't see *squash*-merges (they create a new commit), so this errs
-    toward a false negative — fine for a display hint, never a false "safe".
+    Run from the current dir (the main repo), so a `base` like HEAD resolves to
+    the main checkout — not a worktree's own branch. "Merged" = the branch tip is
+    an ancestor of `base` *and* `base` has moved past it, so the branch's work is
+    contained in `base` with nothing left to merge. The second clause excludes a
+    freshly-started branch that simply hasn't diverged yet (tip == base). Ancestry
+    can't see *squash*-merges (they create a new commit), so this errs toward a
+    false negative — fine for a display hint, never a false "safe".
     """
-    for ref in ("main", "origin/main"):
-        exists = subprocess.run(
-            ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
-            capture_output=True,
-            text=True,
-        )
-        if exists.returncode != 0:
-            continue
-        ancestor = subprocess.run(
-            ["git", "-C", str(worktree), "merge-base", "--is-ancestor", branch, ref],
-            capture_output=True,
-        )
-        ahead = subprocess.run(
-            ["git", "-C", str(worktree), "rev-list", "--count", f"{branch}..{ref}"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if ancestor.returncode == 0 and ahead not in ("0", ""):
-            return True
-    return False
+    exists = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", base],
+        capture_output=True,
+        text=True,
+    )
+    if exists.returncode != 0:
+        return False
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, base],
+        capture_output=True,
+    )
+    ahead = subprocess.run(
+        ["git", "rev-list", "--count", f"{branch}..{base}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return ancestor.returncode == 0 and ahead not in ("0", "")
 
 
-def do_list(home: pathlib.Path) -> None:
-    """`list` verb: show this repo's worktrees, their branch, status, and directory."""
+def do_list(home: pathlib.Path, base: str) -> None:
+    """`list` verb: show this repo's worktrees, their branch, status, and directory.
+
+    `merged` is judged against `base` (the same ref `start` branches off — default
+    HEAD, or whatever `.yolo.json`/--base set).
+    """
     _, _, slug = _repo_paths()
     root = home / ".claude-yolo" / "worktrees" / slug
     topics = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
@@ -779,10 +781,11 @@ def do_list(home: pathlib.Path) -> None:
         )
         running = running_container_for(slug, topic)
         flags = (["running"] if running else []) + (["dirty"] if dirty else [])
-        # `merged` only when it's idle and clean — i.e. ready to `finish`.
-        if not flags and _branch_merged(wt, branch):
-            flags.append("merged")
-        status = ", ".join(flags) or "-"
+        # `merged` vs `unmerged` only matters when it's idle and clean — i.e. when
+        # it's actually a candidate to `finish`.
+        if not flags:
+            flags.append("merged" if _branch_merged(branch, base) else "unmerged")
+        status = ", ".join(flags)
         try:
             directory = "~/" + str(wt.relative_to(home))
         except ValueError:
@@ -823,9 +826,9 @@ def main():
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
 
-    # Parse once with built-in defaults to dispatch the verb. The terminal verbs
-    # (init/list/finish, and shell's exec-into-running case) don't need credential
-    # config, so they run here, before .yolo.json is layered in.
+    # Parse once with built-in defaults to dispatch `init`, which is terminal and
+    # must work even with a broken ancestor/global config (it writes a fresh one),
+    # so it runs *before* .yolo.json is layered in.
     parsed = PARSER.parse_args(script_argv)
     verb, topic = parsed.verb, parsed.topic
 
@@ -841,8 +844,16 @@ def main():
     if verb == "init":
         write_default_yolo(cwd)
         return
+
+    # Every other verb gets the .yolo.json defaults layered under the CLI flags
+    # (so e.g. `list` honours a config-set `base`); re-parse so explicit flags win.
+    # Uses the real cwd, before any worktree retargeting below.
+    PARSER.set_defaults(**load_yolo_config(cwd, home))
+    parsed = PARSER.parse_args(script_argv)
+
+    # Terminal verbs (no credential config needed) — handle and return.
     if verb == "list":
-        do_list(home)
+        do_list(home, parsed.base)
         return
     if verb == "finish":
         do_finish(topic, home, force=parsed.force)
@@ -857,12 +868,6 @@ def main():
             os.execvp("docker", ["docker", "exec", "-it", cid, "/bin/bash"])
             return  # execvp doesn't return on success; guard the stubbed/failed case
         # No container running: fall through to launch a fresh bash container below.
-
-    # Launch path (start / resume / shell-fresh / --worktree / bare): layer the
-    # .yolo.json defaults under the CLI flags, then re-parse so explicit flags win.
-    # Uses the real cwd, before any worktree retargeting below.
-    PARSER.set_defaults(**load_yolo_config(cwd, home))
-    parsed = PARSER.parse_args(script_argv)
 
     # AWS knobs are inert without bedrock mode (the bedrock block is the only
     # consumer), so just warn rather than failing — bedrock may be toggled off via
