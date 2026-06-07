@@ -3,16 +3,17 @@
 Run [Claude Code](https://claude.com/claude-code) in full "yolo mode"
 (`--dangerously-skip-permissions`) without giving it free rein over your laptop.
 
-The whole point is **blast-radius containment**: `claude-yolo.py` launches Claude
+The whole point is **blast-radius containment**: `yolo.py` launches Claude
 Code inside a throwaway Docker container. Claude can install packages, run
 commands, and edit files unattended — but the only part of your host it can touch
 is the directory you launch it from (which is bind-mounted in). Everything else
 stays on the other side of the container wall.
 
 It's a single self-contained Python script with no runtime dependencies beyond
-the standard library — there's no package to install and nothing to build to
-*run* it. (The repo also carries a small uv-managed test/lint setup for working
-on the script; see [Development](#development).)
+the standard library. You can install it as a `yolo` command (see below) or just
+run the file directly — either way it pulls in zero runtime dependencies. (The
+repo also carries a small uv-managed test/lint setup for working on the script;
+see [Development](#development).)
 
 ## Requirements
 
@@ -29,36 +30,51 @@ on the script; see [Development](#development).)
 
 ## Install on your PATH
 
-The script is self-contained — make it executable and symlink it somewhere on
-your PATH to run `claude-yolo` from any directory:
+The script installs as a `yolo` command. Two ways, depending on whether you want
+a clean managed install or a copy that tracks the repo:
+
+**Installed (recommended)** — `uv tool install` (or `pipx install`) builds it into
+an isolated venv and drops a `yolo` executable on your PATH, with zero runtime
+dependencies:
 
 ```bash
-chmod +x claude-yolo.py
-ln -s "$PWD/claude-yolo.py" ~/.local/bin/claude-yolo   # ~/.local/bin is on PATH if you use uv
+uv tool install git+https://github.com/<you>/claude-yolo   # from the repo
+uv tool upgrade claude-yolo                                 # later, to update
 ```
 
-A symlink (not a copy) keeps it tracking the repo, so `git pull` updates it. The
-examples below use `./claude-yolo.py`, but once it's on your PATH you can just say
-`claude-yolo`.
+You can also run it once without installing: `uvx --from
+git+https://github.com/<you>/claude-yolo yolo`.
+
+**Standalone** — the file self-runs under uv via its PEP 723 header, so you can
+skip the build entirely and just symlink it; a symlink (not a copy) keeps it
+tracking the repo, so `git pull` updates it:
+
+```bash
+chmod +x yolo.py
+ln -s "$PWD/yolo.py" ~/.local/bin/yolo   # ~/.local/bin is on PATH if you use uv
+```
+
+Either way the command is `yolo`. The examples below run the file in-place as
+`./yolo.py` (handy from a checkout); once it's installed, just say `yolo`.
 
 ## Usage
 
 ```bash
-./claude-yolo.py                                   # default ~/.claude credentials
-./claude-yolo.py --config-dir ~/.claude-work       # use an alternate config directory
-./claude-yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-./claude-yolo.py --no-ssh-agent                    # don't forward the host SSH agent
-./claude-yolo.py -c                                # resume the most recent session here
-./claude-yolo.py -r [SESSION_ID]                   # pick / resume a session
-./claude-yolo.py init                              # write a .yolo.json of defaults, then exit
-./claude-yolo.py -- --network host                 # pass extra args to `docker run`
+./yolo.py                                   # default ~/.claude credentials
+./yolo.py --config-dir ~/.claude-work       # use an alternate config directory
+./yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
+./yolo.py --no-ssh-agent                    # don't forward the host SSH agent
+./yolo.py -c                                # resume the most recent session here
+./yolo.py -r [SESSION_ID]                   # pick / resume a session
+./yolo.py init                              # write a .yolo.json of defaults, then exit
+./yolo.py -- --network host                 # pass extra args to `docker run`
 
 # the worktree workflow (see below):
-./claude-yolo.py start fix-auth                    # new worktree+branch, launch a session
-./claude-yolo.py resume fix-auth                   # re-enter it, continue the session
-./claude-yolo.py shell fix-auth                    # open a bash shell in its container
-./claude-yolo.py finish fix-auth                   # remove the worktree, keep the branch
-./claude-yolo.py list                              # show this repo's worktrees
+./yolo.py start fix-auth                    # new worktree+branch, launch a session
+./yolo.py resume fix-auth                   # re-enter it, continue the session
+./yolo.py shell fix-auth                    # open a bash shell in its container
+./yolo.py finish fix-auth                   # remove the worktree, keep the branch
+./yolo.py list                              # show this repo's worktrees
 ```
 
 Run it from the directory you want Claude to work in. That directory becomes the
@@ -82,12 +98,12 @@ repo:
 
 ```bash
 cd ~/hacks/bells
-./claude-yolo.py start fix-auth       # new worktree + branch `fix-auth`, fresh session
+./yolo.py start fix-auth       # new worktree + branch `fix-auth`, fresh session
 # ...work, exit the container...
-./claude-yolo.py resume fix-auth      # back into it, continuing where you left off
-./claude-yolo.py shell fix-auth       # a bash shell in that worktree (poke around)
-./claude-yolo.py list                 # what worktrees exist, and which are running
-./claude-yolo.py finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
+./yolo.py resume fix-auth      # back into it, continuing where you left off
+./yolo.py shell fix-auth       # a bash shell in that worktree (poke around)
+./yolo.py list                 # what worktrees exist, and which are running
+./yolo.py finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
 ```
 
 You can run several at once (`start fix-auth` in one terminal, `start
@@ -306,7 +322,7 @@ value leaves a key at its built-in default. The per-invocation actions
 (`--worktree`, `--continue`, `--resume`, and the verbs) are deliberately **not**
 config keys.
 
-To get started, `claude-yolo.py init` writes a `.yolo.json` of default values
+To get started, `yolo.py init` writes a `.yolo.json` of default values
 into the current directory (it won't overwrite an existing one), which you can
 then edit down to the settings you care about.
 
@@ -317,7 +333,7 @@ Anything after a `--` separator is appended to the `docker run` command verbatim
 repeated flags, your arguments override the script's defaults:
 
 ```bash
-./claude-yolo.py -- --network host --memory 4g
+./yolo.py -- --network host --memory 4g
 ```
 
 ## Notes and gotchas
@@ -354,6 +370,7 @@ uv sync                 # set up .venv with the dev tools
 uv run pytest           # run the test suite (tests/)
 uv run ruff check .     # lint
 uv run ruff format .    # format
+uv build                # build the wheel/sdist into dist/ (for publishing)
 ```
 
 The tests stub out Docker, the keychain, and `os.execvp`, so they assert on the
