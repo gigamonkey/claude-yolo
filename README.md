@@ -17,6 +17,7 @@ see [Development](#development).)
 
 ## Requirements
 
+- **Docker Desktop** Get it at [docker.com](https://www.docker.com)
 - **macOS.** Credential extraction reads from the macOS keychain via the
   `security` CLI. By default the script also forwards your running SSH agent
   into the container (disable with `--no-ssh-agent`).
