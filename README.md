@@ -17,6 +17,7 @@ see [Development](#development).)
 
 ## Requirements
 
+- **Docker Desktop** Get it at [docker.com](https://www.docker.com)
 - **macOS.** Credential extraction reads from the macOS keychain via the
   `security` CLI. By default the script also forwards your running SSH agent
   into the container (disable with `--no-ssh-agent`).
@@ -40,6 +41,7 @@ dependencies:
 ```bash
 uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
 uv tool upgrade claude-yolo                                    # later, to update
+uv tool update-shell						# add yolo to your $PATH
 ```
 
 You can also run it once without installing: `uvx --from
