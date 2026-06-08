@@ -41,6 +41,7 @@ dependencies:
 ```bash
 uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
 uv tool upgrade claude-yolo                                    # later, to update
+uv tool update-shell						# add yolo to your $PATH
 ```
 
 You can also run it once without installing: `uvx --from
