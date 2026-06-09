@@ -56,6 +56,10 @@ USER claude
 # install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken
 # install and which self-update can't manage. The native binary is standalone (no node needed).
 RUN curl -fsSL https://claude.ai/install.sh | bash
+# Adopt a yolo-provided prompt when the container is launched with -e YOLO_PS1
+# (see _ps1_env_args): flags any bash as a yolo shell and shows where it is.
+# Appended last so it wins over the distro default PS1.
+RUN echo 'if [ -n "$YOLO_PS1" ]; then PS1="$YOLO_PS1"; fi' >> /home/claude/.bashrc
 ENV PATH=/home/claude/.local/bin:$PATH
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
@@ -742,6 +746,46 @@ def build_claude_args(
     return args
 
 
+def _worktree_ps1_label(worktree: pathlib.Path) -> str:
+    """Short display label for a worktree path, used in the in-container PS1.
+
+    The raw path (~/.claude-yolo/worktrees/<slug>/<topic>) is far too long for a
+    prompt, and the slug — the slugified absolute repo path — mostly repeats what
+    every other slug under the worktrees root says. So the label drops the
+    worktrees root and the prefix shared by *all* slugs under it, keeping just the
+    distinguishing tail plus the topic (e.g. "claude-yolo/fix-auth"). With a
+    single slug the shared prefix is the whole slug and the label is just the
+    topic.
+    """
+    slug_dir = worktree.parent
+    siblings = [p.name for p in slug_dir.parent.iterdir() if p.is_dir()]
+    shared = os.path.commonprefix(siblings)
+    short = slug_dir.name[len(shared) :].lstrip("-")
+    return f"{short}/{worktree.name}" if short else worktree.name
+
+
+def _ps1_env_args(cwd: pathlib.Path, worktree_name: str | None) -> list[str]:
+    """docker -e args giving in-container bash a yolo-flagged PS1.
+
+    The image's .bashrc adopts $YOLO_PS1 when set, so any bash — a fresh
+    `yolo shell` container or a `docker exec` into a running one (exec inherits
+    the run-time env) — shows it's a yolo shell and the working directory. In
+    worktree mode the long worktree prefix of $PWD is rewritten to the short
+    label at prompt time (bash expands PS1 itself); YOLO_WT_DIR/YOLO_WT_LABEL
+    carry the pieces because a literal path inlined into ${PWD/#.../...} would
+    clash with the expansion's / delimiters.
+    """
+    tag = r"\[\e[1;33m\]yolo\[\e[0m\]:"
+    blue, reset = r"\[\e[1;34m\]", r"\[\e[0m\]"
+    if worktree_name:
+        where = "${PWD/#$YOLO_WT_DIR/$YOLO_WT_LABEL}"
+        extra = ["-e", f"YOLO_WT_DIR={cwd}", "-e", f"YOLO_WT_LABEL={_worktree_ps1_label(cwd)}"]
+    else:
+        where = r"\w"
+        extra = []
+    return [*extra, "-e", f"YOLO_PS1={tag}{blue}{where}{reset}\\$ "]
+
+
 def launch_container(
     parsed,
     *,
@@ -772,6 +816,8 @@ def launch_container(
         # Hostname set to working dir basename so Claude Code status line shows project name without git
         "--hostname",
         cwd.name,
+        # A yolo-flagged bash prompt for `yolo shell` (fresh or exec'd into this container)
+        *_ps1_env_args(cwd, worktree_name),
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
     ]

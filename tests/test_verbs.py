@@ -147,6 +147,19 @@ def test_shell_errors_without_worktree(cy, run_cli, repo):
         run_cli(["shell", "ghost"], home=home, cwd=r)
 
 
+def test_worktree_launch_exports_ps1_rewrite_env(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    argv = run_cli(["shell", "topic"], home=home, cwd=r)  # fresh container
+    envs = [argv[i + 1] for i, tok in enumerate(argv) if tok == "-e"]
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert f"YOLO_WT_DIR={wt}" in envs
+    # one slug under the worktrees root, so the label collapses to the topic
+    assert "YOLO_WT_LABEL=topic" in envs
+    ps1 = next(e for e in envs if e.startswith("YOLO_PS1="))
+    assert "${PWD/#$YOLO_WT_DIR/$YOLO_WT_LABEL}" in ps1
+
+
 # --- finish -----------------------------------------------------------------
 
 

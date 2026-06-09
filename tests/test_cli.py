@@ -234,6 +234,38 @@ def test_docker_passthrough_after_double_dash(cy, run_cli, dirs):
     assert argv[img - 2 : img] == ["--network", "host"]
 
 
+# --- PS1 (yolo shell prompt) ------------------------------------------------
+
+
+def test_default_run_sets_yolo_ps1(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    ps1 = [e for e in flag_values(argv, "-e") if e.startswith("YOLO_PS1=")]
+    assert ps1, "every launch should export YOLO_PS1 for in-container bash"
+    assert "yolo" in ps1[0]
+    assert r"\w" in ps1[0]  # cwd mode shows the plain working directory
+    # no worktree, so no rewrite helpers
+    assert not any(e.startswith("YOLO_WT_") for e in flag_values(argv, "-e"))
+
+
+def test_worktree_ps1_label_strips_root_and_shared_slug_prefix(cy, tmp_path):
+    root = tmp_path / ".claude-yolo" / "worktrees"
+    a = root / "-Users-peter-hacks-claude-yolo" / "fix-auth"
+    b = root / "-Users-peter-hacks-otherrepo" / "topic"
+    for d in (a, b):
+        d.mkdir(parents=True)
+    # shared prefix "-Users-peter-hacks-" is dropped along with the worktrees root
+    assert cy._worktree_ps1_label(a) == "claude-yolo/fix-auth"
+    assert cy._worktree_ps1_label(b) == "otherrepo/topic"
+
+
+def test_worktree_ps1_label_single_slug_is_just_the_topic(cy, tmp_path):
+    # With one slug the shared prefix is the whole slug; only the topic remains.
+    only = tmp_path / "worktrees" / "-Users-peter-hacks-claude-yolo" / "fix-auth"
+    only.mkdir(parents=True)
+    assert cy._worktree_ps1_label(only) == "fix-auth"
+
+
 # --- verbs ------------------------------------------------------------------
 
 

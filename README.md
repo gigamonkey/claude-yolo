@@ -148,7 +148,9 @@ refactor-db` in another) on the **same repo** without them stepping on each othe
   `--new` (worktree only) starts a fresh named session instead.
 - **`shell [TOPIC]`** drops you into a bash shell: into the **running** container if
   one is up for that worktree (or, with no `TOPIC`, for this directory) — handy while
-  a session works in another terminal — otherwise a fresh throwaway container.
+  a session works in another terminal — otherwise a fresh throwaway container. The
+  prompt flags where you are (`yolo:<dir>$`), with the long worktree path shortened
+  to a `<repo>/<topic>` label (e.g. `yolo:claude-yolo/fix-auth$`).
 - **`finish TOPIC`** (worktree only) removes the worktree but **keeps the branch** (for you to
   merge or push). It refuses if a container is still running, or if there are
   uncommitted changes (override with `--force`).

@@ -314,7 +314,16 @@ gracefully outside one — there's just no repo slug to label/find by).
   picker. `--new` is worktree-only (for the cwd, a fresh session *is* `start`).
 - **`shell [TOPIC]`** — a bash shell. If a container is **running** (label match —
   by worktree for `TOPIC`, by cwd otherwise) → `docker exec -it <id> /bin/bash`;
-  otherwise a fresh ephemeral container with `--entrypoint /bin/bash`.
+  otherwise a fresh ephemeral container with `--entrypoint /bin/bash`. Either way
+  the prompt is yolo-flagged: every launch exports `YOLO_PS1` (`_ps1_env_args`),
+  which the image's `.bashrc` adopts, giving `yolo:<dir>$`. In worktree mode PS1
+  rewrites the long worktree prefix of `$PWD` at prompt time (via the
+  `YOLO_WT_DIR`/`YOLO_WT_LABEL` env vars in a `${PWD/#…/…}` expansion) to a short
+  label (`_worktree_ps1_label`): the `~/.claude-yolo/worktrees/` root and the
+  prefix shared by *all* repo slugs under it are dropped, e.g.
+  `claude-yolo/fix-auth`; with a single slug the label is just the topic. The
+  exec'd case works because `docker exec` inherits the container's run-time env —
+  so the env vars are stamped on *every* launch, not just `shell` ones.
 - **`finish TOPIC`** — `git worktree remove` the worktree, **keep the branch**.
   Refuses if a container is running, or on uncommitted changes (unless `--force`).
   Leaves transcripts (they self-expire via `cleanupPeriodDays`). Prints whether
