@@ -48,6 +48,9 @@ uv tool upgrade claude-yolo                                    # later, to updat
 uv tool update-shell						# add yolo to your $PATH
 ```
 
+Or just run the bundled **`./install-from-git`** script, which wraps that
+`uv tool install` (re-run it any time to update; pass a tag/branch to pin one).
+
 You can also run it once without installing: `uvx --from
 git+https://github.com/gigamonkey/claude-yolo yolo`.
 

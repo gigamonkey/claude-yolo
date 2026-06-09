@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# install-from-git — install (or update) the `yolo` command from the GitHub repo
+# using `uv tool`. Re-run any time to pull the latest from the default branch; pass
+# a git ref (branch, tag, or commit) to install that instead:
+#
+#   ./install-from-git            # latest from the default branch
+#   ./install-from-git v1.2.0     # a specific tag/branch/commit
+set -euo pipefail
+
+REPO="https://github.com/gigamonkey/claude-yolo"
+REF="${1:-}"
+SOURCE="git+${REPO}${REF:+@${REF}}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is not installed. Get it at https://docs.astral.sh/uv/ and re-run." >&2
+  exit 1
+fi
+
+echo "Installing yolo from ${SOURCE} ..."
+# --force so re-running cleanly reinstalls/updates instead of erroring on an
+# existing install.
+uv tool install --force "${SOURCE}"
+
+echo
+if command -v yolo >/dev/null 2>&1; then
+  echo "Done — \`yolo\` is on your PATH at $(command -v yolo)."
+else
+  echo "Done — run \`uv tool update-shell\` (then restart your shell) to put \`yolo\` on your PATH."
+fi
