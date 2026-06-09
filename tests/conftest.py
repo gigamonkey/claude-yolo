@@ -45,6 +45,7 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "build_docker_image", lambda: None)
         monkeypatch.setattr(cy, "ensure_logged_in", lambda c: None)
         monkeypatch.setattr(cy, "extract_credentials", lambda c: creds_path)
+        monkeypatch.setattr(cy, "ensure_oauth_token", lambda c: "sk-ant-oat-TESTTOKEN")
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
         monkeypatch.setattr(cy.sys, "argv", ["yolo", *argv])
 

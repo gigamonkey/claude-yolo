@@ -21,6 +21,8 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
+./yolo.py setup-token              # mint+cache a long-lived OAuth token (once)
+./yolo.py --oauth-token            # auth via that token, not keychain creds
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py -c                       # resume most recent session in this dir
 ./yolo.py -r                       # interactive session picker
@@ -32,10 +34,13 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py list                     # this repo's worktrees
 ```
 
-All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`, and
-`--ssh-agent` are **orthogonal flags** — any reasonable combination is valid. The
-only positional args are an optional `verb` (`init`/`start`/`resume`/`shell`/
-`finish`/`list`) and its `TOPIC`; see [Worktree workflow verbs](#worktree-workflow-verbs).
+All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`,
+`--ssh-agent`, and `--oauth-token` are **orthogonal flags** — any reasonable
+combination is valid (the one exception: `--oauth-token` and `--bedrock` are
+mutually exclusive, since each is a complete auth mechanism). The only positional
+args are an optional `verb`
+(`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
+see [Worktree workflow verbs](#worktree-workflow-verbs).
 
 Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
@@ -113,11 +118,13 @@ both paths run identical code.
    process, so it's interactive `-it --rm`). The args also forward the host git
    identity (`git_identity_args`) and the SSH agent (see gotchas).
 
-## Four orthogonal config/credential axes (all flags, freely combinable)
+## Orthogonal config/credential axes (all flags, freely combinable)
 
 The old single overloaded positional (config dir *or* AWS profile, decided by
-`is_dir()`) is gone. `main` now assembles the credential/config args from four
-independent blocks, none mutually exclusive:
+`is_dir()`) is gone. `main` now assembles the credential/config args from
+independent blocks. They're freely combinable, with one rule: the auth-mechanism
+flags `--bedrock` and `--oauth-token` are mutually exclusive with each other
+(each fully replaces keychain extraction); everything else composes:
 
 - **`--config-dir PATH`** (default `~/.claude`) → mounted at `/home/claude/.claude`.
   When set, credentials are pulled with the hashed service name and the container
@@ -139,13 +146,72 @@ independent blocks, none mutually exclusive:
   socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
   the `known_hosts` mount; in-container GitHub git auth then won't work, since the
   baked HTTPS→SSH rewrite relies on the agent.
+- **`--oauth-token`** → authenticate with a long-lived `CLAUDE_CODE_OAUTH_TOKEN`
+  env var instead of extracting keychain creds. Like `--bedrock` it **skips
+  keychain extraction, the login check, and the `.credentials.json` mount**; it
+  just adds `-e CLAUDE_CODE_OAUTH_TOKEN=…`. Mutually exclusive with `--bedrock`.
+  See [Long-lived OAuth token](#long-lived-oauth-token---oauth-token) below.
 
-Keychain credential extraction happens **iff not `--bedrock`**; the config-dir mount,
+Keychain credential extraction happens **iff neither `--bedrock` nor
+`--oauth-token`** (each is a self-contained auth mechanism); the config-dir mount,
 the `~/.claude.json` mount, and the Bedrock env are otherwise independent — so e.g.
 `--bedrock --config-dir ~/.claude-bdr` (Bedrock auth, separate profile) now works,
 which the old positional scheme could not express. `--bedrock` is a
 `BooleanOptionalAction`, so `--no-bedrock` can turn off a `.yolo.json` that
 enables it.
+
+## Long-lived OAuth token (`--oauth-token`)
+
+The default keychain credentials are an OAuth pair whose **refresh token rotates
+single-use on every refresh** — proven on 2026-06-08 (see `token-investigation.md`).
+yolo mounts a *snapshot* of that pair into each container, so the first party (a
+container *or* the host) to refresh silently invalidates every other snapshot's
+refresh token; the loser gets a 401 on its next refresh. That makes **concurrent
+(and even sequential-with-overlap) yolo sessions unsafe** under the snapshot model.
+We also confirmed (2026-06-09, `precedence-probe.sh` + `host-write-probe*.sh`) that
+a non-empty `~/.claude/.credentials.json` can override the host keychain, so simply
+co-locating a shared file in `~/.claude` is *not* a safe fix.
+
+`--oauth-token` sidesteps the whole problem by using a **different credential
+family** for containers: `claude setup-token` mints a **one-year token that is
+never rotated and never written back**. Because nothing ever rewrites it, any
+number of concurrent containers — and the host on its own keychain creds — can use
+it simultaneously with no interference. It's delivered purely as the
+`CLAUDE_CODE_OAUTH_TOKEN` env var, which in Claude Code's auth precedence
+out-ranks the file/keychain `/login` creds, so even a stale mounted
+`.credentials.json` can't shadow it.
+
+Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
+
+- **Resolution order:** an explicit `CLAUDE_CODE_OAUTH_TOKEN` in the *host* env
+  wins (for CI / self-managed tokens; it's global by nature) → else the
+  yolo-managed macOS keychain entry **for the active config dir** → else mint a
+  fresh one interactively and cache it there.
+- **Per-config-dir, like the keychain creds.** The token is cached under
+  `claude-yolo-oauth-token` for the default config dir, or
+  `claude-yolo-oauth-token-{hash8}` for an alternate `--config-dir`, where `hash8`
+  is the first 8 hex chars of the SHA-256 of the resolved path (`_oauth_service`) —
+  the *same* hash Claude itself uses for its per-dir keychain entry. So each
+  config dir (≈ each account/profile) gets its own long-lived token instead of one
+  global token silently authenticating as the wrong account.
+- **`yolo setup-token`** (a terminal verb) forces a (re)generation —
+  use it for first-time setup or when the year is up. Honours `--config-dir`
+  (and a `.yolo.json` `config-dir`), caching under that dir's service name, so it
+  matches what a launch will read. It runs `claude setup-token`
+  under a **pty** so the child sees a real terminal (the browser/paste OAuth flow
+  works) while yolo tees *and* captures the output, then scrapes the `sk-ant-…`
+  token out (ANSI-stripped, last match). If scraping fails (output shape changed),
+  it falls back to prompting for a manual paste. The token is upserted into the
+  keychain with `security add-generic-password -U`.
+- **Storage rationale:** the keychain (not a dotfile) keeps the secret encrypted
+  at rest, consistent with how Claude Code stores its own creds, and it's
+  *extract-only* — never rotated, never written back — so none of the precedence/
+  rotation hazards of the mounted `.credentials.json` apply.
+- **Caveat:** this *does* put a bearer token inside the container env (a shift from
+  the "secret never enters the container" SSH-agent philosophy), but it's a scoped,
+  inference-only, **individually revocable** token — and no worse than the current
+  mounted refresh-token snapshot, which it replaces. Requires a Pro/Max/Team/
+  Enterprise plan.
 
 ## `.yolo.json` config file (flag defaults)
 
@@ -167,10 +233,10 @@ accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `bedrock`, `aws-profile`, `aws-region`, `bedrock-model`,
-`claude-json`, `ssh-agent`, `base`, `append-system-prompt` (string or list of
-strings). Per-invocation **actions** — `--worktree`, `--continue`, `--resume`,
-and the verbs — are deliberately **not** config keys; putting them in a
-`.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
+`claude-json`, `ssh-agent`, `oauth-token`, `base`, `append-system-prompt` (string
+or list of strings). Per-invocation **actions** — `--worktree`, `--continue`,
+`--resume`, and the verbs — are deliberately **not** config keys; putting them in
+a `.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
 Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
 at the built-in default" (the loader skips it). Unknown keys, wrong types, and
@@ -234,13 +300,16 @@ name) and run from inside a git repo.
 
 Implementation shape:
 
-- **Dispatch is two-tier** (`main`). Terminal verbs (`init`, `list`, `finish`,
-  and `shell`'s exec-into-running case) run off the *first* `parse_args`, before
-  `.yolo.json` is layered — they don't need credential config. Launch verbs
-  (`start`, `resume`, `shell`-fresh, `--worktree`, bare) then load config,
-  re-parse, and call `launch_container`.
+- **Dispatch is two-tier** (`main`). `init` runs off the *first* `parse_args`,
+  before `.yolo.json` is layered, so a broken ancestor/global config can't block
+  scaffolding a fresh one. Everything else re-parses with the config defaults
+  layered in first. The other terminal verbs (`list`, `finish`, `setup-token`, and
+  `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
+  after the config-dir resolution specifically so it caches the token under the
+  right per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh,
+  `--worktree`, bare) call `launch_container`.
 - **`launch_container`** is the single assembly+exec path shared by every launch
-  (extracted from the old inline `main`): mounts, ssh-agent block, the four
+  (extracted from the old inline `main`): mounts, ssh-agent block, the
   credential/config blocks, labels, `--entrypoint` override, then `os.execvp`. It
   takes `container_base`, `command` (args after the image), and optional
   `entrypoint`. `build_claude_args` builds the `claude` command (settings,

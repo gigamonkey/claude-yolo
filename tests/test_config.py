@@ -147,6 +147,7 @@ def test_write_default_yolo_scaffold_is_inert(cy, tmp_path):
         "bedrock": False,
         "claude_json": True,
         "ssh_agent": True,
+        "oauth_token": False,
         "base": "HEAD",
         "append_system_prompts": [],
     }

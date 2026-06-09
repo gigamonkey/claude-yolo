@@ -124,6 +124,64 @@ def test_aws_flag_without_bedrock_warns(cy, run_cli, flag_values, dirs, capsys):
     assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
 
 
+# --- oauth token ------------------------------------------------------------
+
+
+def test_oauth_token_forwards_env_and_skips_keychain(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli(["--oauth-token"], home=home, cwd=work)
+    mounts = flag_values(argv, "-v")
+    envs = flag_values(argv, "-e")
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    # no rotating keychain creds mounted in this mode
+    assert not any(".credentials.json" in m for m in mounts)
+    # the config dir / claude.json are still mounted (auth is orthogonal to them)
+    assert f"{home}/.claude:/home/claude/.claude" in mounts
+    assert f"{home}/.claude.json:/home/claude/.claude.json" in mounts
+
+
+def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    cfg = tmp_path / "cfg"
+    for d in (home, work, cfg):
+        d.mkdir()
+    argv = run_cli(["--oauth-token", "--config-dir", str(cfg)], home=home, cwd=work)
+    mounts = flag_values(argv, "-v")
+    envs = flag_values(argv, "-e")
+    assert f"{cfg}:/home/claude/.claude" in mounts
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    assert not any(".credentials.json" in m for m in mounts)
+
+
+def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    (work / ".yolo.json").write_text(json.dumps({"oauth-token": True}))
+    argv = run_cli([], home=home, cwd=work)
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
+
+
+def test_oauth_token_and_bedrock_mutually_exclusive(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["--oauth-token", "--bedrock"], home=home, cwd=work)
+
+
+def test_oauth_service_is_keyed_to_config_dir(cy, tmp_path):
+    import hashlib
+
+    cfg = tmp_path / "altcfg"
+    cfg.mkdir()
+    default = cy._oauth_service(None)
+    scoped = cy._oauth_service(str(cfg))
+    assert default == cy.OAUTH_KC_SERVICE
+    assert scoped != default
+    # same hash scheme Claude itself uses for the per-dir keychain entry
+    h = hashlib.sha256(str(cfg.resolve()).encode()).hexdigest()[:8]
+    assert scoped == f"{cy.OAUTH_KC_SERVICE}-{h}"
+
+
 # --- .yolo.json integration -------------------------------------------------
 
 

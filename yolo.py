@@ -9,7 +9,9 @@ import hashlib
 import json
 import os
 import pathlib
+import pty
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -147,6 +149,134 @@ def ensure_logged_in(config_dir: str | None) -> None:
         sys.exit("Still not logged in after `claude auth login`; aborting.")
 
 
+# Long-lived OAuth token mode (--oauth-token). Unlike the keychain credentials
+# (which rotate single-use on every refresh — so a snapshot mounted into one
+# container invalidates the host's and every other container's copy the moment it
+# refreshes), `claude setup-token` mints a *stable*, year-long token that is never
+# rotated and never written back. We cache it once in the macOS keychain and
+# forward it as the CLAUDE_CODE_OAUTH_TOKEN env var, which Claude Code reads
+# directly — no .credentials.json mount, no login check. Because nothing ever
+# rewrites it, any number of concurrent containers (and the host) can use it at
+# once. Auth precedence: this env var sits above the file/keychain /login creds,
+# so even a stale mounted .credentials.json can't shadow it.
+OAUTH_KC_SERVICE = "claude-yolo-oauth-token"
+# setup-token prints an OAuth token; detect it in the (ANSI-laden) terminal output.
+_TOKEN_RE = re.compile(rb"sk-ant-[A-Za-z0-9_\-]{20,}")
+_ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _looks_like_token(token: str) -> bool:
+    """A permissive sanity check: non-empty, no whitespace, plausibly long."""
+    return bool(token) and not any(c.isspace() for c in token) and len(token) >= 20
+
+
+def _oauth_service(config_dir: str | None) -> str:
+    """Keychain service name for the yolo OAuth token, keyed to the config dir.
+
+    Mirrors `extract_credentials`' scheme: the default config dir uses the bare
+    service name, an alternate `--config-dir` gets a `-{hash8}` suffix where hash8
+    is the first 8 hex chars of the SHA-256 of the resolved path (the same hash
+    Claude itself uses for its per-dir keychain entry). So each config dir (≈ each
+    account/profile) caches its own long-lived token, instead of one global token
+    shadowing them all.
+    """
+    if config_dir:
+        config_path = pathlib.Path(config_dir).resolve()
+        hash8 = hashlib.sha256(str(config_path).encode()).hexdigest()[:8]
+        return f"{OAUTH_KC_SERVICE}-{hash8}"
+    return OAUTH_KC_SERVICE
+
+
+def _read_oauth_token(config_dir: str | None) -> str | None:
+    """The cached yolo OAuth token for this config dir, or None."""
+    result = subprocess.run(
+        ["security", "find-generic-password", "-s", _oauth_service(config_dir), "-w"],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() or None
+
+
+def _store_oauth_token(token: str, config_dir: str | None) -> None:
+    """Upsert the yolo OAuth token for this config dir into the keychain (-U)."""
+    subprocess.run(
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-a",
+            os.environ.get("USER", "claude-yolo"),
+            "-s",
+            _oauth_service(config_dir),
+            "-w",
+            token,
+        ],
+        check=True,
+    )
+
+
+def generate_oauth_token(config_dir: str | None) -> str:
+    """Run `claude setup-token` interactively, capture the token, cache it.
+
+    `claude setup-token` walks the user through a browser OAuth flow and prints a
+    one-year token (it saves it nowhere). We run it under a pty so the child still
+    sees a terminal — the browser/paste flow works — while we tee its output to our
+    stdout *and* capture it, then scrape the token out. The pty path makes this
+    robust to whether setup-token writes the token to stdout or the tty. If
+    scraping fails (e.g. the token format changed), we fall back to asking the user
+    to paste what was printed. The token is cached in the macOS keychain under the
+    per-config-dir service name (`_oauth_service`) for reuse.
+    """
+    if not shutil.which("claude"):
+        sys.exit("`claude` not found on host; install Claude Code to run `setup-token`.")
+    print("Generating a long-lived (1-year) OAuth token via `claude setup-token`.")
+    print("Authorize in the browser when prompted.\n", flush=True)
+
+    captured = bytearray()
+
+    def _read(fd):
+        data = os.read(fd, 1024)
+        captured.extend(data)
+        return data
+
+    status = pty.spawn(["claude", "setup-token"], _read)
+    if status != 0:
+        print("\n`claude setup-token` did not exit cleanly.", file=sys.stderr)
+
+    clean = _ANSI_RE.sub(b"", bytes(captured))
+    matches = _TOKEN_RE.findall(clean)
+    token = matches[-1].decode() if matches else ""
+    if not token:
+        # Couldn't auto-detect (unexpected output shape) — ask for a manual paste.
+        token = input("\nCouldn't auto-detect the token. Paste it here: ").strip()
+    if not _looks_like_token(token):
+        sys.exit("That doesn't look like a valid OAuth token; aborting.")
+
+    _store_oauth_token(token, config_dir)
+    print(
+        f"\nStored the OAuth token in the macOS keychain (service '{_oauth_service(config_dir)}')."
+    )
+    return token
+
+
+def ensure_oauth_token(config_dir: str | None) -> str:
+    """Return a long-lived OAuth token to forward into the container.
+
+    Resolution order: an explicit CLAUDE_CODE_OAUTH_TOKEN in the host env wins (for
+    CI / users who manage it themselves, and it's global by nature); else the
+    yolo-managed keychain cache *for this config dir*; else mint a fresh one via
+    `claude setup-token` and cache it under that config dir's service name.
+    """
+    env_tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    cached = _read_oauth_token(config_dir)
+    if cached:
+        return cached
+    print("No cached yolo OAuth token found; generating one.")
+    return generate_oauth_token(config_dir)
+
+
 def git_identity_args() -> list[str]:
     """Forward the host's git identity into the container as docker `-e` args.
 
@@ -263,6 +393,7 @@ YOLO_KEYS = {
     "bedrock_model": ("bedrock_model", "str"),
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
+    "oauth_token": ("oauth_token", "bool"),
     "base": ("base", "str"),
     "append_system_prompt": ("append_system_prompts", "list"),
 }
@@ -278,6 +409,7 @@ YOLO_INIT_DEFAULTS = {
     "bedrock-model": None,
     "claude-json": True,
     "ssh-agent": True,
+    "oauth-token": False,
     "base": "HEAD",
     "append-system-prompt": [],
 }
@@ -371,11 +503,12 @@ PARSER = argparse.ArgumentParser(
 PARSER.add_argument(
     "verb",
     nargs="?",
-    choices=["init", "start", "resume", "shell", "finish", "list"],
+    choices=["init", "start", "resume", "shell", "finish", "list", "setup-token"],
     help="Optional subcommand. start/resume/shell/finish take a TOPIC (a worktree "
     "name): start a new worktree+branch, resume/open a shell in an existing one, or "
     "finish (remove) one. 'list' shows this repo's worktrees; 'init' writes a "
-    ".yolo.json. Omit the verb to run Claude in the current directory.",
+    ".yolo.json; 'setup-token' mints/caches a long-lived OAuth token (for "
+    "--oauth-token). Omit the verb to run Claude in the current directory.",
 )
 PARSER.add_argument(
     "topic",
@@ -444,6 +577,16 @@ PARSER.add_argument(
     default=True,
     help="Forward the host ssh-agent socket into the container (default: on). "
     "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
+)
+PARSER.add_argument(
+    "--oauth-token",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Authenticate with a long-lived CLAUDE_CODE_OAUTH_TOKEN (from `claude "
+    "setup-token`) instead of extracting rotating keychain credentials. The token "
+    "is cached in the macOS keychain and forwarded as an env var — stable and "
+    "never written back, so it's safe for concurrent containers. Generate/refresh "
+    "it with `yolo setup-token`. Use --no-oauth-token to override a .yolo.json.",
 )
 PARSER.add_argument(
     "--append-system-prompt",
@@ -630,8 +773,17 @@ def launch_container(
     if parsed.claude_json:
         args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
 
-    # (c) Keychain credentials, only when NOT using Bedrock (Bedrock authenticates via AWS).
-    if not parsed.bedrock:
+    # (c) Auth credential. Three mutually exclusive mechanisms:
+    #   - --oauth-token: forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var. No
+    #     keychain extraction, no login check, no .credentials.json mount — the
+    #     token is stable (never rotated/written back), so concurrent containers
+    #     and the host can all use it at once. The env var also out-ranks any file
+    #     creds, so a stale mounted .credentials.json can't shadow it.
+    #   - --bedrock: AWS creds (block d) — skips this entirely.
+    #   - default: extract the rotating keychain credentials into a mounted file.
+    if parsed.oauth_token:
+        args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
+    elif not parsed.bedrock:
         ensure_logged_in(config_dir)
         credfile = extract_credentials(config_dir)
         args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
@@ -866,6 +1018,11 @@ def main():
             return  # execvp doesn't return on success; guard the stubbed/failed case
         # No container running: fall through to launch a fresh bash container below.
 
+    if parsed.oauth_token and parsed.bedrock:
+        sys.exit(
+            "--oauth-token and --bedrock are mutually exclusive (each is a full auth mechanism)."
+        )
+
     # AWS knobs are inert without bedrock mode (the bedrock block is the only
     # consumer), so just warn rather than failing — bedrock may be toggled off via
     # --no-bedrock over a .yolo.json that sets it.
@@ -876,6 +1033,13 @@ def main():
         )
     if parsed.config_dir and not pathlib.Path(parsed.config_dir).is_dir():
         sys.exit(f"config-dir: not a directory: {parsed.config_dir}")
+
+    # setup-token is terminal: mint/cache the OAuth token and exit. Dispatched here
+    # (after config load) so it honours a `.yolo.json`/--config-dir — the token is
+    # cached under that config dir's service name, matching what a launch will read.
+    if verb == "setup-token":
+        generate_oauth_token(parsed.config_dir)
+        return
 
     # Resolve the worktree (if any) and the trailing command per verb.
     common_git = None
