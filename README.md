@@ -17,11 +17,13 @@ see [Development](#development).)
 
 ## Requirements
 
-- **Docker Desktop** Get it at [docker.com](https://www.docker.com)
 - **macOS.** Credential extraction reads from the macOS keychain via the
   `security` CLI. By default the script also forwards your running SSH agent
   into the container (disable with `--no-ssh-agent`).
-- **Docker** installed and running.
+- **A Docker engine** installed and running — either
+  [Docker Desktop](https://www.docker.com) or [OrbStack](https://orbstack.dev).
+  Both expose the host SSH agent at `/run/host-services/ssh-auth.sock`, which is
+  how agent forwarding works (see [below](#why-forward-the-ssh-agent)).
 - **[uv](https://docs.astral.sh/uv/)** installed. The script's shebang is
   `#!/usr/bin/env -S uv run --script`, so it self-runs under uv, which guarantees
   a Python ≥3.10 (it's still stdlib-only — uv just picks the interpreter, since
@@ -249,7 +251,7 @@ hands back the *signature*. The key itself never leaves the agent.
 claude-yolo bind-mounts that socket into the container and sets `SSH_AUTH_SOCK`
 inside it to point at the mount. So `ssh` (and `git` over SSH) inside the
 container authenticates through your host agent — Claude can push to a private
-repo, but it never gets to read the private key. (The socket Docker Desktop
+repo, but it never gets to read the private key. (The socket the Docker engine
 exposes is owned `root:root` with mode `srw-rw----`, so the container's `claude`
 user is added to group 0 — root's group — to get the group-write permission that
 `connect()` needs. This adds no real privilege: the user already has passwordless
