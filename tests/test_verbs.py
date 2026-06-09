@@ -35,7 +35,7 @@ def repo(tmp_path):
 @pytest.fixture(autouse=True)
 def no_docker_ps(cy, monkeypatch):
     """Default: no container is running for any topic (override per-test)."""
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic: None)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: None)
 
 
 def worktree_label(argv):
@@ -125,7 +125,9 @@ def test_resume_with_session_id(cy, run_cli, repo):
 def test_shell_execs_into_running_container(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic: "cid123456789")
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789"
+    )
     argv = run_cli(["shell", "topic"], home=home, cwd=r)
     assert argv == ["docker", "exec", "-it", "cid123456789", "/bin/bash"]
 
@@ -173,7 +175,7 @@ def test_finish_refuses_dirty_without_force(cy, run_cli, repo):
 def test_finish_refuses_when_container_running(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic: "cid")
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     with pytest.raises(SystemExit):
         run_cli(["finish", "topic"], home=home, cwd=r)
 
@@ -284,16 +286,79 @@ def test_list_merged_uses_base_target(cy, run_cli, repo, capsys):
     assert _status_for(capsys.readouterr().out, "feat") == "merged"  # vs release
 
 
+# --- current-directory mode (no TOPIC) --------------------------------------
+
+
+def test_start_no_topic_runs_in_cwd(cy, run_cli, repo):
+    r, home = repo
+    argv = run_cli(["start"], home=home, cwd=r)
+    # No worktree was created; the container runs in (and is named for) the cwd.
+    assert not (home / ".claude-yolo").exists()
+    assert worktree_label(argv) is None
+    cmd = claude_command(cy, argv)
+    assert "--name" not in cmd  # a plain cwd session is unnamed
+    assert "--continue" not in cmd and "--resume" not in cmd  # fresh
+
+
+def test_bare_is_equivalent_to_start(cy, run_cli, repo):
+    r, home = repo
+    bare = run_cli([], home=home, cwd=r)
+    started = run_cli(["start"], home=home, cwd=r)
+    assert claude_command(cy, bare) == claude_command(cy, started)
+
+
+def test_resume_no_topic_continues_cwd(cy, run_cli, repo):
+    r, home = repo
+    argv = run_cli(["resume"], home=home, cwd=r)
+    assert worktree_label(argv) is None
+    assert "--continue" in claude_command(cy, argv)
+
+
+def test_resume_no_topic_with_session_id(cy, run_cli, repo):
+    r, home = repo
+    argv = run_cli(["resume", "-r", "SID"], home=home, cwd=r)
+    cmd = claude_command(cy, argv)
+    assert "--resume" in cmd and "SID" in cmd
+
+
+def test_shell_no_topic_execs_into_running_cwd_container(cy, run_cli, repo, monkeypatch):
+    r, home = repo
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cidcwd123456"
+    )
+    argv = run_cli(["shell"], home=home, cwd=r)
+    assert argv == ["docker", "exec", "-it", "cidcwd123456", "/bin/bash"]
+
+
+def test_shell_no_topic_fresh_container(cy, run_cli, repo):
+    r, home = repo
+    argv = run_cli(["shell"], home=home, cwd=r)  # no running container
+    assert worktree_label(argv) is None
+    assert argv[argv.index("--entrypoint") + 1] == "/bin/bash"
+
+
 # --- dispatch guards --------------------------------------------------------
 
 
-def test_verb_requires_topic(cy, run_cli, repo):
+def test_finish_requires_topic(cy, run_cli, repo):
     r, home = repo
     with pytest.raises(SystemExit):
-        run_cli(["start"], home=home, cwd=r)
+        run_cli(["finish"], home=home, cwd=r)
 
 
 def test_new_only_with_resume(cy, run_cli, repo):
     r, home = repo
     with pytest.raises(SystemExit):
         run_cli(["start", "topic", "--new"], home=home, cwd=r)
+
+
+def test_new_requires_topic(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["resume", "--new"], home=home, cwd=r)
+
+
+def test_resume_flag_only_with_resume_verb(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["-r", "SID"], home=home, cwd=r)

@@ -527,16 +527,19 @@ PARSER.add_argument(
     "verb",
     nargs="?",
     choices=["init", "start", "resume", "shell", "finish", "list", "setup-token"],
-    help="Optional subcommand. start/resume/shell/finish take a TOPIC (a worktree "
-    "name): start a new worktree+branch, resume/open a shell in an existing one, or "
-    "finish (remove) one. 'list' shows this repo's worktrees; 'init' writes a "
-    ".yolo.json; 'setup-token' mints/caches a long-lived OAuth token (for "
-    "--auth oauth-token). Omit the verb to run Claude in the current directory.",
+    help="Optional subcommand. start/resume/shell take an *optional* TOPIC: with a "
+    "TOPIC they act on a git worktree of that name (start creates it, resume/shell "
+    "require it); with no TOPIC they act on the current directory (start a fresh "
+    "session, resume the most recent one, or open a shell). 'finish' removes a "
+    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'init' writes "
+    "a .yolo.json; 'setup-token' mints/caches a long-lived OAuth token (for --auth "
+    "oauth-token). A bare `yolo` is equivalent to `yolo start`.",
 )
 PARSER.add_argument(
     "topic",
     nargs="?",
-    help="Worktree/branch name for start/resume/shell/finish.",
+    help="Worktree/branch name. Required for finish; optional for start/resume/shell "
+    "(omit it to act on the current directory).",
 )
 PARSER.add_argument(
     "--base",
@@ -630,15 +633,10 @@ PARSER.add_argument(
 # Resume a prior session. Session history lives in the bind-mounted ~/.claude/projects/
 # and is keyed by the project path, which matches between host and container (cwd is mounted
 # at its identical path), so sessions started in a yolo container are resumable here.
-RESUME_GROUP = PARSER.add_mutually_exclusive_group()
-RESUME_GROUP.add_argument(
-    "--continue",
-    "-c",
-    dest="continue_session",
-    action="store_true",
-    help="Resume the most recent Claude session for this directory (claude --continue).",
-)
-RESUME_GROUP.add_argument(
+# For the `resume` verb. A plain `resume` continues the most recent session
+# (claude --continue); -r picks a specific session by SESSION_ID, or opens the
+# interactive picker when given no ID (claude --resume).
+PARSER.add_argument(
     "--resume",
     "-r",
     dest="resume",
@@ -646,29 +644,33 @@ RESUME_GROUP.add_argument(
     const=True,
     default=None,
     metavar="SESSION_ID",
-    help="Resume a Claude session by SESSION_ID, or omit it for an interactive picker "
-    "(claude --resume).",
+    help="With `resume`: resume a specific Claude session by SESSION_ID, or omit it "
+    "for an interactive picker (claude --resume). A plain `resume` (no -r) continues "
+    "the most recent session.",
 )
 
 
-def running_container_for(slug: str, topic: str) -> str | None:
-    """The id of a running yolo container for this repo+topic, or None.
+def running_container_for(
+    slug: str | None, topic: str | None = None, *, cwd: pathlib.Path | None = None
+) -> str | None:
+    """The id of a running yolo container for this repo, or None.
 
-    Containers are tagged with yolo.repo / yolo.worktree labels at launch, so we
-    find them by label rather than reconstructing the (suffix-laden) name.
+    Containers are tagged with yolo.repo / yolo.worktree / yolo.cwd labels at launch,
+    so we find them by label rather than reconstructing the (suffix-laden) name. Pass
+    `topic` to match a worktree container, or `cwd` to match a plain current-directory
+    container (a worktree runs under its own path, so the cwd label disambiguates the
+    two even though they share a repo slug).
     """
+    filters = []
+    if slug:
+        filters += ["--filter", f"label=yolo.repo={slug}"]
+    if topic:
+        filters += ["--filter", f"label=yolo.worktree={topic}"]
+    if cwd:
+        filters += ["--filter", f"label=yolo.cwd={cwd}"]
     try:
         out = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=yolo.repo={slug}",
-                "--filter",
-                f"label=yolo.worktree={topic}",
-                "--format",
-                "{{.ID}}",
-            ],
+            ["docker", "ps", *filters, "--format", "{{.ID}}"],
             capture_output=True,
             text=True,
         ).stdout.strip()
@@ -693,9 +695,13 @@ def build_claude_args(
     """
     extra_system_prompt = [
         "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
-        *([
-            "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."
-        ] if not ssh_agent else []),
+        *(
+            [
+                "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."
+            ]
+            if not ssh_agent
+            else []
+        ),
         *append_system_prompts,
     ]
     args = [
@@ -826,11 +832,13 @@ def launch_container(
         args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
 
     # Labels let the verbs (shell/finish/list) find this container later, regardless
-    # of the name suffixes above.
+    # of the name suffixes above. yolo.cwd is stamped on every launch so a plain
+    # `shell` (no topic) can find the container running in this exact directory.
     if slug:
         args += ["--label", f"yolo.repo={slug}"]
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
+    args += ["--label", f"yolo.cwd={cwd}"]
 
     build_docker_image(no_cache=parsed.rebuild_image)
 
@@ -1007,12 +1015,23 @@ def main():
     parsed = PARSER.parse_args(script_argv)
     verb, topic = parsed.verb, parsed.topic
 
-    if verb in ("start", "resume", "shell", "finish") and not topic:
-        sys.exit(f"`{verb}` needs a topic name, e.g. `yolo {verb} my-topic`.")
+    # `finish` only makes sense against a worktree, so it still requires a TOPIC;
+    # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
+    if verb == "finish" and not topic:
+        sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
     if topic and verb not in ("start", "resume", "shell", "finish"):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
+    if parsed.new and not topic:
+        sys.exit(
+            "--new applies to `resume TOPIC` (a fresh session in a worktree); "
+            "for the current directory, use `start`."
+        )
+    if parsed.resume is not None and verb != "resume":
+        sys.exit("--resume/-r only applies to `resume`.")
+    if parsed.new and parsed.resume is not None:
+        sys.exit("--new can't be combined with --resume/-r.")
     if parsed.force and verb != "finish":
         sys.exit("--force only applies to `finish`.")
 
@@ -1034,12 +1053,17 @@ def main():
         do_finish(topic, home, force=parsed.force)
         return
     if verb == "shell":
-        worktree, _, slug = _worktree_dir(topic, home)
-        if not worktree.is_dir():
-            sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-        cid = running_container_for(slug, topic)
+        if topic:
+            worktree, _, slug = _worktree_dir(topic, home)
+            if not worktree.is_dir():
+                sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+            cid = running_container_for(slug, topic)
+        else:
+            # Plain current-directory shell: match the container running in this dir.
+            cid = running_container_for(_repo_slug_or_none(), cwd=cwd)
         if cid:
-            print(f"Opening a shell in the running container for '{topic}' ({cid[:12]}).")
+            where = f"for '{topic}'" if topic else "in this directory"
+            print(f"Opening a shell in the running container {where} ({cid[:12]}).")
             os.execvp("docker", ["docker", "exec", "-it", cid, "/bin/bash"])
             return  # execvp doesn't return on success; guard the stubbed/failed case
         # No container running: fall through to launch a fresh bash container below.
@@ -1064,69 +1088,64 @@ def main():
         generate_oauth_token(parsed.config_dir)
         return
 
-    # Resolve the worktree (if any) and the trailing command per verb.
+    # Resolve where we run and the trailing command per verb.
     common_git = None
     slug = None
     worktree_name = None
     entrypoint = None
 
-    if verb == "start":
-        worktree, main_root, slug = _worktree_dir(topic, home)
-        if worktree.exists() or _branch_exists(topic):
-            sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
-        cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
-        worktree_name = topic
-        container_base = f"{main_root.name}-{topic}"
-        command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=topic)
-
-    elif verb == "resume":
-        worktree, main_root, slug = _worktree_dir(topic, home)
-        if not worktree.is_dir():
-            sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-        if parsed.new and (parsed.continue_session or parsed.resume is not None):
-            sys.exit("--new can't be combined with --continue/--resume.")
-        cwd, common_git = worktree, _repo_paths()[0]
-        worktree_name = topic
-        container_base = f"{main_root.name}-{topic}"
-        if parsed.new:
-            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=topic)
-        elif parsed.resume is not None:
-            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume)
-        else:
-            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True)
-
-    elif verb == "shell":
-        # Fresh bash container (the exec-into-running case already returned above).
-        worktree, main_root, slug = _worktree_dir(topic, home)
-        cwd, common_git = worktree, _repo_paths()[0]
-        worktree_name = topic
-        container_base = f"{main_root.name}-{topic}"
-        command = []
-        entrypoint = "/bin/bash"
-
-    else:
-        # Bare launch, or the legacy --worktree flag.
+    # The legacy `--worktree NAME` flag is the create-or-reuse primitive that
+    # start/resume are sugar over; handle it on its own. A bare `yolo` (no verb,
+    # no --worktree) is equivalent to `yolo start` in the current directory.
+    if verb is None and parsed.worktree:
+        cwd, common_git, main_root = setup_worktree(parsed.worktree, home, base=parsed.base)
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
         worktree_name = parsed.worktree
-        if worktree_name:
-            cwd, common_git, main_root = setup_worktree(worktree_name, home, base=parsed.base)
-            slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
-            container_base = f"{main_root.name}-{worktree_name}"
-            name = (
-                worktree_name
-                if not (parsed.continue_session or parsed.resume is not None)
-                else None
-            )
+        container_base = f"{main_root.name}-{parsed.worktree}"
+        command = build_claude_args(
+            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=parsed.worktree
+        )
+    else:
+        if verb is None:
+            verb = "start"
+
+        # Locate the run: an explicit TOPIC means a git worktree (start creates it,
+        # resume/shell require it); no TOPIC means the current directory.
+        if topic:
+            worktree, main_root, slug = _worktree_dir(topic, home)
+            if verb == "start":
+                if worktree.exists() or _branch_exists(topic):
+                    sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
+                cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
+            else:
+                if not worktree.is_dir():
+                    sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+                cwd, common_git = worktree, _repo_paths()[0]
+            worktree_name = topic
+            container_base = f"{main_root.name}-{topic}"
+            session_name = topic
         else:
             slug = _repo_slug_or_none()
             container_base = cwd.name
-            name = None
-        command = build_claude_args(
-            parsed.append_system_prompts,
-            ssh_agent=parsed.ssh_agent,
-            continue_session=parsed.continue_session,
-            resume=parsed.resume,
-            name=name,
-        )
+            session_name = None  # a plain cwd session is unnamed
+
+        # Build the trailing command for the verb.
+        if verb == "shell":
+            command = []
+            entrypoint = "/bin/bash"
+        elif verb == "resume" and parsed.resume is not None:
+            command = build_claude_args(
+                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume
+            )
+        elif verb == "resume" and not parsed.new:
+            command = build_claude_args(
+                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True
+            )
+        else:
+            # start, or `resume TOPIC --new` (a fresh named session in the worktree).
+            command = build_claude_args(
+                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=session_name
+            )
 
     launch_container(
         parsed,

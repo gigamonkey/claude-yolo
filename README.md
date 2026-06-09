@@ -74,12 +74,16 @@ yolo --auth oauth-token                # long-lived token (best for long/concurr
 yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
 yolo setup-token                       # mint+cache the long-lived OAuth token (once)
 yolo --no-ssh-agent                    # don't forward the host SSH agent
-yolo -c                                # resume the most recent session here
-yolo -r [SESSION_ID]                   # pick / resume a session
 yolo init                              # write a .yolo.json of defaults, then exit
 yolo -- --network host                 # pass extra args to `docker run`
 
-# the worktree workflow (see below):
+# verbs in the current directory (no worktree):
+yolo                                   # == `yolo start`: a fresh session here
+yolo resume                            # continue the most recent session here
+yolo resume -r [SESSION_ID]            # pick / resume a specific session here
+yolo shell                             # bash shell in this dir's container (or fresh)
+
+# the worktree workflow (see below) — the same verbs, plus a TOPIC:
 yolo start fix-auth                    # new worktree+branch, launch a session
 yolo resume fix-auth                   # re-enter it, continue the session
 yolo shell fix-auth                    # open a bash shell in its container
@@ -103,12 +107,21 @@ add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
 instructions onto Claude's system prompt, and set defaults for most flags in a
 [`.yolo.json` file](#configuring-defaults-with-yolojson).
 
-## The worktree workflow
+## The verbs (and the worktree workflow)
 
-Most work with `claude-yolo` is meant to land on a branch you can merge or open a
-PR from. The verbs make that the path of least resistance — each takes a `TOPIC`
-(which becomes both the git worktree and the branch name) and runs from inside a
-repo:
+`start`, `resume`, and `shell` take an **optional** `TOPIC`. With no `TOPIC` they
+act on the **current directory** (no worktree); a bare `yolo` is just `yolo start`:
+
+```bash
+yolo            # == yolo start: a fresh session in the current directory
+yolo resume     # continue the most recent session here (yolo resume -r [ID] for a specific one)
+yolo shell      # a bash shell in this dir's running container, or a fresh one
+```
+
+Give them a `TOPIC` and they switch to the **worktree workflow** instead. Most work
+with `claude-yolo` is meant to land on a branch you can merge or open a PR from, and
+the worktree verbs make that the path of least resistance — the `TOPIC` becomes both
+the git worktree and the branch name, and you run from inside a repo:
 
 ```bash
 cd ~/hacks/bells
@@ -123,17 +136,19 @@ yolo finish fix-auth      # done — remove the worktree, keep the branch to mer
 You can run several at once (`start fix-auth` in one terminal, `start
 refactor-db` in another) on the **same repo** without them stepping on each other.
 
-- **`start TOPIC`** creates a git **worktree** on a new branch `TOPIC`, branched
-  off `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
-  set `"base"` in `.yolo.json`), and launches a fresh session named `TOPIC`. It
-  errors if that topic already exists — use `resume`.
-- **`resume TOPIC`** re-enters an existing worktree and, by default, continues its
-  most recent session. `--new` starts a fresh session instead; `-r [SESSION_ID]`
-  picks a specific one. Errors if the worktree doesn't exist — use `start`.
-- **`shell TOPIC`** drops you into a bash shell on the worktree: into the
-  **running** container if one is up (handy while a session works in another
-  terminal), otherwise a fresh throwaway container.
-- **`finish TOPIC`** removes the worktree but **keeps the branch** (for you to
+- **`start [TOPIC]`** with a `TOPIC` creates a git **worktree** on a new branch
+  `TOPIC`, branched off `HEAD` by default (change with `--base REF`, e.g. `--base
+  origin/main`, or set `"base"` in `.yolo.json`), and launches a fresh session named
+  `TOPIC`; it errors if that topic already exists (use `resume`). With no `TOPIC` it
+  just starts a fresh session in the current directory.
+- **`resume [TOPIC]`** continues the most recent session — on the worktree `TOPIC`
+  (errors if it doesn't exist — use `start`) or, with no `TOPIC`, in the current
+  directory. `-r [SESSION_ID]` picks a specific session (or opens the picker);
+  `--new` (worktree only) starts a fresh named session instead.
+- **`shell [TOPIC]`** drops you into a bash shell: into the **running** container if
+  one is up for that worktree (or, with no `TOPIC`, for this directory) — handy while
+  a session works in another terminal — otherwise a fresh throwaway container.
+- **`finish TOPIC`** (worktree only) removes the worktree but **keeps the branch** (for you to
   merge or push). It refuses if a container is still running, or if there are
   uncommitted changes (override with `--force`).
 - **`list`** shows the repo's worktrees (TOPIC / BRANCH / STATUS / DIRECTORY).
@@ -410,7 +425,7 @@ Supported keys: `config-dir`, `auth` (`keychain`/`oauth-token`/`bedrock`),
 `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`, `ssh-agent`, `base`
 (the default branch point for `start`), and `append-system-prompt` (a string or
 list of strings). A `null` value leaves a key at its built-in default. The
-per-invocation actions (`--worktree`, `--continue`, `--resume`, and the verbs) are
+per-invocation actions (`--worktree`, `--resume`, and the verbs) are
 deliberately **not** config keys.
 
 To get started, `yolo init` writes a `.yolo.json` of default values

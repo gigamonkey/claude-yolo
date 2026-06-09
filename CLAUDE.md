@@ -24,9 +24,11 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py setup-token              # mint+cache a long-lived OAuth token (once)
 ./yolo.py --auth oauth-token       # auth via that token, not keychain creds
 ./yolo.py -- --network host        # extra docker run args
-./yolo.py -c                       # resume most recent session in this dir
-./yolo.py -r                       # interactive session picker
-./yolo.py -r SESSION_ID            # resume a specific session
+./yolo.py                          # == `yolo start`: fresh session in the cwd
+./yolo.py resume                   # continue most recent session in this dir
+./yolo.py resume -r                # interactive session picker (cwd)
+./yolo.py resume -r SESSION_ID     # resume a specific session (cwd)
+./yolo.py shell                    # bash shell in the cwd's container (or fresh)
 ./yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
 ./yolo.py resume fix-auth          # re-enter that worktree, continue the session
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
@@ -40,7 +42,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 flag** that composes freely with the chosen auth mode and with each other. The
 only positional args are an optional `verb`
 (`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
-see [Worktree workflow verbs](#worktree-workflow-verbs).
+see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in a `.yolo.json` file (see the config
 file section below):
@@ -247,8 +249,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `AUTH_CHOICES` in `_parse_yolo_file`, since `set_defaults` bypasses argparse's
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
 `ssh-agent`, `base`, `append-system-prompt` (string or list of strings).
-Per-invocation **actions** — `--worktree`, `--continue`,
-`--resume`, and the verbs — are deliberately **not** config keys; putting them in
+Per-invocation **actions** — `--worktree`, `--resume`,
+and the verbs — are deliberately **not** config keys; putting them in
 a `.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
 Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
@@ -260,7 +262,7 @@ malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
 `yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
 values into the cwd, then exits — it does **not** run a container. `init` is one
 value of the optional positional `verb` (`choices=["init", "start", "resume",
-"shell", "finish", "list", "setup-token"]`; see [verbs](#worktree-workflow-verbs));
+"shell", "finish", "list", "setup-token"]`; see [verbs](#workflow-verbs));
 with no verb, `main` proceeds to the run path. The verb is dispatched off a *first*
 `parse_args` **before** any `.yolo.json` is loaded — so a broken ancestor/global
 config can't block scaffolding a fresh one — and the run path then re-parses with
@@ -280,23 +282,29 @@ erroring, since the auth mode may legitimately be set to bedrock in a `.yolo.jso
 and overridden back to `keychain`/`oauth-token` on the CLI over a file that also
 set the AWS knobs.
 
-## Worktree workflow verbs
+## Workflow verbs
 
-The opinionated front door to the worktree machinery: most work is meant to land
-on a branch that can be merged or PR'd. All take a `TOPIC` (the worktree/branch
-name) and run from inside a git repo.
+The opinionated front door. `start`/`resume`/`shell` take an **optional** `TOPIC`:
+**with** a `TOPIC` they act on a git worktree of that name (the worktree workflow —
+most work is meant to land on a branch that can be merged or PR'd); **without** one
+they act on the **current directory** (no worktree), so the same verbs work whether
+or not you want a branch. `finish` only makes sense against a worktree, so it still
+**requires** a `TOPIC`. A bare `yolo` (no verb) is equivalent to `yolo start` (a
+fresh session in the cwd). All run from inside a git repo (the cwd-mode verbs degrade
+gracefully outside one — there's just no repo slug to label/find by).
 
-- **`start TOPIC`** — create a new worktree + branch `TOPIC` off `--base`
-  (default `HEAD`; see `base` below) and launch a container with a fresh session
-  named `TOPIC`. **Errors if the worktree or branch already exists** (use
-  `resume`).
-- **`resume TOPIC`** — launch a container on an existing worktree. Default
-  `claude --continue` (most recent session); `--new` starts a fresh named
-  session; `-r [ID]` resumes a specific one / opens the picker. **Errors if the
-  worktree doesn't exist** (use `start`).
-- **`shell TOPIC`** — a bash shell on the worktree. If a container is **running**
-  for it (label match) → `docker exec -it <id> /bin/bash`; otherwise a fresh
-  ephemeral container with `--entrypoint /bin/bash`.
+- **`start [TOPIC]`** — *with `TOPIC`:* create a new worktree + branch `TOPIC` off
+  `--base` (default `HEAD`; see `base` below) and launch a container with a fresh
+  session named `TOPIC`; **errors if the worktree or branch already exists** (use
+  `resume`). *No `TOPIC`:* a fresh (unnamed) session in the current directory.
+- **`resume [TOPIC]`** — continue the most recent session (`claude --continue`).
+  *With `TOPIC`:* on that existing worktree (**errors if it doesn't exist** — use
+  `start`); `--new` starts a fresh named session there instead. *No `TOPIC`:* in the
+  current directory. `-r [ID]` (either mode) resumes a specific session / opens the
+  picker. `--new` is worktree-only (for the cwd, a fresh session *is* `start`).
+- **`shell [TOPIC]`** — a bash shell. If a container is **running** (label match —
+  by worktree for `TOPIC`, by cwd otherwise) → `docker exec -it <id> /bin/bash`;
+  otherwise a fresh ephemeral container with `--entrypoint /bin/bash`.
 - **`finish TOPIC`** — `git worktree remove` the worktree, **keep the branch**.
   Refuses if a container is running, or on uncommitted changes (unless `--force`).
   Leaves transcripts (they self-expire via `cleanupPeriodDays`). Prints whether
@@ -327,13 +335,25 @@ Implementation shape:
   `entrypoint`. `build_claude_args` builds the `claude` command (settings,
   built-in prompt, `--continue`/`--resume`, `--name`).
 - **Containers are found by docker label, not name.** Every launch is stamped
-  `--label yolo.repo=<repo-slug>` (and `yolo.worktree=<topic>` for worktrees);
-  `running_container_for(slug, topic)` queries `docker ps --filter label=…`. This
-  is robust to the `-{config}`/`-{profile}` name suffixes. `shell`/`finish`/`list`
-  rely on it.
-- Verb-only flags: `--base REF` (config-backed via the `base` key; consumed only
-  by `start`/`--worktree`), `--new` (resume), `--force` (finish). `--new`/`--force`
-  are validated against their verb in dispatch.
+  `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`, and (for worktrees)
+  `--label yolo.worktree=<topic>`. `running_container_for(slug, topic=None, *,
+  cwd=None)` queries `docker ps --filter label=…`: by `yolo.worktree` for a worktree
+  `shell`/`finish`/`list`, by `yolo.cwd` for a plain cwd `shell`. The cwd filter is
+  what disambiguates a current-directory container from this repo's worktree
+  containers (they share a repo slug but run under different paths). Robust to the
+  `-{config}`/`-{profile}` name suffixes.
+- **Verb dispatch / topic-optionality** (`main`). `finish` without a `TOPIC` errors;
+  `start`/`resume`/`shell` without one run in the cwd. A bare invocation (no verb)
+  with no `--worktree` is normalized to `start`. The legacy `--worktree NAME` flag
+  keeps its own create-or-reuse branch (it's the primitive `start`/`resume` are
+  sugar over). The same launch path then branches on whether a `TOPIC` is set:
+  `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
+  `cwd.name` for the cwd.
+- Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
+  `start`/`--worktree` and `list`), `--new` (resume, worktree-only), `--force`
+  (finish), `--resume`/`-r` (resume). Each is validated against its verb in dispatch
+  (e.g. `-r` outside `resume`, `--new` without a `TOPIC`, or `--new` with `-r` all
+  error).
 
 ## `--worktree NAME` (the underlying primitive)
 
@@ -351,20 +371,22 @@ the point: commits land in the host's shared `.git` and uncommitted edits live i
 the host worktree dir, so a container exit loses nothing. Must be run from inside
 a git repo.
 
-## `--continue` / `-c` and `--resume [SESSION_ID]` / `-r` (resume a session)
+## Resuming a session (`resume`, `--resume [SESSION_ID]` / `-r`)
 
-Mutually exclusive (argparse-enforced); both just forward the matching flag to
-`claude` inside the container. They need no new mounts: session transcripts live
+Resuming is the `resume` verb's job (there is no longer a bare `--continue`/`-c`
+flag; it was retired in favour of the verb). A plain `resume` forwards
+`claude --continue` (most recent session); `resume -r [ID]` forwards
+`claude --resume [ID]`, opening Claude's interactive picker when given no ID (works
+because we run `-it`). `-r` is **only** valid with `resume` (argparse default `None`;
+dispatch errors otherwise). Resuming needs no new mounts: session transcripts live
 in `~/.claude/projects/<slug>/*.jsonl`, which is already bind-mounted, and the
 slug is derived from the project path — which matches host↔container because the
 cwd is mounted at its identical path. So a session started in a yolo container
-(or even on the host, same dir) is resumable. `--continue` resumes the most
-recent session for the cwd; `--resume` takes an optional `SESSION_ID`, and bare
-`--resume` opens Claude's interactive picker (works because we run `-it`).
-Composes with all credential modes and with `--worktree` (resume is keyed to the
-worktree's path). In worktree mode the `--name NAME` injection is **suppressed**
-when resuming, because `claude` rejects `--name` alongside `--continue`/`--resume`
-(the session already has its identity).
+(or even on the host, same dir) is resumable. With a `TOPIC`, resume is keyed to the
+worktree's path. The `--name` injection is **suppressed** when resuming, because
+`claude` rejects `--name` alongside `--continue`/`--resume` (the session already has
+its identity); `resume TOPIC --new` is the exception — it *does* name a fresh
+worktree session and so omits the resume flags.
 
 ## Conventions / gotchas
 
