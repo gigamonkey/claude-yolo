@@ -26,8 +26,8 @@ AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
 # Dockerfile template — uid is substituted at runtime to match the host user so that
 # files in the bind-mounted working directory are owned by (and writable as) the in-container
-# user. The user is also put in group 0 so it can connect to Docker Desktop's root-owned
-# ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below).
+# user. The user is also put in group 0 so it can connect to the Docker engine's
+# root-owned ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below).
 DOCKERFILE_TEMPLATE = """\
 FROM ubuntu:24.04
 
@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl ripgrep fd-
 # uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 # UID {uid} matches the host user so bind-mounted working-dir files are owned/writable.
-# Group 0 (root) membership grants access to Docker Desktop's ssh-auth.sock, which is
+# Group 0 (root) membership grants access to the Docker engine's ssh-auth.sock, which is
 # mounted srw-rw---- root:root — without it a non-root user gets EACCES on connect(). This
 # adds no real privilege: the claude user already has NOPASSWD sudo, and the container is
 # the sandbox.
@@ -741,11 +741,12 @@ def launch_container(
     ]
 
     if parsed.ssh_agent:
-        # Forward the host ssh-agent via Docker Desktop's magic socket. We canNOT bind-mount
+        # Forward the host ssh-agent via the Docker engine's magic socket. We canNOT bind-mount
         # the raw host $SSH_AUTH_SOCK: that socket's listener lives in the macOS kernel, while
-        # the container runs in Docker Desktop's Linux VM, so the mounted inode is dead
-        # (connect() -> ECONNREFUSED). /run/host-services/ssh-auth.sock is a socket the VM
-        # itself listens on and proxies through to the host agent. It's mounted srw-rw----
+        # the container runs in the engine's Linux VM (Docker Desktop or OrbStack), so the
+        # mounted inode is dead (connect() -> ECONNREFUSED). /run/host-services/ssh-auth.sock
+        # is a socket the VM itself listens on and proxies to the host agent — both Docker
+        # Desktop and OrbStack expose it at that path. It's mounted srw-rw----
         # root:root, so the claude user must be in group 0 to connect (see the useradd line).
         # --no-ssh-agent skips all of this; in-container GitHub git auth won't work then,
         # since the baked HTTPS->SSH rewrite relies on the forwarded agent.
