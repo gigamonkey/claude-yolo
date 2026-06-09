@@ -168,6 +168,16 @@ def test_invalid_auth_choice_rejected(cy, run_cli, dirs):
         run_cli(["--auth", "nonsense"], home=home, cwd=work)
 
 
+def test_generate_oauth_token_requires_a_tty(cy, monkeypatch):
+    # Non-interactive (no tty) auto-generate must bail with guidance, not hang on
+    # the browser flow. Force isatty False so the result is independent of how the
+    # test runner wires stdin.
+    monkeypatch.setattr(cy.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        cy.generate_oauth_token(None)
+    assert "interactive terminal" in str(exc.value)
+
+
 def test_oauth_service_is_keyed_to_config_dir(cy, tmp_path):
     import hashlib
 

@@ -190,7 +190,11 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 - **Resolution order:** an explicit `CLAUDE_CODE_OAUTH_TOKEN` in the *host* env
   wins (for CI / self-managed tokens; it's global by nature) → else the
   yolo-managed macOS keychain entry **for the active config dir** → else mint a
-  fresh one interactively and cache it there.
+  fresh one interactively and cache it there. That last (auto-mint) step is
+  **gated on `sys.stdin.isatty()`**: a non-interactive `--auth oauth-token` launch
+  with no cached token (script/cron/no TTY) exits with guidance to run
+  `yolo setup-token` or set the env var, rather than hanging on a browser flow
+  nobody can drive.
 - **Per-config-dir, like the keychain creds.** The token is cached under
   `claude-yolo-oauth-token` for the default config dir, or
   `claude-yolo-oauth-token-{hash8}` for an alternate `--config-dir`, where `hash8`

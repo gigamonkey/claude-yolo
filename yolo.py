@@ -232,7 +232,18 @@ def generate_oauth_token(config_dir: str | None) -> str:
     scraping fails (e.g. the token format changed), we fall back to asking the user
     to paste what was printed. The token is cached in the macOS keychain under the
     per-config-dir service name (`_oauth_service`) for reuse.
+
+    Requires an interactive terminal (the OAuth flow needs a human to authorize in
+    a browser and possibly paste a code). When stdin isn't a tty — a script, cron,
+    or any non-interactive `--auth oauth-token` launch with no cached token — we
+    bail with guidance instead of hanging on a flow nobody can drive.
     """
+    if not sys.stdin.isatty():
+        sys.exit(
+            "Minting an OAuth token needs an interactive terminal (the browser OAuth "
+            "flow). Run `yolo setup-token` from a terminal first, or set "
+            "CLAUDE_CODE_OAUTH_TOKEN in the environment."
+        )
     if not shutil.which("claude"):
         sys.exit("`claude` not found on host; install Claude Code to run `setup-token`.")
     print("Generating a long-lived (1-year) OAuth token via `claude setup-token`.")
