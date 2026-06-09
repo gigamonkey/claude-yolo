@@ -75,6 +75,7 @@ yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedroc
 yolo setup-token                       # mint+cache the long-lived OAuth token (once)
 yolo --no-ssh-agent                    # don't forward the host SSH agent
 yolo init                              # write a .yolo.json of defaults, then exit
+yolo --version                         # print the version and exit
 yolo -- --network host                 # pass extra args to `docker run`
 
 # verbs in the current directory (no worktree):

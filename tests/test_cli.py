@@ -250,6 +250,14 @@ def test_unknown_verb_exits(cy, run_cli, dirs):
         run_cli(["bogus"], home=home, cwd=work)
 
 
+def test_version_flag_prints_and_exits(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["--version"], home=home, cwd=work)
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.split()[-1] == cy._version()
+
+
 # --- worktree mounts (start TOPIC) ------------------------------------------
 
 

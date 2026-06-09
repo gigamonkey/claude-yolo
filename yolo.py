@@ -509,6 +509,30 @@ def write_default_yolo(dest_dir: pathlib.Path) -> None:
     print(f"Wrote {path}")
 
 
+def _version() -> str:
+    """Best-effort package version for `--version`, tracing to pyproject.toml.
+
+    Installed as a wheel (`uv tool install`) → read the recorded package metadata.
+    Run standalone as the PEP 723 script (possibly via a PATH symlink, hence the
+    `resolve()`) → scrape `version` from the adjacent pyproject.toml. Neither (a
+    stray copy with no metadata and no pyproject) → "unknown".
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("claude-yolo")
+    except PackageNotFoundError:
+        pass
+    try:
+        pyproject = (pathlib.Path(__file__).resolve().parent / "pyproject.toml").read_text()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    return "unknown"
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -516,6 +540,11 @@ PARSER = argparse.ArgumentParser(
         "overlaid on ~/.yolo.json); CLI flags override it. Arguments after -- are "
         "passed directly to docker run (last-one-wins, so they override defaults)."
     ),
+)
+PARSER.add_argument(
+    "--version",
+    action="version",
+    version=f"%(prog)s {_version()}",
 )
 PARSER.add_argument(
     "verb",

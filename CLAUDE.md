@@ -34,6 +34,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
 ./yolo.py finish fix-auth          # remove the worktree, keep the branch
 ./yolo.py list                     # this repo's worktrees
+./yolo.py --version                # print the version and exit
 ```
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
@@ -78,6 +79,15 @@ it from anywhere:
 The PyPI/dist name is `claude-yolo`; the command it installs is `yolo`. `main()`
 is the console-script entry point *and* the `if __name__ == "__main__"` target, so
 both paths run identical code.
+
+`--version` (the argparse `version` action) prints `_version()`, which mirrors this
+dual nature: it first reads the recorded package metadata
+(`importlib.metadata.version("claude-yolo")`, present in the installed wheel), and
+falls back to scraping `version` out of the **adjacent pyproject.toml** (resolving
+the script's symlink, so the PATH-symlink standalone install works) — so both modes
+trace back to the single source of truth, pyproject.toml, with no second copy of the
+number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
+`unknown`.
 
 ## How it works
 
