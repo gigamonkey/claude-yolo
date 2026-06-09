@@ -605,9 +605,10 @@ PARSER.add_argument(
     "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
 )
 PARSER.add_argument(
-    "--rebuild",
+    "--rebuild-image",
     action="store_true",
     default=False,
+    dest="rebuild_image",
     help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
 )
 PARSER.add_argument(
@@ -831,7 +832,7 @@ def launch_container(
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
 
-    build_docker_image(no_cache=parsed.rebuild)
+    build_docker_image(no_cache=parsed.rebuild_image)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [

@@ -384,6 +384,7 @@ These compose with any `--auth` mode:
 | `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. In `keychain`/`oauth-token` modes the credential is keyed per directory (the hashed keychain-entry name described above), so separate config dirs ≈ separate profiles. |
 | `--claude-json` / `--no-claude-json` | on | Whether to mount the host `~/.claude.json` (global config: MCP servers, project history/trust). Turn it off for a cleanly isolated profile alongside an alternate `--config-dir`. |
 | `--ssh-agent` / `--no-ssh-agent` | on | Whether to forward the host SSH agent (see [above](#why-forward-the-ssh-agent)). |
+| `--rebuild-image` | off | Pass `--no-cache` to `docker build`, forcing a full image rebuild from scratch. |
 
 ## Configuring defaults with `.yolo.json`
 

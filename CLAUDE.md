@@ -141,6 +141,9 @@ on top of whichever auth is chosen:
   socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
   the `known_hosts` mount; in-container GitHub git auth then won't work, since the
   baked HTTPS→SSH rewrite relies on the agent.
+- **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
+  a full image rebuild from scratch (useful when a baked tool is stale or the
+  Dockerfile changed).
 
 The three `--auth` values (the (c) block in `launch_container`):
 
