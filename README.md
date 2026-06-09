@@ -27,7 +27,9 @@ see [Development](#development).)
   a Python ≥3.10 (it's still stdlib-only — uv just picks the interpreter, since
   macOS's system `python3` is often too old).
 - **Claude Code** already set up on your host (so its credentials are in the
-  keychain), or **AWS credentials** if you want to run against Bedrock.
+  keychain). Alternatively a long-lived OAuth token via `--auth oauth-token`
+  (needs a Pro/Max/Team/Enterprise plan), or **AWS credentials** for
+  `--auth bedrock`. See [Authentication modes](#authentication-modes).
 
 ## Install on your PATH
 
@@ -61,9 +63,11 @@ You can also run it in place as `./yolo.py` (handy from a checkout).
 ## Usage
 
 ```bash
-yolo                                   # default ~/.claude credentials
+yolo                                   # default: keychain credentials from ~/.claude
 yolo --config-dir ~/.claude-work       # use an alternate config directory
-yolo --bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
+yolo --auth oauth-token                # long-lived token (best for long/concurrent sessions)
+yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
+yolo setup-token                       # mint+cache the long-lived OAuth token (once)
 yolo --no-ssh-agent                    # don't forward the host SSH agent
 yolo -c                                # resume the most recent session here
 yolo -r [SESSION_ID]                   # pick / resume a session
@@ -81,11 +85,15 @@ yolo list                              # show this repo's worktrees
 Run it from the directory you want Claude to work in. That directory becomes the
 container's working directory and is the only host path Claude can modify.
 
-`--config-dir`, `--bedrock`, `--claude-json`, `--ssh-agent`, and `--worktree` are
-**orthogonal flags** — combine them however you like (see
-[Configuration & credential options](#configuration--credential-options)). The
+How Claude authenticates is one choice via `--auth`
+(`keychain` [default] / `oauth-token` / `bedrock`); `--config-dir`, `--claude-json`,
+`--ssh-agent`, and `--worktree` are **orthogonal flags** that combine freely with it
+and each other (see
+[Authentication modes](#authentication-modes) and
+[Configuration options](#other-configuration-options)). The
 positional arguments are an optional verb
-(`init`/`start`/`resume`/`shell`/`finish`/`list`) and its topic name. You can also
+(`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its topic name.
+You can also
 add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
 instructions onto Claude's system prompt, and set defaults for most flags in a
 [`.yolo.json` file](#configuring-defaults-with-yolojson).
@@ -173,10 +181,12 @@ added to group 0 so it can reach the SSH agent socket — see
 
 ### 3. Extracts your credentials
 
+This describes the default **keychain** auth mode; `--auth oauth-token` and
+`--auth bedrock` work differently (see [Authentication modes](#authentication-modes)).
+
 Claude Code keeps its OAuth credentials in the macOS keychain. The script pulls
 them out with the `security` CLI into a temporary, `chmod 600` file, then
-bind-mounts that file to `.credentials.json` inside the container. (This step is
-skipped in Bedrock mode, which uses AWS credentials instead.)
+bind-mounts that file to `.credentials.json` inside the container.
 
 Before extracting, the script runs `claude auth status` on the host to confirm
 you're actually logged in. If you're not, it offers to run `claude auth login`
@@ -290,17 +300,83 @@ added). When you exit, `--rm` cleans up the container.
 The full `docker run` command is printed (between two dashed lines) before
 launch, so you can see exactly what's happening.
 
-## Configuration & credential options
+## Authentication modes
 
-Four independent flags control where Claude's config comes from and how it
-authenticates. They're **orthogonal** — any combination is valid (for example
-`--bedrock --config-dir ~/.claude-bdr` runs Bedrock against a separate config
-directory):
+`--auth` selects one of three mutually-exclusive ways for Claude to authenticate
+(default `keychain`). The [config flags](#other-configuration-options) below
+compose with whichever you pick.
+
+| `--auth` | How it authenticates | Best for |
+| --- | --- | --- |
+| `keychain` *(default)* | Mounts a snapshot of your rotating Claude.ai keychain credentials | Getting started; short, one-off sessions |
+| `oauth-token` | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var | Long-lived and/or concurrent sessions |
+| `bedrock` | AWS Bedrock credentials | Billing via AWS |
+
+### `keychain` (default)
+
+Extracts your Claude.ai login credentials from the macOS keychain and mounts them
+as `.credentials.json` (this is the mode described under
+[How it works → Extracts your credentials](#3-extracts-your-credentials)). Zero
+setup beyond being logged in on the host, so it's the fastest way to get going.
+
+The catch is **token rotation.** Those credentials are a short-lived access token
+(~8h) plus a **single-use refresh token**: when the access token expires, Claude
+Code refreshes it and the refresh token *rotates* to a new one, invalidating the
+old. yolo mounts a *snapshot* of the credential into each container, so the first
+party to refresh — any container, **or the host** — silently invalidates every
+other snapshot. The loser gets a `401` and is effectively logged out the next time
+*it* tries to refresh. Concretely:
+
+- A **single long session** that runs past the ~8h token life refreshes inside the
+  container and knocks out your host login (and vice versa).
+- **Concurrent** sessions (or a session overlapping host use) race the same way —
+  one refreshes, the others break.
+- A **short, solo** session that finishes before any refresh happens is fine.
+
+So keychain mode is great for getting started and quick one-off runs — but for
+**long-lived or concurrent sessions, use `--auth oauth-token`.**
+
+### `oauth-token`
+
+Authenticates with a long-lived token from `claude setup-token` — a **one-year
+token that is never rotated and never written back** — forwarded into the
+container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable, with no
+`.credentials.json` mount. Because nothing ever rewrites it, **any number of
+concurrent containers (plus the host on its own keychain login) can use it at once**
+with no interference, for as long as each session runs. This is the mode for
+unattended, long-running, or parallel work — it sidesteps the rotation problem
+entirely by not sharing a rotating credential.
+
+Set it up once with **`yolo setup-token`**, which runs the browser OAuth flow and
+caches the token in your keychain (per config directory, so `--config-dir`
+profiles each get their own). After that, `--auth oauth-token` just works. You can
+also run `yolo --auth oauth-token` straight away — with no cached token it mints
+one on the spot (interactively; in a non-interactive context it tells you to run
+`yolo setup-token` first). If `CLAUDE_CODE_OAUTH_TOKEN` is already set in your
+environment (e.g. CI), that value is used as-is.
+
+Requires a **Pro/Max/Team/Enterprise plan**; the token is scoped to inference
+only. Trade-off: unlike the SSH-agent design (where the secret never enters the
+container), this *does* put a bearer token in the container's environment — but
+it's a scoped, individually **revocable** token, and no worse than the rotating
+snapshot keychain mode already mounts.
+
+### `bedrock`
+
+Authenticate and bill via **AWS Bedrock** instead of Claude.ai. Sets
+`CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only, and skips the keychain
+entirely. `--aws-profile` is optional (the AWS SDK's default credentials are used
+otherwise), `--aws-region` defaults to `us-east-1`, and `--bedrock-model` sets the
+model id. Composes with `--config-dir` (e.g.
+`--auth bedrock --config-dir ~/.claude-bdr`).
+
+## Other configuration options
+
+These compose with any `--auth` mode:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. Credentials are pulled from the keychain entry for that directory (the hashed name described above). |
-| `--bedrock` (+ `--aws-profile`, `--aws-region`, `--bedrock-model`) | off → keychain | Authenticate and bill via **AWS Bedrock** instead of the keychain. Sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only, and skips keychain extraction. `--aws-profile` is optional (the AWS SDK's default credentials are used otherwise); region defaults to `us-east-1`. Override a config-set value with `--no-bedrock`. |
+| `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. In `keychain`/`oauth-token` modes the credential is keyed per directory (the hashed keychain-entry name described above), so separate config dirs ≈ separate profiles. |
 | `--claude-json` / `--no-claude-json` | on | Whether to mount the host `~/.claude.json` (global config: MCP servers, project history/trust). Turn it off for a cleanly isolated profile alongside an alternate `--config-dir`. |
 | `--ssh-agent` / `--no-ssh-agent` | on | Whether to forward the host SSH agent (see [above](#why-forward-the-ssh-agent)). |
 
@@ -312,6 +388,7 @@ Rather than re-typing the same flags every time, put their defaults in a
 ```json
 {
   "config-dir": "~/.claude-work",
+  "auth": "oauth-token",
   "ssh-agent": false,
   "append-system-prompt": ["Prefer the standard library."]
 }
@@ -323,12 +400,12 @@ from**, overlaid on a global **`~/.yolo.json`**. Precedence runs low to high:
 wins, and a project file overrides your global one per key (`append-system-prompt`
 is the exception: prompts from all layers accumulate).
 
-Supported keys: `config-dir`, `bedrock`, `aws-profile`, `aws-region`,
-`bedrock-model`, `claude-json`, `ssh-agent`, `base` (the default branch point for
-`start`), and `append-system-prompt` (a string or list of strings). A `null`
-value leaves a key at its built-in default. The per-invocation actions
-(`--worktree`, `--continue`, `--resume`, and the verbs) are deliberately **not**
-config keys.
+Supported keys: `config-dir`, `auth` (`keychain`/`oauth-token`/`bedrock`),
+`aws-profile`, `aws-region`, `bedrock-model`, `claude-json`, `ssh-agent`, `base`
+(the default branch point for `start`), and `append-system-prompt` (a string or
+list of strings). A `null` value leaves a key at its built-in default. The
+per-invocation actions (`--worktree`, `--continue`, `--resume`, and the verbs) are
+deliberately **not** config keys.
 
 To get started, `yolo init` writes a `.yolo.json` of default values
 into the current directory (it won't overwrite an existing one), which you can
@@ -346,13 +423,14 @@ yolo -- --network host --memory 4g
 
 ## Notes and gotchas
 
-- **Login is checked up front.** claude-yolo copies credentials from the macOS
-  keychain rather than authenticating inside the container. Before launching it
-  runs `claude auth status`; if you're logged out it offers to run
-  `claude auth login` for you and re-checks. Requires a host `claude` recent
-  enough to have the `auth` subcommand — if it's missing, the check is skipped
-  and the script falls back to erroring out when credential extraction comes up
-  empty.
+- **Login is checked up front (keychain mode).** In the default keychain mode,
+  claude-yolo copies credentials from the macOS keychain rather than
+  authenticating inside the container. Before launching it runs
+  `claude auth status`; if you're logged out it offers to run `claude auth login`
+  for you and re-checks. Requires a host `claude` recent enough to have the `auth`
+  subcommand — if it's missing, the check is skipped and the script falls back to
+  erroring out when credential extraction comes up empty. (`--auth oauth-token`
+  and `--auth bedrock` skip this check — they don't use the login keychain.)
 - **The in-process sandbox is disabled on purpose** — the *container* is the
   sandbox. If your `~/.claude/settings.json` has `sandbox.enabled: true`, Claude
   would otherwise warn at startup that `bubblewrap`/`socat` are missing and run
