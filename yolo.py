@@ -679,6 +679,7 @@ def running_container_for(slug: str, topic: str) -> str | None:
 def build_claude_args(
     append_system_prompts: list,
     *,
+    ssh_agent: bool = True,
     continue_session: bool = False,
     resume=None,
     name: str | None = None,
@@ -691,6 +692,9 @@ def build_claude_args(
     """
     extra_system_prompt = [
         "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
+        *([
+            "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."
+        ] if not ssh_agent else []),
         *append_system_prompts,
     ]
     args = [
@@ -1072,7 +1076,7 @@ def main():
         cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
-        command = build_claude_args(parsed.append_system_prompts, name=topic)
+        command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=topic)
 
     elif verb == "resume":
         worktree, main_root, slug = _worktree_dir(topic, home)
@@ -1084,11 +1088,11 @@ def main():
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
         if parsed.new:
-            command = build_claude_args(parsed.append_system_prompts, name=topic)
+            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=topic)
         elif parsed.resume is not None:
-            command = build_claude_args(parsed.append_system_prompts, resume=parsed.resume)
+            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume)
         else:
-            command = build_claude_args(parsed.append_system_prompts, continue_session=True)
+            command = build_claude_args(parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True)
 
     elif verb == "shell":
         # Fresh bash container (the exec-into-running case already returned above).
@@ -1117,6 +1121,7 @@ def main():
             name = None
         command = build_claude_args(
             parsed.append_system_prompts,
+            ssh_agent=parsed.ssh_agent,
             continue_session=parsed.continue_session,
             resume=parsed.resume,
             name=name,
