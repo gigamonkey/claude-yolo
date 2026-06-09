@@ -16,13 +16,19 @@ def write(path, obj):
 def test_parse_maps_keys_and_types(cy, tmp_path):
     p = write(
         tmp_path / ".yolo.json",
-        {"config-dir": "/etc", "bedrock": True, "ssh-agent": False},
+        {"config-dir": "/etc", "auth": "bedrock", "ssh-agent": False},
     )
     assert cy._parse_yolo_file(p) == {
         "config_dir": "/etc",
-        "bedrock": True,
+        "auth": "bedrock",
         "ssh_agent": False,
     }
+
+
+def test_parse_rejects_invalid_auth(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"auth": "nonsense"})
+    with pytest.raises(SystemExit):
+        cy._parse_yolo_file(p)
 
 
 def test_parse_accepts_underscored_keys(cy, tmp_path):
@@ -37,7 +43,7 @@ def test_parse_expands_user_in_path_keys(cy, tmp_path, monkeypatch):
 
 
 def test_parse_null_leaves_key_unset(cy, tmp_path):
-    p = write(tmp_path / ".yolo.json", {"config-dir": None, "bedrock": None})
+    p = write(tmp_path / ".yolo.json", {"config-dir": None, "auth": None})
     assert cy._parse_yolo_file(p) == {}
 
 
@@ -52,7 +58,7 @@ def test_parse_list_accepts_string_or_list(cy, tmp_path):
     "obj",
     [
         {"ssh_agnet": True},  # typo / unknown key
-        {"bedrock": "yes"},  # bool wants bool
+        {"ssh-agent": "yes"},  # bool wants bool
         {"config-dir": 7},  # str wants str
         {"append-system-prompt": [1]},  # list must be of strings
         {"worktree": "x"},  # action keys are not config keys
@@ -85,7 +91,7 @@ def test_load_overlay_precedence_and_concat(cy, tmp_path):
         home / ".yolo.json",
         {
             "ssh-agent": False,
-            "bedrock": True,
+            "auth": "bedrock",
             "append-system-prompt": ["home"],
         },
     )
@@ -98,7 +104,7 @@ def test_load_overlay_precedence_and_concat(cy, tmp_path):
     )
     merged = cy.load_yolo_config(proj, home)
     assert merged["ssh_agent"] is True  # nearest overrides home
-    assert merged["bedrock"] is True  # only in home
+    assert merged["auth"] == "bedrock"  # only in home
     assert merged["append_system_prompts"] == ["home", "proj"]  # concatenated
 
 
@@ -144,10 +150,9 @@ def test_write_default_yolo_scaffold_is_inert(cy, tmp_path):
     # the unedited scaffold loads to exactly the built-in defaults (no surprises)
     merged = cy.load_yolo_config(tmp_path, tmp_path / "nohome")
     assert merged == {
-        "bedrock": False,
+        "auth": "keychain",
         "claude_json": True,
         "ssh_agent": True,
-        "oauth_token": False,
         "base": "HEAD",
         "append_system_prompts": [],
     }

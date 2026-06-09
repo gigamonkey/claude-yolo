@@ -18,6 +18,12 @@ import tempfile
 
 DOCKER_IMAGE = "claude-yolo:latest"
 
+# The three mutually-exclusive auth mechanisms, selected by --auth (default the
+# first). keychain = extract the rotating Claude.ai keychain creds into a mounted
+# file; oauth-token = forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var;
+# bedrock = AWS Bedrock creds.
+AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
+
 # Dockerfile template — uid is substituted at runtime to match the host user so that
 # files in the bind-mounted working directory are owned by (and writable as) the in-container
 # user. The user is also put in group 0 so it can connect to Docker Desktop's root-owned
@@ -149,7 +155,7 @@ def ensure_logged_in(config_dir: str | None) -> None:
         sys.exit("Still not logged in after `claude auth login`; aborting.")
 
 
-# Long-lived OAuth token mode (--oauth-token). Unlike the keychain credentials
+# Long-lived OAuth token mode (--auth oauth-token). Unlike the keychain credentials
 # (which rotate single-use on every refresh — so a snapshot mounted into one
 # container invalidates the host's and every other container's copy the moment it
 # refreshes), `claude setup-token` mints a *stable*, year-long token that is never
@@ -387,13 +393,12 @@ def setup_worktree(
 # "path" values get ~ expanded (a JSON file can't rely on shell expansion).
 YOLO_KEYS = {
     "config_dir": ("config_dir", "path"),
-    "bedrock": ("bedrock", "bool"),
+    "auth": ("auth", "auth"),
     "aws_profile": ("aws_profile", "str"),
     "aws_region": ("aws_region", "str"),
     "bedrock_model": ("bedrock_model", "str"),
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
-    "oauth_token": ("oauth_token", "bool"),
     "base": ("base", "str"),
     "append_system_prompt": ("append_system_prompts", "list"),
 }
@@ -403,13 +408,12 @@ YOLO_KEYS = {
 # so a freshly-init'd file round-trips to "no config" until the user edits it.
 YOLO_INIT_DEFAULTS = {
     "config-dir": None,
-    "bedrock": False,
+    "auth": "keychain",
     "aws-profile": None,
     "aws-region": None,
     "bedrock-model": None,
     "claude-json": True,
     "ssh-agent": True,
-    "oauth-token": False,
     "base": "HEAD",
     "append-system-prompt": [],
 }
@@ -435,6 +439,11 @@ def _parse_yolo_file(path: pathlib.Path) -> dict:
         if kind == "bool":
             if not isinstance(val, bool):
                 sys.exit(f"{path}: {key!r} must be true or false")
+            out[dest] = val
+        elif kind == "auth":
+            # set_defaults bypasses argparse's `choices` check, so validate here.
+            if val not in AUTH_CHOICES:
+                sys.exit(f"{path}: {key!r} must be one of {', '.join(AUTH_CHOICES)}")
             out[dest] = val
         elif kind in ("str", "path"):
             if not isinstance(val, str):
@@ -508,7 +517,7 @@ PARSER.add_argument(
     "name): start a new worktree+branch, resume/open a shell in an existing one, or "
     "finish (remove) one. 'list' shows this repo's worktrees; 'init' writes a "
     ".yolo.json; 'setup-token' mints/caches a long-lived OAuth token (for "
-    "--oauth-token). Omit the verb to run Claude in the current directory.",
+    "--auth oauth-token). Omit the verb to run Claude in the current directory.",
 )
 PARSER.add_argument(
     "topic",
@@ -540,28 +549,31 @@ PARSER.add_argument(
     "for this directory.",
 )
 PARSER.add_argument(
-    "--bedrock",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Authenticate/bill via AWS Bedrock instead of the Claude keychain. "
-    "Mounts ~/.aws read-only and sets CLAUDE_CODE_USE_BEDROCK=1. "
-    "Use --no-bedrock to override a .yolo.json that enables it.",
+    "--auth",
+    choices=AUTH_CHOICES,
+    default="keychain",
+    help="Authentication mechanism (default: keychain). "
+    "'keychain' extracts the rotating Claude.ai keychain credentials and mounts "
+    "them; 'oauth-token' forwards a long-lived CLAUDE_CODE_OAUTH_TOKEN from "
+    "`claude setup-token` (stable, safe for concurrent containers); 'bedrock' "
+    "authenticates via AWS Bedrock (mounts ~/.aws, sets CLAUDE_CODE_USE_BEDROCK=1). "
+    "Also settable as `auth` in .yolo.json.",
 )
 PARSER.add_argument(
     "--aws-profile",
     metavar="NAME",
-    help="AWS profile to use (requires --bedrock). If omitted, the AWS SDK's "
+    help="AWS profile to use (requires --auth bedrock). If omitted, the AWS SDK's "
     "default profile / env credentials are used.",
 )
 PARSER.add_argument(
     "--aws-region",
     metavar="REGION",
-    help="AWS region for Bedrock (requires --bedrock; default: us-east-1).",
+    help="AWS region for Bedrock (requires --auth bedrock; default: us-east-1).",
 )
 PARSER.add_argument(
     "--bedrock-model",
     metavar="ID",
-    help="Bedrock model id (requires --bedrock).",
+    help="Bedrock model id (requires --auth bedrock).",
 )
 PARSER.add_argument(
     "--claude-json",
@@ -577,16 +589,6 @@ PARSER.add_argument(
     default=True,
     help="Forward the host ssh-agent socket into the container (default: on). "
     "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
-)
-PARSER.add_argument(
-    "--oauth-token",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Authenticate with a long-lived CLAUDE_CODE_OAUTH_TOKEN (from `claude "
-    "setup-token`) instead of extracting rotating keychain credentials. The token "
-    "is cached in the macOS keychain and forwarded as an env var — stable and "
-    "never written back, so it's safe for concurrent containers. Generate/refresh "
-    "it with `yolo setup-token`. Use --no-oauth-token to override a .yolo.json.",
 )
 PARSER.add_argument(
     "--append-system-prompt",
@@ -751,11 +753,11 @@ def launch_container(
     if common_git:
         args += ["-v", f"{common_git}:{common_git}"]
 
-    # The four credential/config axes are independent (not mutually exclusive):
+    # Credential/config assembly. The config axes (a, b) are independent of the
+    # auth mechanism (c), which is a single mutually-exclusive choice (--auth):
     #   (a) which config dir to mount        -- --config-dir
     #   (b) whether to mount ~/.claude.json   -- --claude-json/--no-claude-json
-    #   (c) keychain creds (only non-Bedrock) -- derived from --bedrock
-    #   (d) Bedrock env + ~/.aws              -- --bedrock (+ --aws-* / --bedrock-model)
+    #   (c) the auth mechanism                -- --auth keychain|oauth-token|bedrock
 
     # (a) Config dir. Always mounted at /home/claude/.claude (= the claude user's
     # $HOME/.claude, i.e. Claude Code's default), so no CLAUDE_CONFIG_DIR is needed.
@@ -773,23 +775,17 @@ def launch_container(
     if parsed.claude_json:
         args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
 
-    # (c) Auth credential. Three mutually exclusive mechanisms:
-    #   - --oauth-token: forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var. No
+    # (c) Auth mechanism (--auth), one of three mutually-exclusive paths:
+    #   - oauth-token: forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var. No
     #     keychain extraction, no login check, no .credentials.json mount — the
     #     token is stable (never rotated/written back), so concurrent containers
     #     and the host can all use it at once. The env var also out-ranks any file
     #     creds, so a stale mounted .credentials.json can't shadow it.
-    #   - --bedrock: AWS creds (block d) — skips this entirely.
-    #   - default: extract the rotating keychain credentials into a mounted file.
-    if parsed.oauth_token:
+    #   - bedrock: AWS creds + env (mounts ~/.aws), no keychain/login.
+    #   - keychain (default): extract the rotating keychain creds into a mounted file.
+    if parsed.auth == "oauth-token":
         args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
-    elif not parsed.bedrock:
-        ensure_logged_in(config_dir)
-        credfile = extract_credentials(config_dir)
-        args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
-
-    # (d) Bedrock: AWS creds + env. Composes with any config dir / claude-json choice.
-    if parsed.bedrock:
+    elif parsed.auth == "bedrock":
         container = f"{container}-{parsed.aws_profile or 'bedrock'}"
         args += ["-v", f"{home}/.aws:/home/claude/.aws:ro"]
         args += ["-e", "CLAUDE_CODE_USE_BEDROCK=1"]
@@ -798,6 +794,10 @@ def launch_container(
         args += ["-e", f"AWS_REGION={parsed.aws_region or 'us-east-1'}"]
         if parsed.bedrock_model:
             args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
+    else:  # keychain
+        ensure_logged_in(config_dir)
+        credfile = extract_credentials(config_dir)
+        args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
 
     # Labels let the verbs (shell/finish/list) find this container later, regardless
     # of the name suffixes above.
@@ -1018,17 +1018,14 @@ def main():
             return  # execvp doesn't return on success; guard the stubbed/failed case
         # No container running: fall through to launch a fresh bash container below.
 
-    if parsed.oauth_token and parsed.bedrock:
-        sys.exit(
-            "--oauth-token and --bedrock are mutually exclusive (each is a full auth mechanism)."
-        )
-
-    # AWS knobs are inert without bedrock mode (the bedrock block is the only
-    # consumer), so just warn rather than failing — bedrock may be toggled off via
-    # --no-bedrock over a .yolo.json that sets it.
-    if not parsed.bedrock and (parsed.aws_profile or parsed.aws_region or parsed.bedrock_model):
+    # AWS knobs are inert unless --auth bedrock (the bedrock block is the only
+    # consumer), so just warn rather than failing — the auth mode may be set to
+    # bedrock in a .yolo.json and overridden back to keychain/oauth-token on the CLI.
+    if parsed.auth != "bedrock" and (
+        parsed.aws_profile or parsed.aws_region or parsed.bedrock_model
+    ):
         print(
-            "warning: aws-profile/aws-region/bedrock-model ignored without bedrock mode.",
+            "warning: aws-profile/aws-region/bedrock-model ignored without --auth bedrock.",
             file=sys.stderr,
         )
     if parsed.config_dir and not pathlib.Path(parsed.config_dir).is_dir():

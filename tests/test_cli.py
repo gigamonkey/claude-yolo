@@ -91,7 +91,7 @@ def test_config_dir_must_exist(cy, run_cli, dirs):
 
 def test_bedrock_sets_env_and_skips_keychain(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    argv = run_cli(["--bedrock", "--aws-profile", "prod"], home=home, cwd=work)
+    argv = run_cli(["--auth", "bedrock", "--aws-profile", "prod"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_USE_BEDROCK=1" in envs
@@ -108,7 +108,7 @@ def test_bedrock_composes_with_config_dir(cy, run_cli, flag_values, tmp_path):
     cfg = tmp_path / "cfg"
     for d in (home, work, cfg):
         d.mkdir()
-    argv = run_cli(["--bedrock", "--config-dir", str(cfg)], home=home, cwd=work)
+    argv = run_cli(["--auth", "bedrock", "--config-dir", str(cfg)], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
     envs = flag_values(argv, "-e")
     assert f"{cfg}:/home/claude/.claude" in mounts  # config dir honored
@@ -119,17 +119,17 @@ def test_bedrock_composes_with_config_dir(cy, run_cli, flag_values, tmp_path):
 def test_aws_flag_without_bedrock_warns(cy, run_cli, flag_values, dirs, capsys):
     home, work = dirs
     argv = run_cli(["--aws-profile", "prod"], home=home, cwd=work)
-    assert "ignored without bedrock" in capsys.readouterr().err
+    assert "ignored without --auth bedrock" in capsys.readouterr().err
     # still a normal keychain run
     assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
 
 
-# --- oauth token ------------------------------------------------------------
+# --- auth: oauth-token ------------------------------------------------------
 
 
 def test_oauth_token_forwards_env_and_skips_keychain(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    argv = run_cli(["--oauth-token"], home=home, cwd=work)
+    argv = run_cli(["--auth", "oauth-token"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
@@ -146,7 +146,7 @@ def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path
     cfg = tmp_path / "cfg"
     for d in (home, work, cfg):
         d.mkdir()
-    argv = run_cli(["--oauth-token", "--config-dir", str(cfg)], home=home, cwd=work)
+    argv = run_cli(["--auth", "oauth-token", "--config-dir", str(cfg)], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
     envs = flag_values(argv, "-e")
     assert f"{cfg}:/home/claude/.claude" in mounts
@@ -156,16 +156,16 @@ def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path
 
 def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"oauth-token": True}))
+    (work / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
     argv = run_cli([], home=home, cwd=work)
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
     assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
 
 
-def test_oauth_token_and_bedrock_mutually_exclusive(cy, run_cli, dirs):
+def test_invalid_auth_choice_rejected(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit):
-        run_cli(["--oauth-token", "--bedrock"], home=home, cwd=work)
+        run_cli(["--auth", "nonsense"], home=home, cwd=work)
 
 
 def test_oauth_service_is_keyed_to_config_dir(cy, tmp_path):
@@ -196,10 +196,10 @@ def test_yolo_provides_defaults_and_cli_overrides(cy, run_cli, flag_values, dirs
     assert "SSH_AUTH_SOCK=/run/ssh-agent" in flag_values(override, "-e")
 
 
-def test_no_bedrock_overrides_yolo(cy, run_cli, flag_values, dirs):
+def test_cli_auth_overrides_yolo(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"bedrock": True}))
-    argv = run_cli(["--no-bedrock"], home=home, cwd=work)
+    (work / ".yolo.json").write_text(json.dumps({"auth": "bedrock"}))
+    argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_USE_BEDROCK=1" not in envs
     assert any(".credentials.json" in m for m in flag_values(argv, "-v"))

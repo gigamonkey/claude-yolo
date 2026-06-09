@@ -17,12 +17,12 @@ that tooling is never needed to *run* the script, only to develop it (see
 ```bash
 ./yolo.py                          # default ~/.claude credentials
 ./yolo.py --config-dir ~/.claude-work          # alternate config dir
-./yolo.py --bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
-./yolo.py --bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
+./yolo.py --auth bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
+./yolo.py --auth bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
 ./yolo.py setup-token              # mint+cache a long-lived OAuth token (once)
-./yolo.py --oauth-token            # auth via that token, not keychain creds
+./yolo.py --auth oauth-token       # auth via that token, not keychain creds
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py -c                       # resume most recent session in this dir
 ./yolo.py -r                       # interactive session picker
@@ -34,11 +34,11 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py list                     # this repo's worktrees
 ```
 
-All of `--config-dir`, `--bedrock`, `--worktree`, `--claude-json`,
-`--ssh-agent`, and `--oauth-token` are **orthogonal flags** — any reasonable
-combination is valid (the one exception: `--oauth-token` and `--bedrock` are
-mutually exclusive, since each is a complete auth mechanism). The only positional
-args are an optional `verb`
+The **auth mechanism** is a single mutually-exclusive choice via `--auth`
+(`keychain` [default] / `oauth-token` / `bedrock`). Everything else —
+`--config-dir`, `--worktree`, `--claude-json`, `--ssh-agent` — is an **orthogonal
+flag** that composes freely with the chosen auth mode and with each other. The
+only positional args are an optional `verb`
 (`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
 see [Worktree workflow verbs](#worktree-workflow-verbs).
 
@@ -118,13 +118,14 @@ both paths run identical code.
    process, so it's interactive `-it --rm`). The args also forward the host git
    identity (`git_identity_args`) and the SSH agent (see gotchas).
 
-## Orthogonal config/credential axes (all flags, freely combinable)
+## Auth mechanism (`--auth`) + orthogonal config axes
 
 The old single overloaded positional (config dir *or* AWS profile, decided by
-`is_dir()`) is gone. `main` now assembles the credential/config args from
-independent blocks. They're freely combinable, with one rule: the auth-mechanism
-flags `--bedrock` and `--oauth-token` are mutually exclusive with each other
-(each fully replaces keychain extraction); everything else composes:
+`is_dir()`) is gone. The **auth mechanism** is now a single mutually-exclusive
+choice — `--auth {keychain,oauth-token,bedrock}` (default `keychain`,
+`AUTH_CHOICES`) — so argparse's `choices` enforces the exclusivity structurally
+(no hand-written "these two can't combine" guard). The config axes compose freely
+on top of whichever auth is chosen:
 
 - **`--config-dir PATH`** (default `~/.claude`) → mounted at `/home/claude/.claude`.
   When set, credentials are pulled with the hashed service name and the container
@@ -136,31 +137,34 @@ flags `--bedrock` and `--oauth-token` are mutually exclusive with each other
   `$HOME/.claude.json` regardless of `CLAUDE_CONFIG_DIR`, so there's only ever one.
   `--no-claude-json` gives a cleanly isolated profile — the intended pairing with an
   alternate `--config-dir`.
-- **`--bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
-  `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
-  and **skips keychain extraction and the login check** (AWS creds instead). Container
-  name gets a `-{profile-or-bedrock}` suffix. The three AWS sub-flags require
-  `--bedrock` (validated in `main`); `--aws-profile` is optional (SDK default creds
-  used if omitted).
 - **`--ssh-agent` / `--no-ssh-agent`** (default on) → forward the host ssh-agent
   socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
   the `known_hosts` mount; in-container GitHub git auth then won't work, since the
   baked HTTPS→SSH rewrite relies on the agent.
-- **`--oauth-token`** → authenticate with a long-lived `CLAUDE_CODE_OAUTH_TOKEN`
-  env var instead of extracting keychain creds. Like `--bedrock` it **skips
-  keychain extraction, the login check, and the `.credentials.json` mount**; it
-  just adds `-e CLAUDE_CODE_OAUTH_TOKEN=…`. Mutually exclusive with `--bedrock`.
-  See [Long-lived OAuth token](#long-lived-oauth-token---oauth-token) below.
 
-Keychain credential extraction happens **iff neither `--bedrock` nor
-`--oauth-token`** (each is a self-contained auth mechanism); the config-dir mount,
-the `~/.claude.json` mount, and the Bedrock env are otherwise independent — so e.g.
-`--bedrock --config-dir ~/.claude-bdr` (Bedrock auth, separate profile) now works,
-which the old positional scheme could not express. `--bedrock` is a
-`BooleanOptionalAction`, so `--no-bedrock` can turn off a `.yolo.json` that
-enables it.
+The three `--auth` values (the (c) block in `launch_container`):
 
-## Long-lived OAuth token (`--oauth-token`)
+- **`keychain`** (default) → `ensure_logged_in` + `extract_credentials`, mounting
+  the rotating keychain creds at `.credentials.json`. The only mode that runs the
+  login check.
+- **`oauth-token`** → authenticate with a long-lived `CLAUDE_CODE_OAUTH_TOKEN` env
+  var; **skips keychain extraction, the login check, and the `.credentials.json`
+  mount**, just adding `-e CLAUDE_CODE_OAUTH_TOKEN=…`. See
+  [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token) below.
+- **`bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
+  `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
+  **skips keychain extraction and the login check**. Container name gets a
+  `-{profile-or-bedrock}` suffix. The three AWS sub-flags only apply under
+  `--auth bedrock` (a `main` warning fires if they're set otherwise);
+  `--aws-profile` is optional (SDK default creds used if omitted).
+
+The config-dir mount, the `~/.claude.json` mount, and the auth mechanism are
+independent — so e.g. `--auth bedrock --config-dir ~/.claude-bdr` (Bedrock auth,
+separate profile) works, which the old positional scheme could not express.
+Overriding a `.yolo.json` that sets `auth` is just an explicit `--auth keychain`
+(etc.) on the CLI.
+
+## Long-lived OAuth token (`--auth oauth-token`)
 
 The default keychain credentials are an OAuth pair whose **refresh token rotates
 single-use on every refresh** — proven on 2026-06-08 (see `token-investigation.md`).
@@ -172,7 +176,7 @@ We also confirmed (2026-06-09, `precedence-probe.sh` + `host-write-probe*.sh`) t
 a non-empty `~/.claude/.credentials.json` can override the host keychain, so simply
 co-locating a shared file in `~/.claude` is *not* a safe fix.
 
-`--oauth-token` sidesteps the whole problem by using a **different credential
+`--auth oauth-token` sidesteps the whole problem by using a **different credential
 family** for containers: `claude setup-token` mints a **one-year token that is
 never rotated and never written back**. Because nothing ever rewrites it, any
 number of concurrent containers — and the host on its own keychain creds — can use
@@ -232,9 +236,11 @@ the higher layer **overrides**, except `append-system-prompt`, which
 accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
-`config-dir`, `bedrock`, `aws-profile`, `aws-region`, `bedrock-model`,
-`claude-json`, `ssh-agent`, `oauth-token`, `base`, `append-system-prompt` (string
-or list of strings). Per-invocation **actions** — `--worktree`, `--continue`,
+`config-dir`, `auth` (one of `keychain`/`oauth-token`/`bedrock` — validated against
+`AUTH_CHOICES` in `_parse_yolo_file`, since `set_defaults` bypasses argparse's
+`choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
+`ssh-agent`, `base`, `append-system-prompt` (string or list of strings).
+Per-invocation **actions** — `--worktree`, `--continue`,
 `--resume`, and the verbs — are deliberately **not** config keys; putting them in
 a `.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
@@ -247,26 +253,25 @@ malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
 `yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
 values into the cwd, then exits — it does **not** run a container. `init` is one
 value of the optional positional `verb` (`choices=["init", "start", "resume",
-"shell", "finish", "list"]`; see [verbs](#worktree-workflow-verbs)); with no verb,
-`main` proceeds to the run path. The verb is dispatched off a *first* `parse_args`
-**before** any `.yolo.json` is loaded — so a broken ancestor/global config can't
-block scaffolding a fresh one — and the run path then re-parses with the config
-defaults layered in. `init` refuses to overwrite an existing `.yolo.json`.
+"shell", "finish", "list", "setup-token"]`; see [verbs](#worktree-workflow-verbs));
+with no verb, `main` proceeds to the run path. The verb is dispatched off a *first*
+`parse_args` **before** any `.yolo.json` is loaded — so a broken ancestor/global
+config can't block scaffolding a fresh one — and the run path then re-parses with
+the config defaults layered in. `init` refuses to overwrite an existing `.yolo.json`.
 
 The scaffold lists every key. Keys whose default is unset (`config-dir`,
 `aws-profile`, `aws-region`, `bedrock-model`) are written as `null`; the rest
-get their real defaults (`bedrock: false`, `claude-json`/`ssh-agent: true`,
+get their real defaults (`auth: "keychain"`, `claude-json`/`ssh-agent: true`,
 `base: "HEAD"`, `append-system-prompt: []`). So an *unedited* scaffold is inert at the top level
-(it just restates the defaults) — but note those non-null booleans, being
-explicit, would **override** a `~/.yolo.json` that set them differently, since a
-project `.yolo.json` is the higher-precedence layer. The `YOLO_INIT_DEFAULTS`
-literal must stay in sync with `YOLO_KEYS`.
+(it just restates the defaults) — but note those non-null values (`auth`, the
+booleans), being explicit, would **override** a `~/.yolo.json` that set them
+differently, since a project `.yolo.json` is the higher-precedence layer. The
+`YOLO_INIT_DEFAULTS` literal must stay in sync with `YOLO_KEYS`.
 
-Note `--bedrock` is a `BooleanOptionalAction` partly *because* of this file: a
-`.yolo.json` can set `"bedrock": true`, and `--no-bedrock` is then the only way
-to override it back off. AWS sub-keys without bedrock mode now just **warn** (and
-are ignored) rather than erroring, since bedrock may legitimately be toggled off
-on the CLI over a `.yolo.json` that set the AWS knobs.
+AWS sub-keys without `auth: bedrock` just **warn** (and are ignored) rather than
+erroring, since the auth mode may legitimately be set to bedrock in a `.yolo.json`
+and overridden back to `keychain`/`oauth-token` on the CLI over a file that also
+set the AWS knobs.
 
 ## Worktree workflow verbs
 
@@ -404,8 +409,8 @@ when resuming, because `claude` rejects `--name` alongside `--continue`/`--resum
   these env vars override any repo-local identity set *inside* the container.
 - The container name is the cwd basename (or `{main_repo_name}-{NAME}` in
   `--worktree` mode), then suffixed with `-{config-dir-basename}` when
-  `--config-dir` is set and `-{aws-profile-or-"bedrock"}` when `--bedrock` is
-  set. Suffixes stack, so the axes compose in the name too.
+  `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`.
+  Suffixes stack, so the axes compose in the name too.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.
