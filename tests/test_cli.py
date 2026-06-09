@@ -250,10 +250,10 @@ def test_unknown_verb_exits(cy, run_cli, dirs):
         run_cli(["bogus"], home=home, cwd=work)
 
 
-# --- worktree ---------------------------------------------------------------
+# --- worktree mounts (start TOPIC) ------------------------------------------
 
 
-def test_worktree_mounts_shared_git_and_names_session(
+def test_start_worktree_mounts_shared_git_and_names_session(
     cy, run_cli, monkeypatch, flag_values, tmp_path
 ):
     home = tmp_path / "home"
@@ -261,11 +261,14 @@ def test_worktree_mounts_shared_git_and_names_session(
     wt = tmp_path / "wt"
     main_root = tmp_path / "repo"
     git = main_root / ".git"
+    ghost = tmp_path / "ghost"  # the worktree path start checks — must not exist yet
     for d in (home, work, wt, git):
         d.mkdir(parents=True)
+    monkeypatch.setattr(cy, "_worktree_dir", lambda topic, h: (ghost, main_root, "slug"))
+    monkeypatch.setattr(cy, "_branch_exists", lambda name: False)
     monkeypatch.setattr(cy, "setup_worktree", lambda name, h, base="HEAD": (wt, git, main_root))
 
-    argv = run_cli(["--worktree", "feat"], home=home, cwd=work)
+    argv = run_cli(["start", "feat"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
     assert f"{wt}:{wt}" in mounts  # worktree cwd mounted
     assert f"{git}:{git}" in mounts  # shared .git mounted

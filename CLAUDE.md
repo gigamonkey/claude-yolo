@@ -38,7 +38,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 (`keychain` [default] / `oauth-token` / `bedrock`). Everything else —
-`--config-dir`, `--worktree`, `--claude-json`, `--ssh-agent` — is an **orthogonal
+`--config-dir`, `--claude-json`, `--ssh-agent` — is an **orthogonal
 flag** that composes freely with the chosen auth mode and with each other. The
 only positional args are an optional `verb`
 (`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
@@ -236,7 +236,7 @@ so explicit CLI flags still win. Two layers, merged low→high:
 2. the **nearest `.yolo.json` at or above the cwd** (the overlay) — found by
    walking cwd's ancestors and taking the first hit; only that one project file
    is used, not every ancestor. Searched against the *real* cwd, before any
-   `--worktree` retargeting. If the nearest file *is* `~/.yolo.json` (cwd under
+   worktree (`TOPIC`) retargeting. If the nearest file *is* `~/.yolo.json` (cwd under
    `$HOME`, nothing closer), it's loaded once.
 
 Precedence overall: `~/.yolo.json` < nearest `.yolo.json` < CLI flags. Per key
@@ -249,8 +249,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `AUTH_CHOICES` in `_parse_yolo_file`, since `set_defaults` bypasses argparse's
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
 `ssh-agent`, `base`, `append-system-prompt` (string or list of strings).
-Per-invocation **actions** — `--worktree`, `--resume`,
-and the verbs — are deliberately **not** config keys; putting them in
+Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
+deliberately **not** config keys; putting them in
 a `.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
 `config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
 Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
@@ -326,8 +326,8 @@ Implementation shape:
   layered in first. The other terminal verbs (`list`, `finish`, `setup-token`, and
   `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
-  right per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh,
-  `--worktree`, bare) call `launch_container`.
+  right per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh, and a
+  bare `yolo`) call `launch_container`.
 - **`launch_container`** is the single assembly+exec path shared by every launch
   (extracted from the old inline `main`): mounts, ssh-agent block, the
   credential/config blocks, labels, `--entrypoint` override, then `os.execvp`. It
@@ -343,33 +343,33 @@ Implementation shape:
   containers (they share a repo slug but run under different paths). Robust to the
   `-{config}`/`-{profile}` name suffixes.
 - **Verb dispatch / topic-optionality** (`main`). `finish` without a `TOPIC` errors;
-  `start`/`resume`/`shell` without one run in the cwd. A bare invocation (no verb)
-  with no `--worktree` is normalized to `start`. The legacy `--worktree NAME` flag
-  keeps its own create-or-reuse branch (it's the primitive `start`/`resume` are
-  sugar over). The same launch path then branches on whether a `TOPIC` is set:
-  `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
+  `start`/`resume`/`shell` without one run in the cwd. A bare invocation (no verb) is
+  normalized to `start`. The single launch path then branches on whether a `TOPIC` is
+  set: `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
-  `start`/`--worktree` and `list`), `--new` (resume, worktree-only), `--force`
-  (finish), `--resume`/`-r` (resume). Each is validated against its verb in dispatch
-  (e.g. `-r` outside `resume`, `--new` without a `TOPIC`, or `--new` with `-r` all
-  error).
+  `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
+  `--resume`/`-r` (resume). Each is validated against its verb in dispatch (e.g. `-r`
+  outside `resume`, `--new` without a `TOPIC`, or `--new` with `-r` all error).
 
-## `--worktree NAME` (the underlying primitive)
+## The worktree mechanics (`setup_worktree`)
 
-`start`/`resume` are sugar over this. Orthogonal to the credential modes (composes
-with any of them). `setup_worktree` creates/reuses a git worktree on branch `NAME`
-(off `base`, default current `HEAD`, no upstream) at
-`~/.claude-yolo/worktrees/<repo-slug>/NAME`, where `<repo-slug>` is the main repo
+When a verb gets a `TOPIC`, this is what backs it. Orthogonal to the credential
+modes (composes with any of them). `setup_worktree` creates a git worktree on a new
+branch `TOPIC` (off `base`, default current `HEAD`, no upstream) at
+`~/.claude-yolo/worktrees/<repo-slug>/TOPIC`, where `<repo-slug>` is the main repo
 path slugified the way Claude names `~/.claude/projects/` buckets
-(`re.sub(r"[^a-zA-Z0-9]", "-", path)`, factored into `_repo_paths`). `main` then
-retargets `cwd` to the worktree (so `-w` and the `{cwd}:{cwd}` mount point there)
-and **additionally mounts the shared `.git` at its identical host path** — both
-same-path mounts are required because a linked worktree stores *absolute* paths to
-its `.git` and back. The session is named via `claude --name NAME`. Durability is
-the point: commits land in the host's shared `.git` and uncommitted edits live in
-the host worktree dir, so a container exit loses nothing. Must be run from inside
-a git repo.
+(`re.sub(r"[^a-zA-Z0-9]", "-", path)`, factored into `_repo_paths`). `start` is its
+sole caller and guards existence (`worktree.exists() or _branch_exists(topic)`)
+*before* calling it, so `setup_worktree` always creates fresh — a single
+unconditional `git worktree add -b`. `resume`/`shell` don't call it; they locate the
+existing worktree via `_worktree_dir`. `main` then retargets `cwd` to the worktree
+(so `-w` and the `{cwd}:{cwd}` mount point there) and **additionally mounts the
+shared `.git` at its identical host path** — both same-path mounts are required
+because a linked worktree stores *absolute* paths to its `.git` and back. The session
+is named via `claude --name TOPIC`. Durability is the point: commits land in the
+host's shared `.git` and uncommitted edits live in the host worktree dir, so a
+container exit loses nothing. Must be run from inside a git repo.
 
 ## Resuming a session (`resume`, `--resume [SESSION_ID]` / `-r`)
 
@@ -436,8 +436,8 @@ worktree session and so omits the resume flags.
   Mounting `~/.gitconfig` instead would drag in macOS-only bits (osxkeychain
   credential helper, GPG signing) that break commits in the Linux container. Note
   these env vars override any repo-local identity set *inside* the container.
-- The container name is the cwd basename (or `{main_repo_name}-{NAME}` in
-  `--worktree` mode), then suffixed with `-{config-dir-basename}` when
+- The container name is the cwd basename (or `{main_repo_name}-{TOPIC}` for a
+  worktree), then suffixed with `-{config-dir-basename}` when
   `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`.
   Suffixes stack, so the axes compose in the name too.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist

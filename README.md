@@ -96,7 +96,7 @@ container's working directory and is the only host path Claude can modify.
 
 How Claude authenticates is one choice via `--auth`
 (`keychain` [default] / `oauth-token` / `bedrock`); `--config-dir`, `--claude-json`,
-`--ssh-agent`, and `--worktree` are **orthogonal flags** that combine freely with it
+and `--ssh-agent` are **orthogonal flags** that combine freely with it
 and each other (see
 [Authentication modes](#authentication-modes) and
 [Configuration options](#other-configuration-options)). The
@@ -166,9 +166,6 @@ land in the shared `.git` immediately, and uncommitted edits are on host disk.
 Containers themselves are disposable (`docker run --rm`); `start`/`resume` just
 launch a fresh one each time. `finish` is the cleanup `git worktree remove` +
 keeping the branch, so you no longer have to do that by hand.
-
-(`--worktree NAME` is still available as the underlying flag — `start`/`resume`
-are sugar over it — and composes with all the credential options below.)
 
 ## How it works
 
@@ -425,7 +422,7 @@ Supported keys: `config-dir`, `auth` (`keychain`/`oauth-token`/`bedrock`),
 `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`, `ssh-agent`, `base`
 (the default branch point for `start`), and `append-system-prompt` (a string or
 list of strings). A `null` value leaves a key at its built-in default. The
-per-invocation actions (`--worktree`, `--resume`, and the verbs) are
+per-invocation actions (`--resume` and the verbs) are
 deliberately **not** config keys.
 
 To get started, `yolo init` writes a `.yolo.json` of default values

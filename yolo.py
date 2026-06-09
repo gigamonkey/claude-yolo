@@ -375,35 +375,29 @@ def _branch_exists(name: str) -> bool:
 def setup_worktree(
     name: str, home: pathlib.Path, base: str = "HEAD"
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Create or reuse a host git worktree for a parallel session.
+    """Create a host git worktree on a new branch NAME for a parallel session.
 
     The worktree lives in a centralized state dir keyed by a slug of the main repo
     path (the same slug scheme Claude Code uses under ~/.claude/projects/). Returns
     (worktree_path, common_git, main_root). The caller bind-mounts both the worktree
     dir and the shared .git at their identical host paths, because the worktree
     records an absolute path to the shared .git and vice versa — so same-path
-    mounting is what makes git work inside the container. A new branch NAME is
-    created off `base` (default the current HEAD) with no upstream (a stray
-    `git push` can't hit main); commits land in the shared .git on the host, so work
-    survives container exit. An already-existing branch NAME is checked out as-is
-    (base ignored).
+    mounting is what makes git work inside the container. Branch NAME is created off
+    `base` (default the current HEAD) with no upstream (a stray `git push` can't hit
+    main); commits land in the shared .git on the host, so work survives container
+    exit. The sole caller (`start`) guarantees the worktree and branch don't already
+    exist (it errors otherwise), so this always creates fresh.
     """
     common_git, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / name
-
-    if not worktree.exists():
-        worktree.parent.mkdir(parents=True, exist_ok=True)
-        if _branch_exists(name):
-            subprocess.run(["git", "worktree", "add", str(worktree), name], check=True)
-        else:
-            subprocess.run(["git", "worktree", "add", "-b", name, str(worktree), base], check=True)
-
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "worktree", "add", "-b", name, str(worktree), base], check=True)
     return worktree, common_git, main_root
 
 
 # .yolo.json config keys -> (argparse dest, kind). These are standing environment /
-# credential preferences only; per-invocation *actions* (--worktree, --continue,
-# --resume) are intentionally CLI-only and rejected if they appear in a .yolo.json.
+# credential preferences only; per-invocation *actions* (--resume and the verbs)
+# are intentionally CLI-only and rejected if they appear in a .yolo.json.
 # "path" values get ~ expanded (a JSON file can't rely on shell expansion).
 YOLO_KEYS = {
     "config_dir": ("config_dir", "path"),
@@ -623,13 +617,6 @@ PARSER.add_argument(
     metavar="PROMPT",
     help="Extra --append-system-prompt value passed to claude inside the container repeatable in addition to one about the container itself",
 )
-PARSER.add_argument(
-    "--worktree",
-    metavar="NAME",
-    help="Create/reuse a git worktree NAME (branch NAME) under "
-    "~/.claude-yolo/worktrees/, run Claude in it, and name the session NAME. "
-    "For parallel sessions on one repo without losing uncommitted work.",
-)
 # Resume a prior session. Session history lives in the bind-mounted ~/.claude/projects/
 # and is keyed by the project path, which matches between host and container (cwd is mounted
 # at its identical path), so sessions started in a yolo container are resumable here.
@@ -741,7 +728,7 @@ def launch_container(
 ) -> None:
     """Assemble the `docker run` argv from the credential/config flags and exec it.
 
-    Shared by every launch path (start / resume / shell / --worktree / bare). The
+    Shared by every launch path (start / resume / shell, worktree or cwd). The
     container name starts from container_base and gains -{config}/-{profile}
     suffixes; yolo.repo / yolo.worktree labels are stamped so the verbs can find
     the container later. `command` is the args after the image; `entrypoint`
@@ -1094,58 +1081,47 @@ def main():
     worktree_name = None
     entrypoint = None
 
-    # The legacy `--worktree NAME` flag is the create-or-reuse primitive that
-    # start/resume are sugar over; handle it on its own. A bare `yolo` (no verb,
-    # no --worktree) is equivalent to `yolo start` in the current directory.
-    if verb is None and parsed.worktree:
-        cwd, common_git, main_root = setup_worktree(parsed.worktree, home, base=parsed.base)
-        slug = re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
-        worktree_name = parsed.worktree
-        container_base = f"{main_root.name}-{parsed.worktree}"
+    # A bare `yolo` (no verb) is equivalent to `yolo start` in the current directory.
+    if verb is None:
+        verb = "start"
+
+    # Locate the run: an explicit TOPIC means a git worktree (start creates it,
+    # resume/shell require it); no TOPIC means the current directory.
+    if topic:
+        worktree, main_root, slug = _worktree_dir(topic, home)
+        if verb == "start":
+            if worktree.exists() or _branch_exists(topic):
+                sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
+            cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
+        else:
+            if not worktree.is_dir():
+                sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+            cwd, common_git = worktree, _repo_paths()[0]
+        worktree_name = topic
+        container_base = f"{main_root.name}-{topic}"
+        session_name = topic
+    else:
+        slug = _repo_slug_or_none()
+        container_base = cwd.name
+        session_name = None  # a plain cwd session is unnamed
+
+    # Build the trailing command for the verb.
+    if verb == "shell":
+        command = []
+        entrypoint = "/bin/bash"
+    elif verb == "resume" and parsed.resume is not None:
         command = build_claude_args(
-            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=parsed.worktree
+            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume
+        )
+    elif verb == "resume" and not parsed.new:
+        command = build_claude_args(
+            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True
         )
     else:
-        if verb is None:
-            verb = "start"
-
-        # Locate the run: an explicit TOPIC means a git worktree (start creates it,
-        # resume/shell require it); no TOPIC means the current directory.
-        if topic:
-            worktree, main_root, slug = _worktree_dir(topic, home)
-            if verb == "start":
-                if worktree.exists() or _branch_exists(topic):
-                    sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
-                cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
-            else:
-                if not worktree.is_dir():
-                    sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-                cwd, common_git = worktree, _repo_paths()[0]
-            worktree_name = topic
-            container_base = f"{main_root.name}-{topic}"
-            session_name = topic
-        else:
-            slug = _repo_slug_or_none()
-            container_base = cwd.name
-            session_name = None  # a plain cwd session is unnamed
-
-        # Build the trailing command for the verb.
-        if verb == "shell":
-            command = []
-            entrypoint = "/bin/bash"
-        elif verb == "resume" and parsed.resume is not None:
-            command = build_claude_args(
-                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume
-            )
-        elif verb == "resume" and not parsed.new:
-            command = build_claude_args(
-                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True
-            )
-        else:
-            # start, or `resume TOPIC --new` (a fresh named session in the worktree).
-            command = build_claude_args(
-                parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=session_name
-            )
+        # start, or `resume TOPIC --new` (a fresh named session in the worktree).
+        command = build_claude_args(
+            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=session_name
+        )
 
     launch_container(
         parsed,
