@@ -366,12 +366,36 @@ unattended, long-running, or parallel work — it sidesteps the rotation problem
 entirely by not sharing a rotating credential.
 
 Set it up once with **`yolo setup-token`**, which runs the browser OAuth flow and
-caches the token in your keychain (per config directory, so `--config-dir`
-profiles each get their own). After that, `--auth oauth-token` just works. You can
-also run `yolo --auth oauth-token` straight away — with no cached token it mints
+caches the token in your keychain. After that, `--auth oauth-token` just works. You
+can also run `yolo --auth oauth-token` straight away — with no cached token it mints
 one on the spot (interactively; in a non-interactive context it tells you to run
 `yolo setup-token` first). If `CLAUDE_CODE_OAUTH_TOKEN` is already set in your
 environment (e.g. CI), that value is used as-is.
+
+**Tokens are scoped per config directory.** Just like the keychain login
+credentials, each `--config-dir` (≈ each account/profile) gets its *own* long-lived
+token, rather than one global token silently authenticating as the wrong account.
+yolo resolves the token in this order: an explicit `CLAUDE_CODE_OAUTH_TOKEN` in your
+host environment wins (it's global by nature, for CI or self-managed tokens) → else
+the yolo-managed keychain entry for the active config directory → else (interactive
+launches only) mint a fresh one and cache it there. `yolo setup-token` honours
+`--config-dir` too, so it caches under the same name a matching launch will read.
+
+**Stored in the macOS keychain, extract-only.** The token is kept as a
+generic-password entry in your login keychain — encrypted at rest, the same place
+Claude Code stores its own credentials, never written to a dotfile. The service
+name is `claude-yolo-oauth-token` for the default config directory, or
+`claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where `<hash8>`
+is the first 8 hex chars of the SHA-256 of the directory's resolved path (the same
+hashing scheme the keychain login credentials use). yolo only ever *reads* this
+entry to forward the token into the container — it never rotates or rewrites it,
+so unlike the keychain login credentials there are no rotation hazards from sharing
+it across sessions. You can inspect or revoke it directly:
+
+```bash
+security find-generic-password -s claude-yolo-oauth-token -w   # print the token
+security delete-generic-password -s claude-yolo-oauth-token    # forget it (re-mint with setup-token)
+```
 
 Requires a **Pro/Max/Team/Enterprise plan**; the token is scoped to inference
 only. Trade-off: unlike the SSH-agent design (where the secret never enters the
