@@ -61,12 +61,15 @@ ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
 
 
-def build_docker_image() -> None:
+def build_docker_image(*, no_cache: bool = False) -> None:
     """Write the Dockerfile to a temporary directory and build the Docker image."""
     with tempfile.TemporaryDirectory(prefix="claude-yolo-build-") as build_dir:
         dockerfile = pathlib.Path(build_dir) / "Dockerfile"
         dockerfile.write_text(DOCKERFILE_TEMPLATE.format(uid=os.getuid()))
-        subprocess.run(["docker", "build", "-t", DOCKER_IMAGE, build_dir], check=True)
+        cmd = ["docker", "build", "-t", DOCKER_IMAGE]
+        if no_cache:
+            cmd.append("--no-cache")
+        subprocess.run(cmd + [build_dir], check=True)
 
 
 def extract_credentials(config_dir: str | None) -> str:
@@ -602,6 +605,12 @@ PARSER.add_argument(
     "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
 )
 PARSER.add_argument(
+    "--rebuild",
+    action="store_true",
+    default=False,
+    help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
+)
+PARSER.add_argument(
     "--append-system-prompt",
     "-p",
     dest="append_system_prompts",
@@ -818,7 +827,7 @@ def launch_container(
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
 
-    build_docker_image()
+    build_docker_image(no_cache=parsed.rebuild)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
