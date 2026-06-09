@@ -22,9 +22,35 @@ only-include = ["yolo.py"]
 
 [dependency-groups]
 dev = [
+    "bump-my-version>=1.3.0",
     "pytest>=8",
     "ruff>=0.6",
 ]
+
+# Version bumping: `uv run bump-my-version bump patch` (or minor/major) updates
+# the version here and in uv.lock, then commits and tags v{new_version}.
+# Requires a clean working tree (allow_dirty defaults to false).
+[tool.bumpversion]
+current_version = "0.3.0"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+
+# The [project] version. Anchored to line start so the current_version line
+# above (which also ends in `version = "..."`) isn't matched too.
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = "^version = \"{current_version}\""
+replace = "version = \"{new_version}\""
+regex = true
+
+# uv.lock records the project's own version; update it in the same commit so
+# the lockfile doesn't go stale. The two-line search pins the match to this
+# package's entry, not some same-versioned dependency.
+[[tool.bumpversion.files]]
+filename = "uv.lock"
+search = "name = \"claude-yolo\"\nversion = \"{current_version}\""
+replace = "name = \"claude-yolo\"\nversion = \"{new_version}\""
 
 [tool.ruff]
 line-length = 100

@@ -478,7 +478,17 @@ uv run pytest           # run the test suite (tests/)
 uv run ruff check .     # lint
 uv run ruff format .    # format
 uv build                # build the wheel/sdist into dist/ (for publishing)
+uv run bump-my-version bump patch   # version bump (or minor/major): commit + tag
 ```
+
+Version bumps are automated with **bump-my-version** (configured under
+`[tool.bumpversion]` in pyproject.toml). One command updates the version in
+`pyproject.toml` *and* the project's own entry in `uv.lock` (so the lockfile
+doesn't go stale), then commits both and tags `v{new_version}`. It requires a
+clean working tree. The pyproject search is line-anchored (regex) so it doesn't
+also match the `current_version` line in the bumpversion config itself; the
+uv.lock search is two-line (`name = "claude-yolo"\nversion = ...`) so it can't
+hit a same-versioned dependency.
 
 Tests load `yolo.py` via `importlib` **from its file path** (not a plain
 `import yolo`) so each test gets a **fresh module instance** — `main()` mutates
