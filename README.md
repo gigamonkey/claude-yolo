@@ -37,8 +37,8 @@ run the file directly.
 
 ## Installation
 
-The preferred way to install `yolo` is with `uv tool install` which will builds
-it into an isolated venv and put a `yolo` executable on your PATH, with zero
+The preferred way to install `yolo` is with `uv tool install` which builds it
+into an isolated venv and puts a `yolo` executable on your PATH, with zero
 runtime dependencies:
 
 ```bash
@@ -62,7 +62,8 @@ chmod +x yolo.py
 ln -s "$PWD/yolo.py" ~/.local/bin/yolo   # ~/.local/bin is on PATH if you use uv
 ```
 
-Or you can just run `/yolo.py` directly.
+Or you can just run `./yolo.py` directly. Either way, `yolo --version` confirms
+what you've got.
 
 ## Usage
 
@@ -85,16 +86,31 @@ directory which `yolo` creates for you under `~/.claude-yolo/worktrees` and in
 the branch tied to the worktree. So when you are done you can merge the branch
 or push it to Github to make a PR or whatever your workflow calls for.
 
+One thing to know before your first launch: the default authentication mode
+needs a long-lived OAuth token, so the very first run (per Claude config) will
+explain that and ask before minting one — see
+[Authentication modes](#authentication-modes).
+
 ### Current working directory mode
 
 The main subcommands that `yolo` understands are verbs for managing and
-interacting with yolo sessions.
+interacting with yolo sessions. Run them from the directory you want Claude to
+work in; that directory becomes the container's working directory and is the
+only host path Claude can modify.
 
 ```bash
 yolo start                             # launch a session in the current directory
 yolo resume                            # resume the latest session in the current directory
-yolo shell                             # open a bash shell in dir's container
+yolo resume -r [SESSION_ID]            # resume a specific session (or pick from a list)
+yolo shell                             # open a bash shell in this dir's container
 ```
+
+A bare `yolo` is the same as `yolo start`. `resume` continues the most recent
+session (`-r` picks a specific one, opening Claude's interactive picker when
+given no ID). `shell` joins the **running** container for this directory if
+there is one — handy while a session works in another terminal — and otherwise
+starts a fresh throwaway container; either way the prompt is flagged so you
+know where you are (`yolo:<dir>$`).
 
 ### Worktree mode
 
@@ -112,270 +128,40 @@ yolo finish something                   # remove the worktree, keep the branch
 yolo list                               # show this repo's worktrees
 ```
 
-## Configuration
+Verb details:
 
-{{CLAUDE: please rewrite this to explain first where the configuration can be
-stored. Then describe the keys that are used in the .yolo.json and projects.json
-files and the corresponding CLI args. Explain each configuration option under a
-`###` header. At the end explain how `yolo config` can be used to set values in
-projects.json. And for the --config-dir option, explain why one might want to
-have multiple Claude configs, which is pretty much independent of yolo, yolo
-just supports them and allows you to tie projects to Claude configs because
-that's going to be a common use case.}}
-
-```bash
-yolo --config-dir ~/.claude-work       # use an alternate config directory
-yolo --auth keychain                   # snapshot of your keychain login creds instead
-yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-yolo --no-ssh-agent                    # don't forward the host SSH agent
-yolo --mount ~/refdocs                 # also mount ~/refdocs, read-only, at its host path
-yolo --mount ~/other-repo:rw           # extra mount, writable
-yolo config --mount ~/refdocs          # persist flags as this project's config, then exit
-yolo config                            # show this project's config entry, then exit
-yolo --version                         # print the version and exit
-yolo -- --network host                 # pass extra args to `docker run`
-```
-
-How Claude authenticates is one choice via `--auth`
-(`oauth-token` [default] / `keychain` / `bedrock`); `--config-dir`, `--claude-json`,
-`--ssh-agent`, and `--mount` are **orthogonal flags** that combine freely with it
-and each other (see
-[Authentication modes](#authentication-modes) and
-[Configuration options](#other-configuration-options)). The
-positional arguments are an optional verb
-(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`/`tokens`/`forget-token`)
-and its topic name.
-You can also
-add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
-instructions onto Claude's system prompt, and set defaults for most flags in
-[host-side config files](#configuring-defaults-yolojson--yolo-config).
-
-### Claude config and token management
-
-```bash
-yolo setup-token                       # mint+cache a long-lived OAuth token for the current config dir.
-yolo tokens                            # list the tokens yolo has minted (and when)
-yolo forget-token                      # delete this config dir's token from the keychain
-```
-
-## The verbs (and the worktree workflow)
-
-`start`, `resume`, and `shell` take an **optional** `TOPIC`. With no `TOPIC` they
-act on the **current directory** (no worktree); a bare `yolo` is just `yolo start`:
-
-```bash
-yolo            # == yolo start: a fresh session in the current directory
-yolo resume     # continue the most recent session here (yolo resume -r [ID] for a specific one)
-yolo shell      # a bash shell in this dir's running container, or a fresh one
-```
-
-Give them a `TOPIC` and they switch to the **worktree workflow** instead. Most work
-with `claude-yolo` is meant to land on a branch you can merge or open a PR from, and
-the worktree verbs make that the path of least resistance — the `TOPIC` becomes both
-the git worktree and the branch name, and you run from inside a repo:
-
-```bash
-cd ~/hacks/bells
-yolo start something       # new worktree + branch `something`, fresh session
-# ...work, exit the container...
-yolo resume something      # back into it, continuing where you left off
-yolo shell something       # a bash shell in that worktree (poke around)
-yolo list                 # what worktrees exist, and which are running
-yolo finish something      # done — remove the worktree, keep the branch to merge/PR
-```
-
-You can run several at once (`start something` in one terminal, `start
-refactor-db` in another) on the **same repo** without them stepping on each other.
-
-- **`start [TOPIC]`** with a `TOPIC` creates a git **worktree** on a new branch
-  `TOPIC`, branched off `HEAD` by default (change with `--base REF`, e.g. `--base
-  origin/main`, or set `"base"` in your config), and launches a fresh session named
-  `TOPIC`; it errors if that topic already exists (use `resume`). With no `TOPIC` it
-  just starts a fresh session in the current directory.
-- **`resume [TOPIC]`** continues the most recent session — on the worktree `TOPIC`
-  (errors if it doesn't exist — use `start`) or, with no `TOPIC`, in the current
-  directory. `-r [SESSION_ID]` picks a specific session (or opens the picker);
-  `--new` (worktree only) starts a fresh named session instead.
-- **`shell [TOPIC]`** drops you into a bash shell: into the **running** container if
-  one is up for that worktree (or, with no `TOPIC`, for this directory) — handy while
-  a session works in another terminal — otherwise a fresh throwaway container. The
-  prompt flags where you are (`yolo:<dir>$`), with the long worktree path shortened
-  to a `<repo>/<topic>` label (e.g. `yolo:claude-yolo/something$`).
-- **`finish TOPIC`** (worktree only) removes the worktree but **keeps the branch** (for you to
-  merge or push). It refuses if a container is still running, or if there are
+- **`start TOPIC`** creates the worktree on a new branch `TOPIC`, branched off
+  `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
+  the `base` config key), and launches a fresh session named `TOPIC`. It errors
+  if the topic already exists — use `resume`.
+- **`resume TOPIC`** continues that worktree's most recent session (`-r` for a
+  specific one); `--new` starts a fresh named session there instead.
+- **`finish TOPIC`** refuses if a container is still running or if there are
   uncommitted changes (override with `--force`).
-- **`list`** shows the repo's worktrees (TOPIC / BRANCH / STATUS / DIRECTORY).
-  STATUS is `running`, `dirty` (uncommitted changes), or — when a worktree is
-  idle and clean — `merged`/`unmerged` depending on whether its branch is already
-  contained in the base branch (`git branch --merged` semantics, so `merged`
-  means it's ready to `finish`). The merge target is `--base`/`base` (default
-  `HEAD`, i.e. the main checkout). Squash-merges read as `unmerged`.
+- **`list`** shows TOPIC / BRANCH / STATUS / DIRECTORY, where STATUS is
+  `running`, `dirty` (uncommitted changes), or — when idle and clean —
+  `merged`/`unmerged` depending on whether the branch is already contained in
+  the base branch (`git branch --merged` semantics, so `merged` means it's
+  ready to `finish`; a squash-merge reads as `unmerged`).
 
-The worktrees live in a central spot keyed by a slug of the repo path,
-`~/.claude-yolo/worktrees/<repo-slug>/<TOPIC>`, so they clutter neither the repo
-nor its parent. Because the worktree directory **and** the repo's shared `.git`
-are both bind-mounted in, **nothing is lost when the container exits**: commits
-land in the shared `.git` immediately, and uncommitted edits are on host disk.
-Containers themselves are disposable (`docker run --rm`); `start`/`resume` just
-launch a fresh one each time. `finish` is the cleanup `git worktree remove` +
-keeping the branch, so you no longer have to do that by hand.
+Because the worktree directory **and** the repo's shared `.git` are both
+bind-mounted in, **nothing is lost when the container exits**: commits land in
+the shared `.git` immediately and uncommitted edits are on host disk. The
+containers themselves are disposable (`docker run --rm`); `start`/`resume` just
+launch a fresh one each time. And you can run several worktree sessions at once
+(`yolo start fix-auth` in one terminal, `yolo start refactor-db` in another) on
+the same repo without them stepping on each other.
 
-## How it works
-
-When you run the script, it does five things:
-
-### 1. Builds the Docker image
-
-It writes an inline Dockerfile to a temp directory and builds it. The image is
-Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
-amenities used across most projects — `ripgrep`, `fd` (the `fd-find` package,
-symlinked to `fd`), `build-essential`, and `uv`/`uvx` — plus Claude Code installed
-via the **native installer** (`curl https://claude.ai/install.sh | bash`, landing
-at `~/.local/bin/claude`).
-
-The image is rebuilt on every run, but Docker's layer cache makes that nearly
-instant after the first time — so baked-in tools cost almost nothing per launch
-and spare Claude from re-installing them inside each ephemeral container. Tools
-you only need in one project are better left to on-demand `sudo apt` inside the
-container than added here.
-
-### 2. Matches your user ID
-
-The Dockerfile creates a `claude` user whose UID is substituted at build time to
-match your host UID (`os.getuid()`). This keeps file ownership straight across the
-bind mounts: anything Claude writes in the working directory lands on the host
-owned by *you*, and the container can in turn read host-owned files — including the
-`chmod 600` credentials file and your mounted `~/.claude` config. (The user is also
-added to group 0 so it can reach the SSH agent socket — see
-[below](#why-forward-the-ssh-agent).)
-
-### 3. Extracts your credentials
-
-This describes the **keychain** auth mode (`--auth keychain`); the default
-`oauth-token` mode and `--auth bedrock` work differently (see
-[Authentication modes](#authentication-modes)).
-
-Claude Code keeps its OAuth credentials in the macOS keychain. The script pulls
-them out with the `security` CLI into a temporary, `chmod 600` file, then
-bind-mounts that file to `.credentials.json` inside the container.
-
-Before extracting, the script runs `claude auth status` on the host to confirm
-you're actually logged in. If you're not, it offers to run `claude auth login`
-for you (the browser OAuth flow) and then re-checks before launching — so a
-logged-out host gets caught up front instead of dropping you into a container
-that immediately prompts for `/login`. It checks login status rather than just
-token expiry on purpose: an expired access token is refreshed automatically at
-runtime via the stored refresh token, so expiry alone doesn't mean you're logged
-out. (This check is skipped in Bedrock mode, which authenticates via AWS.)
-
-The keychain entry is named `Claude Code-credentials` for the default config, or
-`Claude Code-credentials-<hash8>` for an alternate config directory, where
-`<hash8>` is the first 8 hex chars of the SHA-256 of the directory's path. This
-mirrors how Claude Code itself names its keychain entries.
-
-### 4. Wires up the container
-
-It assembles the `docker run` arguments:
-
-- Bind-mounts your current directory into the container at the same path and sets
-  it as the working directory.
-- Forwards your SSH agent socket so Claude can use your SSH keys (e.g. for
-  `git push`) without copying any private keys into the container.
-- Mounts your `~/.ssh/known_hosts` read-only so SSH host-key verification works.
-- Forwards your git identity (`user.name`/`user.email`) so commits made in the
-  container are attributed to you (see below).
-- Mounts your config/credentials according to the mode (see below).
-- Sets the container hostname to the project directory name, so Claude Code's
-  status line shows it.
-
-#### Why mount at the same path?
-
-The working directory isn't mounted at a tidy container-native location like
-`/workspace` — it's bind-mounted at the **exact same absolute path** it has on the
-host (`-v {cwd}:{cwd}`, with `-w {cwd}`). So if you launch from
-`/Users/peter/hacks/claude-yolo`, that's also the path *inside* the container, and
-it's where Claude starts.
-
-This is deliberate: it keeps paths **consistent across the container boundary**.
-File references, `git`, stack traces, clickable `file:line` links, and Claude
-Code's own session transcript all line up whether you read them inside the
-container or back on the host. (It's why you'll see a macOS-looking path like
-`/Users/...` recorded as the `cwd` in a session file even though the container is
-Linux — that genuinely *is* the working directory inside the container.) Mounting
-at `/workspace` instead would make every recorded path mismatch the host layout.
-
-#### Why forward the SSH agent?
-
-Working autonomously usually means Claude needs to talk to remote services over
-SSH — most commonly `git pull`/`git push` against GitHub or another host. That
-requires your SSH private key. But copying a private key into a throwaway
-container is exactly the kind of secret leak this tool exists to avoid.
-
-The **SSH agent** solves this. On your host, the agent is a background process
-that holds your unlocked keys in memory and exposes a Unix socket
-(`$SSH_AUTH_SOCK`). Any program that wants to authenticate hands the
-*challenge* to the agent over that socket; the agent signs it with the key and
-hands back the *signature*. The key itself never leaves the agent.
-
-claude-yolo bind-mounts that socket into the container and sets `SSH_AUTH_SOCK`
-inside it to point at the mount. So `ssh` (and `git` over SSH) inside the
-container authenticates through your host agent — Claude can push to a private
-repo, but it never gets to read the private key. (The socket the Docker engine
-exposes is owned `root:root` with mode `srw-rw----`, so the container's `claude`
-user is added to group 0 — root's group — to get the group-write permission that
-`connect()` needs. This adds no real privilege: the user already has passwordless
-`sudo`, and the container is the sandbox.)
-
-The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
-key fingerprint, so connections don't fail or hang on an unknown-host prompt.
-
-The image also configures git to rewrite GitHub **HTTPS** remote URLs to SSH
-(`git config --system url."git@github.com:".insteadOf "https://github.com/"`), so
-`git` operations against `https://github.com/...` remotes transparently route over
-SSH and authenticate through the forwarded agent — **no access token ever enters
-the container**. (HTTPS auth is a bearer token that would have to be handed in;
-SSH is challenge-response, so the key stays on the host.)
-
-You can turn all of this off with `--no-ssh-agent`, which drops the agent socket,
-`SSH_AUTH_SOCK`, and the `known_hosts` mount. With it off, in-container git
-operations against GitHub won't authenticate (since the HTTPS→SSH rewrite relies
-on the agent), so use it only when you don't need network git from inside.
-
-#### Why forward the git identity?
-
-Being able to *push* is only half of letting Claude do git work — it also needs
-an identity to *commit* under. A fresh container has no git config, so a commit
-would fail with `Author identity unknown`.
-
-So the script reads your effective `git config user.name` / `user.email` on the
-host (repo-local value if you have one, otherwise the global one — the same
-identity a commit from the host would use) and passes them into the container as
-the `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables. Commits made inside
-the container are then attributed to you, with no extra setup.
-
-It forwards just the identity rather than mounting your whole `~/.gitconfig` on
-purpose: a mounted gitconfig would also pull in macOS-only settings — the
-`osxkeychain` credential helper, GPG commit signing — that don't exist in the
-Linux container and would make commits error or hang. One caveat: because these
-are environment variables, they take precedence over any repo-local identity set
-*inside* the container.
-
-### 5. Launches Claude
-
-Finally it `os.execvp`s into `docker run -it --rm`, replacing itself with the
-interactive container. The container's entrypoint is
-`claude --dangerously-skip-permissions`, plus a built-in system prompt telling
-Claude it's running in an ephemeral Ubuntu container (and any `-p` prompts you
-added). When you exit, `--rm` cleans up the container.
-
-The full `docker run` command is printed (between two dashed lines) before
-launch, so you can see exactly what's happening.
+There are also three token-management verbs — `setup-token`, `tokens`, and
+`forget-token` — described under
+[Authentication modes](#authentication-modes), and a `config` verb described
+under [Configuration](#configuration).
 
 ## Authentication modes
 
-`--auth` selects one of three mutually-exclusive ways for Claude to authenticate
-(default `oauth-token`). The [config flags](#other-configuration-options) below
-compose with whichever you pick.
+`--auth` (or the `auth` config key) selects one of three mutually-exclusive
+ways for Claude to authenticate (default `oauth-token`). The
+[configuration options](#configuration) below compose with whichever you pick.
 
 | `--auth` | How it authenticates | Best for |
 | --- | --- | --- |
@@ -440,6 +226,12 @@ Minting a year-long credential deserves honest bookkeeping, so yolo keeps a
 exact mint timestamp — in `~/.claude-yolo/tokens.json` (metadata only; the token
 itself lives in the keychain). Three things use it:
 
+```bash
+yolo setup-token    # mint+cache a token for the active config dir (re-mint when expired)
+yolo tokens         # list the tokens yolo has minted (and when)
+yolo forget-token   # delete the active config dir's token from the keychain
+```
+
 - **`yolo tokens`** lists what exists: per config dir, when it was minted, the
   estimated expiry (mint + 1 year), and whether the keychain entry is still
   present.
@@ -473,10 +265,26 @@ stored encrypted — it will likely be the best-tracked token on the page.
 
 ### `keychain`
 
-Extracts your Claude.ai login credentials from the macOS keychain and mounts them
-as `.credentials.json` (this is the mode described under
-[How it works → Extracts your credentials](#3-extracts-your-credentials)). No
-token mint, no plan requirement beyond being logged in on the host.
+Claude Code keeps its login credentials in the macOS keychain. In this mode
+yolo pulls them out with the `security` CLI into a temporary, `chmod 600` file
+and bind-mounts that file to `.credentials.json` inside the container. No token
+mint, no plan requirement beyond being logged in on the host.
+
+Before extracting, yolo runs `claude auth status` on the host to confirm you're
+actually logged in. If you're not, it offers to run `claude auth login` for you
+(the browser OAuth flow) and re-checks before launching — so a logged-out host
+gets caught up front instead of dropping you into a container that immediately
+prompts for `/login`. It checks login status rather than token expiry on
+purpose: an expired access token is refreshed automatically at runtime via the
+stored refresh token, so expiry alone doesn't mean you're logged out. (This
+needs a host `claude` recent enough to have the `auth` subcommand; if it's
+missing, the check is skipped and yolo just errors out if the credential
+extraction comes up empty.)
+
+The keychain entry it reads is named `Claude Code-credentials` for the default
+config directory, or `Claude Code-credentials-<hash8>` for an alternate
+`--config-dir` — the same per-directory hashing described above, mirroring how
+Claude Code itself names its keychain entries.
 
 The catch is **token rotation.** Those credentials are a short-lived access token
 (~8h) plus a **single-use refresh token**: when the access token expires, Claude
@@ -506,81 +314,159 @@ otherwise), `--aws-region` defaults to `us-east-1`, and `--bedrock-model` sets t
 model id. Composes with `--config-dir` (e.g.
 `--auth bedrock --config-dir ~/.claude-bdr`).
 
-## Other configuration options
+## Configuration
 
-These compose with any `--auth` mode:
-
-| Flag | Default | Effect |
-| --- | --- | --- |
-| `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. In `keychain`/`oauth-token` modes the credential is keyed per directory (the hashed keychain-entry name described above), so separate config dirs ≈ separate profiles. |
-| `--claude-json` / `--no-claude-json` | on | Whether to mount the host `~/.claude.json` (global config: MCP servers, project history/trust). Turn it off for a cleanly isolated profile alongside an alternate `--config-dir`. |
-| `--ssh-agent` / `--no-ssh-agent` | on | Whether to forward the host SSH agent (see [above](#why-forward-the-ssh-agent)). |
-| `--mount PATH[:ro|:rw]` | — | Bind-mount an extra host directory (reference docs, a sibling repo) into the container at its identical host path. **Read-only by default**; append `:rw` to make it writable. Repeatable. The directory must exist. Each mount is also passed to Claude as `--add-dir`, so it shows up as a working directory Claude knows about. |
-| `--rebuild-image` | off | Pass `--no-cache` to `docker build`, forcing a full image rebuild from scratch. |
-| `--require-project-entry` | off | Refuse to launch unless a `projects.json` entry matches the current directory. Set it in `~/.yolo.json` if you rely on per-project profiles: a renamed project then fails loudly instead of silently falling back to your global defaults. `--no-require-project-entry` overrides it for one run. |
-| `--dangerously-allow-home` | — | By default yolo **refuses to launch with the working directory at or above `$HOME`** — that would mount your whole home directory (including `~/.ssh` and yolo's own config) read-write into a skip-permissions container. This flag overrides the refusal; it is deliberately CLI-only and cannot be set from a config file. |
-
-## Configuring defaults (`~/.yolo.json` + `yolo config`)
-
-Rather than re-typing the same flags every time, set their defaults in
-**host-side config**. There are two layers:
+Every option below can be given as a CLI flag, and most can also be stored as a
+default so you don't re-type it. Configuration comes from three places, lowest
+to highest precedence:
 
 1. **`~/.yolo.json`** — global defaults, a JSON object whose keys mirror the
-   flag names:
+   flag names (dashes or underscores both work):
 
    ```json
    {
-     "auth": "oauth-token",
      "ssh-agent": false,
      "append-system-prompt": ["Prefer the standard library."]
    }
    ```
 
-2. **`~/.claude-yolo/projects.json`** — per-project config, a JSON object
-   mapping a project directory to the same kind of object. You don't edit it by
-   hand to get started: run `yolo config` *with the flags you want to pin* from
-   inside the project —
+2. **`~/.claude-yolo/projects.json`** — per-project defaults, a JSON object
+   mapping a project directory to the same kind of object. You don't edit this
+   one by hand: the [`config` verb](#the-config-verb) below writes it. An entry
+   applies to any directory at or under its key path; when several keys match,
+   the most specific wins.
 
-   ```bash
-   yolo config --config-dir ~/.claude-work --mount ~/refdocs
-   ```
+3. **CLI flags** — always win over both files.
 
-   — and exactly those flags are saved as the project's entry (keyed by the repo
-   root, so subdirectory runs and worktree sessions share it). Re-running with a
-   flag updates just that key; a bare `yolo config` prints the entry that
-   currently applies without writing anything. An entry applies to any directory
-   at or under its key path; when several keys match, the most specific wins.
+Per key, a higher layer overrides a lower one, except `append-system-prompt`
+and `mounts`, whose lists *accumulate* across all the layers. A JSON `null`
+leaves a key at its built-in default.
 
-Precedence runs low to high: `~/.yolo.json` < the project's `projects.json`
-entry < explicit CLI flags — so a flag always wins, and the project entry
-overrides your global file per key (`append-system-prompt` and `mounts` are the
-exceptions: those lists accumulate across all layers).
+Both files live **outside everything a container can write**, and that's
+deliberate. Earlier versions read a `.yolo.json` from the project directory —
+but that file lives inside the tree that gets mounted into the container, so
+Claude, running unattended inside one, could edit it and quietly grant its
+*next* session more host access (an extra writable mount, say); a `.yolo.json`
+committed to a repo you cloned would likewise apply someone else's config to
+your machine. Host-side-only config makes the safety property structural rather
+than policed. A leftover in-project `.yolo.json` is ignored with a warning on
+every run telling you where to migrate it.
 
-Supported keys: `config-dir`, `auth` (`keychain`/`oauth-token`/`bedrock`),
-`aws-profile`, `aws-region`, `bedrock-model`, `claude-json`, `ssh-agent`, `base`
-(the default branch point for `start`), `append-system-prompt` (a string or
-list of strings), `mounts` (a string or list of `PATH[:ro|:rw]` specs), and
-`require-project-entry`. A `null` value leaves a key at its built-in default.
-The per-invocation actions (`--resume` and the verbs) are deliberately **not**
-config keys, and neither is `--dangerously-allow-home`.
+The supported keys, each with its CLI flag:
 
-**Why is there no in-project config file?** Earlier versions read a `.yolo.json`
-from the project directory. That file lives inside the tree that gets mounted
-into the container — so Claude, running unattended inside one, could edit it and
-quietly grant its *next* session more host access (an extra writable mount, say,
-via `mounts` or `config-dir`); a `.yolo.json` committed to a repo you cloned
-would likewise apply someone else's config to your machine. Both config files
-now live outside everything a container can write, which makes the safety
-property structural rather than policed. A leftover in-project `.yolo.json` is
-ignored with a warning on every run (loud on purpose: if one *appears*, you want
-to notice) telling you where to migrate it.
+### `auth` (`--auth MODE`)
 
+Which of the three authentication modes to use: `oauth-token` (the default),
+`keychain`, or `bedrock`. See [Authentication modes](#authentication-modes).
+A common use is pinning `auth: "bedrock"` (plus the AWS keys below) on a work
+project while personal projects use the default.
+
+### `config-dir` (`--config-dir PATH`)
+
+Which Claude Code **config directory** to use (default `~/.claude`); it's
+mounted at `/home/claude/.claude` in the container, the spot Claude Code reads.
+
+Multiple config directories are a Claude Code feature, not a yolo one: pointing
+`CLAUDE_CONFIG_DIR` somewhere else gives you a completely separate Claude
+profile — its own login (so a different account), its own settings, history,
+and memory. People keep one per account (work vs. personal, or a client's
+Team account), or a stripped-down profile for experiments. yolo just supports
+them: the per-config-dir credential (keychain entry or OAuth token, hashed
+service names as described under
+[Authentication modes](#authentication-modes)) is selected to match, and —
+the common case — you can tie a project to its config dir once with
+`yolo config --config-dir ~/.claude-work` so every launch from that project
+uses the right account automatically.
+
+Pairs naturally with `--no-claude-json` (below) when you want the alternate
+profile fully isolated.
+
+### `claude-json` (`--claude-json` / `--no-claude-json`, default on)
+
+Whether to mount the host `~/.claude.json` — Claude Code's *global* config file
+(MCP servers, project history and trust), which lives at `$HOME/.claude.json`
+no matter what the config dir is. Turn it off for a cleanly isolated profile
+alongside an alternate `config-dir`.
+
+### `ssh-agent` (`--ssh-agent` / `--no-ssh-agent`, default on)
+
+Whether to forward the host SSH agent into the container (see
+[why](#why-forward-the-ssh-agent)). With it off, in-container git operations
+against GitHub won't authenticate — yolo also tells Claude so in the system
+prompt — so turn it off only when you don't need network git from inside.
+
+### `mounts` (`--mount PATH[:ro|:rw]`, repeatable)
+
+Extra host directories — reference docs, a sibling repo — bind-mounted into the
+container at their identical host paths. **Read-only by default**; append `:rw`
+to make one writable. The directory must exist. Each mount is also passed to
+Claude as `--add-dir`, so it shows up as a working directory Claude knows
+about. In config, a string or list of `PATH[:ro|:rw]` specs; the lists
+concatenate across the layers and the CLI (on a same-path ro/rw conflict the
+higher layer wins).
+
+### `base` (`--base REF`, default `HEAD`)
+
+The git ref worktree branches are created from (`yolo start TOPIC`) and judged
+`merged`/`unmerged` against (`yolo list`). Set it to e.g. `"origin/main"` if
+your worktrees should branch from the remote rather than whatever the main
+checkout is on.
+
+### `append-system-prompt` (`--append-system-prompt` / `-p`, repeatable)
+
+Extra instructions tacked onto Claude's system prompt, on top of a built-in one
+telling Claude it's in an ephemeral Ubuntu container. In config, a string or
+list of strings; prompts accumulate across the layers and the CLI.
+
+### `aws-profile`, `aws-region`, `bedrock-model` (`--aws-profile NAME`, `--aws-region REGION`, `--bedrock-model ID`)
+
+The AWS knobs for `auth: bedrock` (see
+[Authentication modes](#authentication-modes)); ignored, with a warning, under
+any other auth mode. `aws-profile` is optional (SDK default credentials
+otherwise) and `aws-region` defaults to `us-east-1`.
+
+### `require-project-entry` (`--require-project-entry`, default off)
+
+Refuse to launch unless a `projects.json` entry matches the current directory.
 Because `projects.json` is keyed by directory path, **renaming or moving a
-project orphans its entry** — the project would silently fall back to your
-global defaults. yolo warns on every run about entries whose directory no longer
-exists (and suggests the rename fix when the current directory has no entry of
-its own); set `require-project-entry` in `~/.yolo.json` to upgrade that warning
-to a hard refusal.
+project orphans its entry** and the project would silently fall back to your
+global defaults — the wrong account or profile being the real hazard. yolo
+always warns about entries whose directory no longer exists; setting this key
+in `~/.yolo.json` upgrades the fallback itself to a hard refusal
+(`--no-require-project-entry` overrides it for one run).
+
+### CLI-only flags
+
+A few flags are deliberately *not* config keys:
+
+- **`--rebuild-image`** — pass `--no-cache` to `docker build`, forcing a full
+  image rebuild (useful when a baked-in tool is stale).
+- **`--dangerously-allow-home`** — by default yolo **refuses to launch with the
+  working directory at or above `$HOME`**, which would mount your whole home
+  directory (including `~/.ssh` and yolo's own config) read-write into a
+  skip-permissions container. This flag overrides the refusal for one run; it
+  cannot be set from a config file, since a standing override would quietly
+  defeat the guard.
+- The per-invocation actions — the verbs and `--resume`/`-r`/`--new`/`--force` —
+  are also CLI-only by design.
+
+### The `config` verb
+
+`yolo config` manages the per-project layer (`projects.json`), à la
+`git config`. Run it from inside the project *with the flags you want to pin*:
+
+```bash
+yolo config --config-dir ~/.claude-work --mount ~/refdocs
+```
+
+Exactly those flags are saved as the project's entry, keyed by the repo root
+(so subdirectory runs and worktree sessions share it; outside a git repo, the
+current directory). Re-running with a flag updates just that key, leaving the
+rest of the entry alone. A bare `yolo config` is read-only: it prints the entry
+that currently applies (and the path of `projects.json`) without writing
+anything. `yolo config` is the only thing that writes `projects.json` — a plain
+launch never does — so the file stays a deliberate, auditable record of
+per-project grants.
 
 ## Extra `docker run` arguments
 
@@ -592,16 +478,140 @@ repeated flags, your arguments override the script's defaults:
 yolo -- --network host --memory 4g
 ```
 
+## How it works
+
+When you run the script, it does five things:
+
+### 1. Builds the Docker image
+
+It writes an inline Dockerfile to a temp directory and builds it. The image is
+Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
+amenities used across most projects — `ripgrep`, `fd` (the `fd-find` package,
+symlinked to `fd`), `build-essential`, and `uv`/`uvx` — plus Claude Code installed
+via the **native installer** (`curl https://claude.ai/install.sh | bash`, landing
+at `~/.local/bin/claude`).
+
+The image is rebuilt on every run, but Docker's layer cache makes that nearly
+instant after the first time — so baked-in tools cost almost nothing per launch
+and spare Claude from re-installing them inside each ephemeral container. Tools
+you only need in one project are better left to on-demand `sudo apt` inside the
+container than added here.
+
+### 2. Matches your user ID
+
+The Dockerfile creates a `claude` user whose UID is substituted at build time to
+match your host UID (`os.getuid()`). This keeps file ownership straight across the
+bind mounts: anything Claude writes in the working directory lands on the host
+owned by *you*, and the container can in turn read host-owned files — including the
+`chmod 600` credentials file and your mounted `~/.claude` config. (The user is also
+added to group 0 so it can reach the SSH agent socket — see
+[below](#why-forward-the-ssh-agent).)
+
+### 3. Sets up credentials
+
+How depends on the `--auth` mode (see
+[Authentication modes](#authentication-modes)): the default `oauth-token` mode
+forwards the cached long-lived token as an environment variable; `keychain`
+extracts your login credentials from the macOS keychain into a `chmod 600` temp
+file mounted into the container; `bedrock` mounts `~/.aws` read-only and sets
+the Bedrock environment variables.
+
+### 4. Wires up the container
+
+It assembles the `docker run` arguments:
+
+- Bind-mounts your current directory into the container at the same path and sets
+  it as the working directory.
+- Forwards your SSH agent socket so Claude can use your SSH keys (e.g. for
+  `git push`) without copying any private keys into the container.
+- Mounts your `~/.ssh/known_hosts` read-only so SSH host-key verification works.
+- Forwards your git identity (`user.name`/`user.email`) so commits made in the
+  container are attributed to you (see below).
+- Mounts your config/credentials according to the mode (see above).
+- Sets the container hostname to the project directory name, so Claude Code's
+  status line shows it.
+
+#### Why mount at the same path?
+
+The working directory isn't mounted at a tidy container-native location like
+`/workspace` — it's bind-mounted at the **exact same absolute path** it has on the
+host (`-v {cwd}:{cwd}`, with `-w {cwd}`). So if you launch from
+`/Users/peter/hacks/claude-yolo`, that's also the path *inside* the container, and
+it's where Claude starts.
+
+This is deliberate: it keeps paths **consistent across the container boundary**.
+File references, `git`, stack traces, clickable `file:line` links, and Claude
+Code's own session transcript all line up whether you read them inside the
+container or back on the host. (It's why you'll see a macOS-looking path like
+`/Users/...` recorded as the `cwd` in a session file even though the container is
+Linux — that genuinely *is* the working directory inside the container.) Mounting
+at `/workspace` instead would make every recorded path mismatch the host layout.
+
+#### Why forward the SSH agent?
+
+Working autonomously usually means Claude needs to talk to remote services over
+SSH — most commonly `git pull`/`git push` against GitHub or another host. That
+requires your SSH private key. But copying a private key into a throwaway
+container is exactly the kind of secret leak this tool exists to avoid.
+
+The **SSH agent** solves this. On your host, the agent is a background process
+that holds your unlocked keys in memory and exposes a Unix socket
+(`$SSH_AUTH_SOCK`). Any program that wants to authenticate hands the
+*challenge* to the agent over that socket; the agent signs it with the key and
+hands back the *signature*. The key itself never leaves the agent.
+
+claude-yolo bind-mounts that socket into the container and sets `SSH_AUTH_SOCK`
+inside it to point at the mount. So `ssh` (and `git` over SSH) inside the
+container authenticates through your host agent — Claude can push to a private
+repo, but it never gets to read the private key. (The socket the Docker engine
+exposes is owned `root:root` with mode `srw-rw----`, so the container's `claude`
+user is added to group 0 — root's group — to get the group-write permission that
+`connect()` needs. This adds no real privilege: the user already has passwordless
+`sudo`, and the container is the sandbox.)
+
+The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
+key fingerprint, so connections don't fail or hang on an unknown-host prompt.
+
+The image also configures git to rewrite GitHub **HTTPS** remote URLs to SSH
+(`git config --system url."git@github.com:".insteadOf "https://github.com/"`), so
+`git` operations against `https://github.com/...` remotes transparently route over
+SSH and authenticate through the forwarded agent — **no access token ever enters
+the container**. (HTTPS auth is a bearer token that would have to be handed in;
+SSH is challenge-response, so the key stays on the host.)
+
+#### Why forward the git identity?
+
+Being able to *push* is only half of letting Claude do git work — it also needs
+an identity to *commit* under. A fresh container has no git config, so a commit
+would fail with `Author identity unknown`.
+
+So the script reads your effective `git config user.name` / `user.email` on the
+host (repo-local value if you have one, otherwise the global one — the same
+identity a commit from the host would use) and passes them into the container as
+the `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables. Commits made inside
+the container are then attributed to you, with no extra setup.
+
+It forwards just the identity rather than mounting your whole `~/.gitconfig` on
+purpose: a mounted gitconfig would also pull in macOS-only settings — the
+`osxkeychain` credential helper, GPG commit signing — that don't exist in the
+Linux container and would make commits error or hang. One caveat: because these
+are environment variables, they take precedence over any repo-local identity set
+*inside* the container.
+
+### 5. Launches Claude
+
+Finally it `os.execvp`s into `docker run -it --rm`, replacing itself with the
+interactive container. The container's entrypoint is
+`claude --dangerously-skip-permissions`, plus a built-in system prompt telling
+Claude it's running in an ephemeral Ubuntu container (and any
+`--append-system-prompt` additions you configured). When you exit, `--rm`
+cleans up the container.
+
+The full `docker run` command is printed (between two dashed lines) before
+launch, so you can see exactly what's happening.
+
 ## Notes and gotchas
 
-- **Login is checked up front (keychain mode).** In keychain mode (`--auth
-  keychain`), claude-yolo copies credentials from the macOS keychain rather than
-  authenticating inside the container. Before launching it runs
-  `claude auth status`; if you're logged out it offers to run `claude auth login`
-  for you and re-checks. Requires a host `claude` recent enough to have the `auth`
-  subcommand — if it's missing, the check is skipped and the script falls back to
-  erroring out when credential extraction comes up empty. (`--auth oauth-token`
-  and `--auth bedrock` skip this check — they don't use the login keychain.)
 - **The in-process sandbox is disabled on purpose** — the *container* is the
   sandbox. If your `~/.claude/settings.json` has `sandbox.enabled: true`, Claude
   would otherwise warn at startup that `bubblewrap`/`socat` are missing and run
@@ -614,7 +624,6 @@ yolo -- --network host --memory 4g
 - **Don't switch to `npm install -g`.** The npm global install lands at
   `/usr/local/bin/claude`, which `/doctor` flags as a broken install and which
   self-update can't manage. The native installer is deliberate.
-- **macOS-only as written**, because of the keychain and SSH-agent assumptions.
 
 ## Development
 
