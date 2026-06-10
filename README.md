@@ -7,13 +7,13 @@ in the current directory or in a git worktree.
 
 Within the container Claude can install packages, run commands, and edit files
 unattended, but the only part of your host it can touch is either the directory
-you launch it from or the worktree directory. Everything else stays on the other
-side of the container wall. (Strictly speaking there are a few other directories
-it has access to, see below.)
+you launch it from or the worktree directory plus explicitly configured other
+directories and a few specific directories Claude Code needs to work. Everything
+else stays on the other side of the container wall.
 
 The script is a self-contained Python script with no runtime dependencies beyond
-the standard library. You can install it as a `yolo` command (see below) or just
-run the file directly.
+the standard library. You can install it with `uv` (see below) or just run the
+file directly.
 
 ## Requirements
 
@@ -21,9 +21,9 @@ run the file directly.
   `security` CLI.
 
 - **Claude Code** on the host computer. Although Claude code sessions are run
-  within a Docker container which contains Claude Code, two of the main
+  within a Docker container which has Claude Code installed, two of the main
   authentication methods require running `claude` on the host to either create
-  an Oauth key or to login it to Claude.
+  an Oauth key or to log in to Claude.
 
 - **A Docker engine** The obvious choices are either the classic [Docker
   Desktop](https://www.docker.com) or the new hotness,
@@ -44,14 +44,17 @@ runtime dependencies:
 ```bash
 uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
 uv tool upgrade claude-yolo                                    # later, to update
-uv tool update-shell						# add yolo to your $PATH
+uv tool update-shell                                           # add yolo to your $PATH
 ```
 
 Or just run the bundled **`./install-from-git`** script, which wraps that
 `uv tool install` (re-run it any time to update; pass a tag/branch to pin one).
 
-You can also run it once without installing: `uvx --from
-git+https://github.com/gigamonkey/claude-yolo yolo`.
+You can also run it without installing using `uvx`:
+
+```bash
+uvx --from git+https://github.com/gigamonkey/claude-yolo yolo`
+```
 
 Alternatively, the file self-runs under `uv` via its PEP 723 header, so you can
 skip the build entirely and just symlink it from somewhere in your path. This is
@@ -94,7 +97,7 @@ explain that and ask before minting one — see
 ### Current working directory mode
 
 The main subcommands that `yolo` understands are verbs for managing and
-interacting with yolo sessions. Run them from the directory you want Claude to
+interacting with `yolo` sessions. Run them from the directory you want Claude to
 work in; that directory becomes the container's working directory and is the
 only host path Claude can modify.
 
@@ -105,12 +108,12 @@ yolo resume -r [SESSION_ID]            # resume a specific session (or pick from
 yolo shell                             # open a bash shell in this dir's container
 ```
 
-A bare `yolo` is the same as `yolo start`. `resume` continues the most recent
-session (`-r` picks a specific one, opening Claude's interactive picker when
-given no ID). `shell` joins the **running** container for this directory if
-there is one — handy while a session works in another terminal — and otherwise
-starts a fresh throwaway container; either way the prompt is flagged so you
-know where you are (`yolo:<dir>$`).
+As a shorthand a bare `yolo` is the same as `yolo start`. `resume` continues the
+most recent session (`-r` picks a specific one, opening Claude's interactive
+picker when given no ID). `shell` joins the **running** container for this
+directory if there is one — handy while a session works in another terminal —
+and otherwise starts a fresh throwaway container; either way the prompt is
+flagged so you know where you are (`yolo:<dir>$`).
 
 ### Worktree mode
 
@@ -148,23 +151,22 @@ Verb details:
   ready to `finish`; a squash-merge reads as `unmerged`).
 
 Because the worktree directory **and** the repo's shared `.git` are both
-bind-mounted in, **nothing is lost when the container exits**: commits land in
-the shared `.git` immediately and uncommitted edits are on host disk. The
-containers themselves are disposable (`docker run --rm`); `start`/`resume` just
-launch a fresh one each time. And you can run several worktree sessions at once
-(`yolo start fix-auth` in one terminal, `yolo start refactor-db` in another) on
-the same repo without them stepping on each other.
+mounted, **nothing is lost when the container exits**: commits land in the
+shared `.git` immediately and uncommitted edits are on host disk. The containers
+themselves are disposable (`docker run --rm`); `start`/`resume` just launch a
+fresh one each time. And you can run several worktree sessions on the same repo
+at once (`yolo start fix-auth` in one terminal, `yolo start refactor-db` in
+another) without them stepping on each other.
 
 There are also three token-management verbs — `setup-token`, `tokens`, and
-`forget-token` — described under
-[Authentication modes](#authentication-modes), and a `config` verb described
-under [Configuration](#configuration).
+`forget-token` — described under [Authentication modes](#authentication-modes),
+and a `config` verb described under [Configuration](#configuration).
 
 ## Authentication modes
 
-`--auth` (or the `auth` config key) selects one of three mutually-exclusive
-ways for Claude to authenticate (default `oauth-token`). The
-[configuration options](#configuration) below compose with whichever you pick.
+`--auth` (or the `auth` config key) selects one of three mutually-exclusive ways
+for Claude to authenticate (default `oauth-token`). The [configuration
+options](#configuration) below compose with whichever you pick.
 
 | `--auth`                  | How it authenticates                                              | Best for                                                 |
 |---------------------------|-------------------------------------------------------------------|----------------------------------------------------------|
@@ -197,29 +199,29 @@ needs); the token is scoped to inference only. If your plan doesn't support it,
 set `"auth": "keychain"` in `~/.yolo.json` and read the keychain section below.
 
 **Tokens are scoped per config directory.** Just like the keychain login
-credentials, each `--config-dir` (≈ each account/profile) gets its *own* long-lived
-token, rather than one global token silently authenticating as the wrong account.
-yolo resolves the token in this order: an explicit `CLAUDE_CODE_OAUTH_TOKEN` in your
-host environment wins (it's global by nature, for CI or self-managed tokens) → else
-the yolo-managed keychain entry for the active config directory → else (interactive
-launches only) offer to mint a fresh one and cache it there. `yolo setup-token`
-honours `--config-dir` too, so it caches under the same name a matching launch will
-read.
+credentials, each `--config-dir` (≈ each account/profile) gets its *own*
+long-lived token, rather than one global token silently authenticating as the
+wrong account. `yolo` resolves the token in this order: an explicit
+`CLAUDE_CODE_OAUTH_TOKEN` in your host environment wins (it's global by nature,
+for CI or self-managed tokens) → else the `yolo`-managed keychain entry for the
+active config directory → else (interactive launches only) offer to mint a fresh
+one and cache it there. `yolo setup-token` honours `--config-dir` too, so it
+caches under the same name a matching launch will read.
 
 **Stored in the macOS keychain, extract-only.** The token is kept as a
-generic-password entry in your login keychain — encrypted at rest, the same place
-Claude Code stores its own credentials, never written to a dotfile. The service
-name is `claude-yolo-oauth-token` for the default config directory, or
-`claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where `<hash8>`
-is the first 8 hex chars of the SHA-256 of the directory's resolved path (the same
-hashing scheme the keychain login credentials use). yolo only ever *reads* this
-entry to forward the token into the container — it never rotates or rewrites it,
-so unlike the keychain login credentials there are no rotation hazards from sharing
-it across sessions.
+generic-password entry in your login keychain — encrypted at rest, the same
+place Claude Code stores its own credentials, never written to a dotfile. The
+service name is `claude-yolo-oauth-token` for the default config directory, or
+`claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where
+`<hash8>` is the first 8 hex chars of the SHA-256 of the directory's resolved
+path (the same hashing scheme the keychain login credentials use). `yolo` only
+ever *reads* this entry to forward the token into the container — it never
+rotates or rewrites it, so unlike the keychain login credentials there are no
+rotation hazards from sharing it across sessions.
 
 #### Tokens & revocation
 
-Minting a year-long credential deserves some bookkeeping, so yolo keeps a
+Minting a year-long credential deserves some bookkeeping, so `yolo` keeps a
 **registry** of every token it mints — service name, config directory, and the
 exact mint timestamp — in `~/.claude-yolo/tokens.json` (metadata only; the token
 itself lives in the keychain). Three things use it:
@@ -241,18 +243,20 @@ yolo tokens         # list all the tokens yolo has minted (and when)
   present.
 
 **Revocation is the weak spot, and it's outside yolo's control.** There is no
-API or CLI command to revoke a `claude setup-token` token — `claude auth logout` only
-clears local state
+API or CLI command to revoke a `claude setup-token` token — `claude auth logout`
+only clears local state
 ([#34198](https://github.com/anthropics/claude-code/issues/34198)), and the CLI
 has no list/revoke subcommands
 ([#48373](https://github.com/anthropics/claude-code/issues/48373), open feature
 request). The only revocation path is manual:
 **<https://claude.ai/settings/claude-code>**, one trash-icon click per token
-([support article](https://support.claude.com/en/articles/10310342-how-do-i-log-out-of-all-active-sessions)).
-In practice that page is rough: normal Claude Code usage mints tokens of its own,
-so the list accumulates hundreds of near-identical entries with no bulk-revoke
-([#59378](https://github.com/anthropics/claude-code/issues/59378)), and
-revocation has been reported to lag by days
+([support
+article](https://support.claude.com/en/articles/10310342-how-do-i-log-out-of-all-active-sessions)).
+
+In practice that page is rough: normal Claude Code usage mints tokens of its
+own, so the list accumulates hundreds of near-identical entries with no
+bulk-revoke ([#59378](https://github.com/anthropics/claude-code/issues/59378)),
+and revocation has been reported to lag by days
 ([#43801](https://github.com/anthropics/claude-code/issues/43801)). The mint
 timestamps that `yolo tokens` records are your best handle for picking yolo's
 token out of that list.
@@ -265,10 +269,10 @@ stored encrypted — it will likely be the best-tracked token on the page.
 ### `keychain`
 
 Claude Code on the host keeps its login credentials in the macOS keychain. In
-this auth mode `yolo` pulls them out with the `security` CLI into a temporary,
-`chmod 600` file and bind-mounts that file to `.credentials.json` inside the
-container. Thus no new tokens are created, and you don't need a plan that allows
-creating long-lived tokens.
+the `keychain` auth mode `yolo` pulls them out with the `security` CLI into a
+temporary, `chmod 600` file and bind-mounts that file to `.credentials.json`
+inside the container. Thus no new tokens are created, and you don't need a plan
+that allows creating long-lived tokens.
 
 Before extracting, yolo runs `claude auth status` on the host to confirm you're
 actually logged in. If you're not, it offers to run `claude auth login` for you
@@ -279,7 +283,7 @@ it can't open your browser.) It checks login status rather than token expiry on
 purpose: an expired access token is refreshed automatically at runtime via the
 stored refresh token, so expiry alone doesn't mean you're logged out. (This
 needs a host `claude` recent enough to have the `auth` subcommand; if it's
-missing, the check is skipped and yolo just errors out if the credential
+missing, the check is skipped and `yolo` just errors out if the credential
 extraction comes up empty.)
 
 The keychain entry it reads is named `Claude Code-credentials` for the default
@@ -287,24 +291,23 @@ config directory, or `Claude Code-credentials-<hash8>` for an alternate
 `--config-dir` — the same per-directory hashing described above, mirroring how
 Claude Code itself names its keychain entries.
 
-The catch is **token rotation.** Those credentials are an access token with a
-fixed expiry (~8h after the last refresh) plus a **single-use refresh token**:
-when the access token expires, Claude Code refreshes it, and the refresh token
-*rotates* to a new one, invalidating the old. Since `yolo` mounts a *snapshot*
-of the credentials into each container, every container — and the host keychain
-— holds the *same* pair, so they all share one **refresh boundary**: the moment
-that access token expires. Whoever makes the first API call after the boundary,
-any container or the host, refreshes and wins. Every other holder is left with
-a dead refresh token and breaks at its own next refresh attempt, moments later.
+The catch, and the reason `keychain` is not the default auth mode is **token
+rotation.** Those credentials are an access token with a fixed expiry (~8h after
+the last refresh) plus a **single-use refresh token**: when the access token
+expires, Claude Code refreshes it, and the refresh token *rotates* to a new one,
+invalidating the old. Since `yolo` mounts a *snapshot* of the credentials into
+each container, every container — and the host keychain — holds the *same* pair,
+so they all share one **refresh boundary**: the moment when that access token
+expires. Whetever user of the token makes the first API call after the boundary,
+either a `yolo` container or the host, refreshes and wins. Every other user is
+left with an expired access token and a no-longer-valid refresh token. At that
+point, the best thing to do is to exit any `yolo` containers, log back in on the
+host and then `yolo resume` the sessions. Which is a PITA.
 
-Note what the hazard actually is: not concurrency, and not even session length,
-but **whether anything is running when the boundary arrives**. Start a session
-five minutes before the token expires and in five minutes someone is getting
-broken — either the new session (if the host or another session wins the
-refresh) or everyone else (if it wins). A long session is dangerous only
-because it's more likely to be running when the boundary falls; concurrent
-sessions just raise the number of losers. A session that starts and ends
-between two boundaries, with no host use alongside it, is completely fine.
+Note that the problem is not concurrent sessions or the length of sessions but
+**whether anything is running when the refresh boundary arrives**. A session
+that starts five minutes before the access token expires will either refresh and
+break other logins or get broken by someone else.
 
 The damage also outlives the sessions. When a container wins the refresh, the
 new credentials land only in that container's mounted file — nothing writes
@@ -315,19 +318,18 @@ run `claude auth login` on the host to mint a fresh pair. (The pre-launch login
 check can't catch this: login *status* can't reveal whether a refresh token is
 still live without spending it.)
 
-This is why it's not the default: whether a session is safe depends on when an
-invisible boundary falls, not on anything you can see or control. Use it when
-your plan doesn't support `setup-token` (i.e. a Claude Console account), and
-prefer short sessions to keep the odds of crossing a boundary low.
+This is why it's not the default. Probably the only reason to use `keychain`
+mode is if your plan doesn't support `setup-token` (i.e. a Claude Console
+account).
 
 ### `bedrock`
 
-Authenticate and bill via **AWS Bedrock** instead of Claude.ai. Sets
-`CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only, and skips the keychain
-entirely. `--aws-profile` is optional (the AWS SDK's default credentials are
-used otherwise), `--aws-region` defaults to `us-east-1`, and `--bedrock-model`
-sets the model id. Composes with `--config-dir` (e.g. `--auth bedrock
---config-dir ~/.claude-bdr`).
+In this mode we don't need to authenticate to Claude.ai but to **AWS Bedrock**
+Sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only, and skips the
+keychain entirely. `--aws-profile` is optional (the AWS SDK's default
+credentials are used otherwise), `--aws-region` defaults to `us-east-1`, and
+`--bedrock-model` sets the model id. Composes with `--config-dir` (e.g. `--auth
+bedrock --config-dir ~/.claude-bdr`).
 
 ## Configuration
 
@@ -491,8 +493,8 @@ anything. `yolo config` is the only thing that writes `projects.json` — a plai
 launch never does — so the file stays a deliberate, auditable record of
 per-project grants.
 
-To register a project that needs no customization — which is all
-`require-project-entry` asks for — use:
+To register a project that needs no customization if you are using
+`require-project-entry: true` use:
 
 ```bash
 yolo config --init
@@ -536,14 +538,14 @@ and spare Claude from re-installing them inside each ephemeral container. Tools
 you only need in one project are better left to on-demand `sudo apt` inside the
 container than added here.
 
-### 2. Matches your user ID
+### 2. Matches your host user ID
 
 The Dockerfile creates a `claude` user whose UID is substituted at build time to
-match your host UID (`os.getuid()`). This keeps file ownership straight across the
-bind mounts: anything Claude writes in the working directory lands on the host
-owned by *you*, and the container can in turn read host-owned files — including the
-`chmod 600` credentials file and your mounted `~/.claude` config. (The user is also
-added to group 0 so it can reach the SSH agent socket — see
+match your host UID (`os.getuid()`). This keeps file ownership straight across
+the bind mounts: anything Claude writes in the working directory lands on the
+host owned by *you*, and the container can in turn read host-owned files —
+including the `chmod 600` credentials file and your mounted `~/.claude` config.
+(The user is also added to group 0 so it can reach the SSH agent socket — see
 [below](#why-forward-the-ssh-agent).)
 
 ### 3. Sets up credentials
