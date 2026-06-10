@@ -350,6 +350,35 @@ def test_shell_no_topic_fresh_container(cy, run_cli, repo):
     assert argv[argv.index("--entrypoint") + 1] == "/bin/bash"
 
 
+# --- config verb in a real repo ----------------------------------------------
+
+
+def test_config_verb_keys_entry_by_repo_root(cy, run_cli, repo):
+    import json
+
+    r, home = repo
+    sub = r / "sub"
+    sub.mkdir()
+    # run from a subdirectory: the entry must be keyed by the repo root, so
+    # subdirectory runs and worktree sessions all share it
+    run_cli(["config", "--no-ssh-agent"], home=home, cwd=sub)
+    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    assert projects == {str(r): {"ssh-agent": False}}
+
+
+def test_project_entry_applies_to_worktree_session(cy, run_cli, repo):
+    import json
+
+    r, home = repo
+    d = home / ".claude-yolo"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "projects.json").write_text(json.dumps({str(r): {"ssh-agent": False}}))
+    argv = run_cli(["start", "topic"], home=home, cwd=r)
+    # config matched on the real cwd (the repo), before worktree retargeting
+    envs = [argv[i + 1] for i, tok in enumerate(argv) if tok == "-e"]
+    assert "SSH_AUTH_SOCK=/run/ssh-agent" not in envs
+
+
 # --- dispatch guards --------------------------------------------------------
 
 

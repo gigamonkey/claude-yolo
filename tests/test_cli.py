@@ -156,7 +156,7 @@ def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path
 
 def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
+    (home / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
     argv = run_cli([], home=home, cwd=work)
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
     assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
@@ -251,12 +251,18 @@ def test_oauth_service_is_keyed_to_config_dir(cy, tmp_path):
     assert scoped == f"{cy.OAUTH_KC_SERVICE}-{h}"
 
 
-# --- .yolo.json integration -------------------------------------------------
+# --- config integration (~/.yolo.json + projects.json) -----------------------
+
+
+def write_projects(home, mapping):
+    d = home / ".claude-yolo"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "projects.json").write_text(json.dumps(mapping))
 
 
 def test_yolo_provides_defaults_and_cli_overrides(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"ssh-agent": False}))
+    (home / ".yolo.json").write_text(json.dumps({"ssh-agent": False}))
 
     no_flag = run_cli([], home=home, cwd=work)
     assert "SSH_AUTH_SOCK=/run/ssh-agent" not in flag_values(no_flag, "-e")
@@ -267,22 +273,141 @@ def test_yolo_provides_defaults_and_cli_overrides(cy, run_cli, flag_values, dirs
 
 def test_cli_auth_overrides_yolo(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"auth": "bedrock"}))
+    (home / ".yolo.json").write_text(json.dumps({"auth": "bedrock"}))
     argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_USE_BEDROCK=1" not in envs
     assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
 
 
-def test_append_prompt_concatenates_builtin_yolo_and_cli(cy, run_cli, dirs):
+def test_project_entry_provides_defaults(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"append-system-prompt": ["FROM_YOLO"]}))
+    write_projects(home, {str(work): {"auth": "oauth-token"}})
+    argv = run_cli([], home=home, cwd=work)
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+
+
+def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsys):
+    home, work = dirs
+    (work / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
+    argv = run_cli([], home=home, cwd=work)
+    # the in-directory file no longer configures anything: still a keychain run
+    assert not any(e.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for e in flag_values(argv, "-e"))
+    assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    assert "no longer read" in capsys.readouterr().err
+
+
+def test_append_prompt_concatenates_builtin_entry_and_cli(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"append-system-prompt": ["FROM_HOME"]}))
+    write_projects(home, {str(work): {"append-system-prompt": ["FROM_PROJECT"]}})
     argv = run_cli(["-p", "FROM_CLI"], home=home, cwd=work)
     cargs = claude_args(cy, argv)
     joined = cargs[cargs.index("--append-system-prompt") + 1]
     assert "ephemeral Ubuntu container" in joined  # built-in prompt
-    assert "FROM_YOLO" in joined
+    assert "FROM_HOME" in joined
+    assert "FROM_PROJECT" in joined
     assert "FROM_CLI" in joined
+
+
+# --- extra mounts (--mount / `mounts`) ----------------------------------------
+
+
+def test_mount_flag_mounts_ro_and_forwards_add_dir(cy, run_cli, flag_values, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    ref = tmp_path / "ref"
+    for d in (home, work, ref):
+        d.mkdir()
+    argv = run_cli(["--mount", str(ref)], home=home, cwd=work)
+    assert f"{ref}:{ref}:ro" in flag_values(argv, "-v")  # ro is the default
+    cargs = claude_args(cy, argv)
+    assert cargs[cargs.index("--add-dir") + 1] == str(ref)
+
+
+def test_mount_rw_suffix(cy, run_cli, flag_values, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    ref = tmp_path / "ref"
+    for d in (home, work, ref):
+        d.mkdir()
+    argv = run_cli(["--mount", f"{ref}:rw"], home=home, cwd=work)
+    assert f"{ref}:{ref}:rw" in flag_values(argv, "-v")
+
+
+def test_mount_missing_dir_exits(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["--mount", str(work / "nope")], home=home, cwd=work)
+
+
+def test_mounts_concatenate_across_layers_and_cli_mode_wins(cy, run_cli, flag_values, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    for d in (home, work, a, b):
+        d.mkdir()
+    (home / ".yolo.json").write_text(json.dumps({"mounts": [str(a)]}))
+    write_projects(home, {str(work): {"mounts": [str(b)]}})
+    argv = run_cli(["--mount", f"{a}:rw"], home=home, cwd=work)
+    mounts = flag_values(argv, "-v")
+    assert f"{a}:{a}:rw" in mounts  # CLI spec wins the ro/rw conflict for a
+    assert f"{a}:{a}:ro" not in mounts
+    assert f"{b}:{b}:ro" in mounts  # project-entry mount also present
+
+
+# --- guardrails ---------------------------------------------------------------
+
+
+def test_refuses_to_launch_at_home(cy, run_cli, dirs):
+    home, _ = dirs
+    with pytest.raises(SystemExit):
+        run_cli([], home=home, cwd=home)
+
+
+def test_refuses_to_launch_above_home(cy, run_cli, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    with pytest.raises(SystemExit):
+        run_cli([], home=home, cwd=tmp_path)
+
+
+def test_dangerously_allow_home_overrides(cy, run_cli, flag_values, dirs):
+    home, _ = dirs
+    argv = run_cli(["--dangerously-allow-home"], home=home, cwd=home)
+    assert f"{home}:{home}" in flag_values(argv, "-v")  # launched, home mounted
+
+
+def test_home_guard_exempts_terminal_verbs(cy, run_cli, dirs, capsys):
+    home, _ = dirs
+    assert run_cli(["config"], home=home, cwd=home) is None  # no SystemExit
+
+
+def test_require_project_entry_blocks_without_entry(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
+    with pytest.raises(SystemExit):
+        run_cli([], home=home, cwd=work)
+
+
+def test_require_project_entry_satisfied_by_entry(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
+    write_projects(home, {str(work): {}})
+    assert run_cli([], home=home, cwd=work) is not None  # launched
+
+
+def test_require_project_entry_cli_override(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
+    assert run_cli(["--no-require-project-entry"], home=home, cwd=work) is not None
+
+
+def test_require_project_entry_does_not_block_config_verb(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
+    assert run_cli(["config"], home=home, cwd=work) is None  # prints, no error
 
 
 def test_docker_passthrough_after_double_dash(cy, run_cli, dirs):
@@ -328,11 +453,11 @@ def test_worktree_ps1_label_single_slug_is_just_the_topic(cy, tmp_path):
 # --- verbs ------------------------------------------------------------------
 
 
-def test_init_verb_writes_file_and_does_not_exec(cy, run_cli, dirs):
+def test_config_verb_is_terminal(cy, run_cli, dirs):
     home, work = dirs
-    argv = run_cli(["init"], home=home, cwd=work)
+    argv = run_cli(["config", "--no-ssh-agent"], home=home, cwd=work)
     assert argv is None  # execvp never reached
-    assert (work / ".yolo.json").is_file()
+    assert (home / ".claude-yolo" / "projects.json").is_file()
 
 
 def test_unknown_verb_exits(cy, run_cli, dirs):

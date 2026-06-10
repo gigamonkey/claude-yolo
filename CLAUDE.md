@@ -21,6 +21,8 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --auth bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
+./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
+./yolo.py --mount ~/other:rw       # extra mount, writable
 ./yolo.py setup-token              # mint+cache a long-lived OAuth token (once)
 ./yolo.py --auth oauth-token       # auth via that token, not keychain creds
 ./yolo.py -- --network host        # extra docker run args
@@ -39,20 +41,24 @@ that tooling is never needed to *run* the script, only to develop it (see
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 (`keychain` [default] / `oauth-token` / `bedrock`). Everything else —
-`--config-dir`, `--claude-json`, `--ssh-agent` — is an **orthogonal
+`--config-dir`, `--claude-json`, `--ssh-agent`, `--mount` — is an **orthogonal
 flag** that composes freely with the chosen auth mode and with each other. The
 only positional args are an optional `verb`
-(`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
+(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
 see [Workflow verbs](#workflow-verbs).
 
-Defaults for most flags can also live in a `.yolo.json` file (see the config
-file section below):
+Defaults for most flags can also live in **host-side config** — global
+`~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
+written with the `config` verb (see the config section below; an in-directory
+`.yolo.json` is deliberately **no longer read**):
 
 ```bash
-./yolo.py init            # scaffold a .yolo.json of defaults in the cwd
-echo '{"config-dir": "~/.claude-work", "ssh-agent": false}' > .yolo.json
-./yolo.py                 # picks up .yolo.json; equals passing those flags
-./yolo.py --ssh-agent     # explicit flag still overrides the file
+echo '{"ssh-agent": false}' > ~/.yolo.json   # global defaults
+./yolo.py config --config-dir ~/.claude-work --mount ~/refdocs
+                          # persist those flags as THIS project's entry
+./yolo.py                 # picks up both layers; equals passing those flags
+./yolo.py --ssh-agent     # explicit flag still overrides the files
+./yolo.py config          # show the entry that currently applies (read-only)
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
@@ -153,9 +159,27 @@ on top of whichever auth is chosen:
   socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
   the `known_hosts` mount; in-container GitHub git auth then won't work, since the
   baked HTTPS→SSH rewrite relies on the agent.
+- **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
+  host directories ("reference" dirs) at their **identical host paths**, like the
+  cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would
+  otherwise create it root-owned on the host). Each mount is also forwarded to
+  claude as `--add-dir`, so the dirs are working directories Claude actually knows
+  about. Mount lists **concatenate** across the config layers and the CLI (exact
+  dups deduped; on a same-path ro/rw conflict the higher layer wins). A `shell`
+  exec'd into a *running* container necessarily joins it with the mounts it was
+  started with — docker can't add mounts to a live container.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
+- **Guardrails** (checked just before any container launch; the terminal verbs and
+  `shell`-into-running are exempt): launching with the cwd **at or above `$HOME`**
+  is a hard error — it would mount the whole home dir (incl. `~/.ssh` and yolo's
+  own trusted config) read-write into a skip-permissions container — overridable
+  only by the deliberately CLI-only `--dangerously-allow-home`. And the opt-in
+  **`require-project-entry`** (bool; set it in `~/.yolo.json`) refuses to launch
+  when no `projects.json` entry matches the cwd, so a renamed project fails loudly
+  instead of silently falling back to global defaults; `--no-require-project-entry`
+  overrides for one run.
 
 The three `--auth` values (the (c) block in `launch_container`):
 
@@ -176,7 +200,7 @@ The three `--auth` values (the (c) block in `launch_container`):
 The config-dir mount, the `~/.claude.json` mount, and the auth mechanism are
 independent — so e.g. `--auth bedrock --config-dir ~/.claude-bdr` (Bedrock auth,
 separate profile) works, which the old positional scheme could not express.
-Overriding a `.yolo.json` that sets `auth` is just an explicit `--auth keychain`
+Overriding a config file that sets `auth` is just an explicit `--auth keychain`
 (etc.) on the CLI.
 
 ## Long-lived OAuth token (`--auth oauth-token`)
@@ -219,7 +243,7 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   global token silently authenticating as the wrong account.
 - **`yolo setup-token`** (a terminal verb) forces a (re)generation —
   use it for first-time setup or when the year is up. Honours `--config-dir`
-  (and a `.yolo.json` `config-dir`), caching under that dir's service name, so it
+  (and a config-file `config-dir`), caching under that dir's service name, so it
   matches what a launch will read. It runs `claude setup-token`
   under a **pty** so the child sees a real terminal (the browser/paste OAuth flow
   works) while yolo tees *and* captures the output, then scrapes the `sk-ant-…`
@@ -242,59 +266,98 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   mounted refresh-token snapshot, which it replaces. Requires a Pro/Max/Team/
   Enterprise plan.
 
-## `.yolo.json` config file (flag defaults)
+## Host-side config: `~/.yolo.json` + `~/.claude-yolo/projects.json`
 
-A `.yolo.json` **JSON object** supplies defaults for most flags.
-`load_yolo_config` applies them via `PARSER.set_defaults` *before* `parse_args`,
-so explicit CLI flags still win. Two layers, merged low→high:
+Config supplies defaults for most flags; `load_yolo_config` applies them via
+`PARSER.set_defaults` *before* the re-`parse_args`, so explicit CLI flags still
+win. Two layers, merged low→high, **both host-side only**:
 
-1. `~/.yolo.json` (the base), then
-2. the **nearest `.yolo.json` at or above the cwd** (the overlay) — found by
-   walking cwd's ancestors and taking the first hit; only that one project file
-   is used, not every ancestor. Searched against the *real* cwd, before any
-   worktree (`TOPIC`) retargeting. If the nearest file *is* `~/.yolo.json` (cwd under
-   `$HOME`, nothing closer), it's loaded once.
+1. **`~/.yolo.json`** (global) — a flat JSON object of config keys.
+2. **`~/.claude-yolo/projects.json`** (per-project) — a JSON object mapping a
+   **directory path** to a config object of the same keys. An entry applies when
+   the *real* cwd (before any worktree `TOPIC` retargeting) is **at or under**
+   the key path; when several keys match, the **longest wins** and only that one
+   entry is used — the same nearest-wins rule the old in-directory search had,
+   so running from a subdirectory picks up the project's entry. Written by
+   `yolo config` (its only writer); a plain launch never touches it.
 
-Precedence overall: `~/.yolo.json` < nearest `.yolo.json` < CLI flags. Per key
-the higher layer **overrides**, except `append-system-prompt`, which
-**concatenates** across both files and then the CLI `-p` values (so prompts
-accumulate; everything else replaces).
+**An in-directory `.yolo.json` is deliberately no longer read.** It lives inside
+the bind-mounted tree, so Claude in a container could edit it and grant its next
+session new host access — extra `mounts`, or an arbitrary *read-write* host mount
+via `config-dir` — and a `.yolo.json` committed in a cloned repo would apply
+someone else's config the first time you ran yolo there. Host-side-only config
+makes the safety property structural: nothing yolo reads is writable from inside
+a container. (`~/.claude` *is* mounted rw, which is why the project store lives
+under `~/.claude-yolo` — only `worktrees/<slug>/<topic>` dirs under it are ever
+mounted, never `projects.json`.) A leftover `.yolo.json` found at/above the cwd
+draws a **warning on every run** (never an error — the file is inert) naming the
+migration path; `~/.yolo.json` itself is exempt from the walk.
+
+Precedence overall: `~/.yolo.json` < `projects.json` entry < CLI flags. Per key
+the higher layer **overrides**, except `append-system-prompt` and `mounts`
+(`_CONCAT_DESTS`), which **concatenate** across the layers and then the CLI
+values (prompts and mounts accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `auth` (one of `keychain`/`oauth-token`/`bedrock` — validated against
-`AUTH_CHOICES` in `_parse_yolo_file`, since `set_defaults` bypasses argparse's
+`AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults` bypasses argparse's
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
-`ssh-agent`, `base`, `append-system-prompt` (string or list of strings).
+`ssh-agent`, `base`, `append-system-prompt` (string or list of strings),
+`mounts` (string or list, `PATH[:ro|:rw]`), `require-project-entry`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
-deliberately **not** config keys; putting them in
-a `.yolo.json` is a hard error (they're not in `YOLO_KEYS`).
-`config-dir` gets `~` expanded (a JSON file can't lean on shell expansion).
-Booleans must be JSON `true`/`false`. A JSON **`null`** for any key means "leave
-at the built-in default" (the loader skips it). Unknown keys, wrong types, and
-malformed JSON all `sys.exit` with the offending file path (`_parse_yolo_file`).
+deliberately **not** config keys, and neither is `--dangerously-allow-home`
+(CLI-only by design); any of them in a config file is a hard error (not in
+`YOLO_KEYS`). `config-dir` gets `~` expanded (a JSON file can't lean on shell
+expansion). Booleans must be JSON `true`/`false`. A JSON **`null`** for any key
+means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
+types, and malformed JSON all `sys.exit` naming the offending file/entry
+(`_parse_yolo_dict` / `_read_projects_file`).
 
-### `init` verb
+Every load also prints a one-line **provenance note** to stderr — e.g.
+`config: ~/.yolo.json + projects.json[/Users/peter/hacks/foo]` or
+`config: built-in defaults (no project entry)` — and warns about **dangling
+project keys** (entries whose directory no longer exists: the signature of a
+moved/renamed project, whose config would otherwise *silently* fall back to the
+global defaults — wrong account/profile being the real hazard). When the cwd
+also has no matching entry — the rename case produces both at once — the warning
+suggests re-running `yolo config` and removing the stale entry. This detection
+only works because entries are never auto-created: a plain run in a fresh
+directory configures nothing and writes nothing. The hard-mode version is the
+`require-project-entry` guardrail (see above). Note `projects.json` keys are
+**paths-as-identity**: renames must be hand-migrated (matching how Claude's
+`~/.claude/projects/` buckets and the worktree slugs behave).
 
-`yolo.py init` (`write_default_yolo`) scaffolds a `.yolo.json` of default
-values into the cwd, then exits — it does **not** run a container. `init` is one
-value of the optional positional `verb` (`choices=["init", "start", "resume",
-"shell", "finish", "list", "setup-token"]`; see [verbs](#workflow-verbs));
-with no verb, `main` proceeds to the run path. The verb is dispatched off a *first*
-`parse_args` **before** any `.yolo.json` is loaded — so a broken ancestor/global
-config can't block scaffolding a fresh one — and the run path then re-parses with
-the config defaults layered in. `init` refuses to overwrite an existing `.yolo.json`.
+### `config` verb
 
-The scaffold lists every key. Keys whose default is unset (`config-dir`,
-`aws-profile`, `aws-region`, `bedrock-model`) are written as `null`; the rest
-get their real defaults (`auth: "keychain"`, `claude-json`/`ssh-agent: true`,
-`base: "HEAD"`, `append-system-prompt: []`). So an *unedited* scaffold is inert at the top level
-(it just restates the defaults) — but note those non-null values (`auth`, the
-booleans), being explicit, would **override** a `~/.yolo.json` that set them
-differently, since a project `.yolo.json` is the higher-precedence layer. The
-`YOLO_INIT_DEFAULTS` literal must stay in sync with `YOLO_KEYS`.
+`yolo.py config [CONFIG FLAGS]` (`do_config`) shows or updates this project's
+`projects.json` entry, then exits — it does **not** run a container. The entry
+key is the **main repo root** when inside a git repo (so subdirectory runs and
+worktree sessions share it; `_project_key`), else the cwd. Behavior à la
+`git config`:
+
+- **With config flags** — `yolo config --auth bedrock --mount ~/refdocs` —
+  persists **exactly the explicitly-passed `YOLO_KEYS` flags** into the entry,
+  per-key (other keys in the entry are left alone; re-running with one flag
+  updates just that key). "Explicitly passed" is detected by a **sentinel
+  re-parse** (`_explicit_config_flags`): a plain parse can't distinguish
+  "defaulted" from "explicitly set to the default", and `config --auth keychain`
+  must persist. List-kind dests use a fresh marker list, since argparse's append
+  action copies the default before appending (identity survives exactly when the
+  flag never appeared). `--mount` values are validated (exist + is-dir) *before*
+  persisting, so a typo can't be pinned; the final entry is also re-validated so
+  an unloadable entry is never written.
+- **Bare `yolo config`** is **read-only**: prints the entry that currently
+  applies (or "no entry for &lt;key&gt;") plus the projects.json path, and flags
+  dangling keys. There is no scaffold/template behavior (and no
+  `YOLO_INIT_DEFAULTS` anymore — built-in defaults live only in argparse).
+
+`config` is dispatched off the *first* `parse_args`, **before** the config files
+are layered in — a broken config can't block fixing the config — and it reads
+only `projects.json` itself, failing with a pointed message on a malformed file
+(never clobbering it).
 
 AWS sub-keys without `auth: bedrock` just **warn** (and are ignored) rather than
-erroring, since the auth mode may legitimately be set to bedrock in a `.yolo.json`
+erroring, since the auth mode may legitimately be set to bedrock in a config file
 and overridden back to `keychain`/`oauth-token` on the CLI over a file that also
 set the AWS knobs.
 
@@ -338,27 +401,32 @@ gracefully outside one — there's just no repo slug to label/find by).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
-  `.yolo.json`/`--base`). So a fast-forward-merged or never-diverged branch reads
+  the `base` config key/`--base`). So a fast-forward-merged or never-diverged branch reads
   `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
   to the main checkout, not the worktree's own branch.
 
 Implementation shape:
 
-- **Dispatch is two-tier** (`main`). `init` runs off the *first* `parse_args`,
-  before `.yolo.json` is layered, so a broken ancestor/global config can't block
-  scaffolding a fresh one. Everything else re-parses with the config defaults
-  layered in first. The other terminal verbs (`list`, `finish`, `setup-token`, and
-  `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
-  after the config-dir resolution specifically so it caches the token under the
-  right per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh, and a
-  bare `yolo`) call `launch_container`.
+- **Dispatch is two-tier** (`main`). `config` runs off the *first* `parse_args`,
+  before the config files are layered in, so a broken config can't block fixing
+  the config (and its sentinel re-parse needs pristine parser defaults).
+  Everything else re-parses with the config defaults layered in first. The other
+  terminal verbs (`list`, `finish`, `setup-token`, and `shell`'s
+  exec-into-running case) then handle-and-return — `setup-token` sits after the
+  config-dir resolution specifically so it caches the token under the right
+  per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh, and a
+  bare `yolo`) pass the guardrails (home refusal, `require-project-entry` — see
+  the orthogonal-flags section), then call `launch_container`; extra mounts are
+  resolved only on these paths, so a stale mount path can't break
+  `list`/`finish`/`config`.
 - **`launch_container`** is the single assembly+exec path shared by every launch
-  (extracted from the old inline `main`): mounts, ssh-agent block, the
-  credential/config blocks, labels, `--entrypoint` override, then `os.execvp`. It
-  takes `container_base`, `command` (args after the image), and optional
-  `entrypoint`. `build_claude_args` builds the `claude` command (settings,
-  built-in prompt, `--continue`/`--resume`, `--name`).
+  (extracted from the old inline `main`): mounts (cwd + the extra `--mount`
+  dirs), ssh-agent block, the credential/config blocks, labels, `--entrypoint`
+  override, then `os.execvp`. It takes `container_base`, `command` (args after
+  the image), optional `entrypoint`, and the resolved `mounts`.
+  `build_claude_args` builds the `claude` command (settings, built-in prompt,
+  `--add-dir` per extra mount, `--continue`/`--resume`, `--name`).
 - **Containers are found by docker label, not name.** Every launch is stamped
   `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`, and (for worktrees)
   `--label yolo.worktree=<topic>`. `running_container_for(slug, topic=None, *,
@@ -504,9 +572,11 @@ from the path also pins the tests to the source file regardless of any installed
 never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
 `git_identity_args`, and `os.execvp`, then asserts on the captured `docker run`
-argv. `test_config.py` covers `.yolo.json` parsing/merging and the `init`
-scaffold; `test_cli.py` covers verb dispatch and arg assembly across the
-credential/config axes. `test_verbs.py` covers the worktree verbs against a
+argv. `test_config.py` covers config parsing/merging (`~/.yolo.json` +
+`projects.json`), mount-spec parsing, the stale-state warnings, and the
+`config` verb; `test_cli.py` covers verb dispatch and arg assembly across the
+credential/config axes, extra mounts, and the guardrails. `test_verbs.py`
+covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
 Keep them green when changing flags or mounts.

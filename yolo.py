@@ -386,12 +386,8 @@ def _repo_paths() -> tuple[pathlib.Path, pathlib.Path, str]:
     return common_git, main_root, re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
 
 
-def _repo_slug_or_none() -> str | None:
-    """The repo slug for the cwd, or None when the cwd isn't a git repo.
-
-    Used to label bare (non-worktree) launches that happen to be inside a repo,
-    without erroring out when they aren't.
-    """
+def _main_root_or_none() -> pathlib.Path | None:
+    """The main repo root for the cwd, or None when the cwd isn't a git repo."""
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -401,7 +397,17 @@ def _repo_slug_or_none() -> str | None:
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
-    return re.sub(r"[^a-zA-Z0-9]", "-", str(pathlib.Path(out).parent))
+    return pathlib.Path(out).parent
+
+
+def _repo_slug_or_none() -> str | None:
+    """The repo slug for the cwd, or None when the cwd isn't a git repo.
+
+    Used to label bare (non-worktree) launches that happen to be inside a repo,
+    without erroring out when they aren't.
+    """
+    root = _main_root_or_none()
+    return None if root is None else re.sub(r"[^a-zA-Z0-9]", "-", str(root))
 
 
 def _branch_exists(name: str) -> bool:
@@ -434,10 +440,18 @@ def setup_worktree(
     return worktree, common_git, main_root
 
 
-# .yolo.json config keys -> (argparse dest, kind). These are standing environment /
+# Config keys -> (argparse dest, kind), shared by ~/.yolo.json and the per-project
+# entries in ~/.claude-yolo/projects.json. These are standing environment /
 # credential preferences only; per-invocation *actions* (--resume and the verbs)
-# are intentionally CLI-only and rejected if they appear in a .yolo.json.
+# are intentionally CLI-only and rejected if they appear in a config file.
 # "path" values get ~ expanded (a JSON file can't rely on shell expansion).
+#
+# Both config files live OUTSIDE every container mount by construction. An
+# in-directory .yolo.json is no longer read: it sits inside the bind-mounted tree,
+# so Claude in a container could edit it to grant its next session new host access
+# (extra `mounts`, or an arbitrary read-write mount via `config-dir`) — and a
+# .yolo.json committed in a cloned repo would apply someone else's config the
+# first time yolo ran there. A leftover file draws a warning in load_yolo_config.
 YOLO_KEYS = {
     "config_dir": ("config_dir", "path"),
     "auth": ("auth", "auth"),
@@ -448,22 +462,51 @@ YOLO_KEYS = {
     "ssh_agent": ("ssh_agent", "bool"),
     "base": ("base", "str"),
     "append_system_prompt": ("append_system_prompts", "list"),
+    "mounts": ("mounts", "list"),
+    "require_project_entry": ("require_project_entry", "bool"),
 }
 
-# Scaffold written by the `init` verb. Mirrors YOLO_KEYS (dash form, like the
-# flags). null means "leave at the built-in default" — the loader skips nulls —
-# so a freshly-init'd file round-trips to "no config" until the user edits it.
-YOLO_INIT_DEFAULTS = {
-    "config-dir": None,
-    "auth": "keychain",
-    "aws-profile": None,
-    "aws-region": None,
-    "bedrock-model": None,
-    "claude-json": True,
-    "ssh-agent": True,
-    "base": "HEAD",
-    "append-system-prompt": [],
-}
+# dests whose values concatenate across the config layers and the CLI (everything
+# else is overridden by the higher-precedence layer)
+_CONCAT_DESTS = ("append_system_prompts", "mounts")
+
+# sentinel default marking "flag not given" in _explicit_config_flags
+_UNSET = object()
+
+
+def _parse_yolo_dict(raw: dict, source: str) -> dict:
+    """Validate one config object (YOLO_KEYS) into {argparse_dest: value}.
+
+    `source` names the file (or projects.json entry) in error messages.
+    """
+    out = {}
+    for key, val in raw.items():
+        norm = key.replace("-", "_")
+        if norm not in YOLO_KEYS:
+            sys.exit(f"{source}: unknown config option {key!r}")
+        dest, kind = YOLO_KEYS[norm]
+        if val is None:
+            continue  # explicit null = leave the key at its built-in default
+        if kind == "bool":
+            if not isinstance(val, bool):
+                sys.exit(f"{source}: {key!r} must be true or false")
+            out[dest] = val
+        elif kind == "auth":
+            # set_defaults bypasses argparse's `choices` check, so validate here.
+            if val not in AUTH_CHOICES:
+                sys.exit(f"{source}: {key!r} must be one of {', '.join(AUTH_CHOICES)}")
+            out[dest] = val
+        elif kind in ("str", "path"):
+            if not isinstance(val, str):
+                sys.exit(f"{source}: {key!r} must be a string")
+            out[dest] = os.path.expanduser(val) if kind == "path" else val
+        else:  # "list" (append_system_prompts, mounts): a string or list of strings
+            if isinstance(val, str):
+                val = [val]
+            if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+                sys.exit(f"{source}: {key!r} must be a string or list of strings")
+            out[dest] = val
+    return out
 
 
 def _parse_yolo_file(path: pathlib.Path) -> dict:
@@ -474,78 +517,223 @@ def _parse_yolo_file(path: pathlib.Path) -> dict:
         sys.exit(f"{path}: cannot read .yolo.json config: {e}")
     if not isinstance(raw, dict):
         sys.exit(f"{path}: .yolo.json must contain a JSON object")
-
-    out = {}
-    for key, val in raw.items():
-        norm = key.replace("-", "_")
-        if norm not in YOLO_KEYS:
-            sys.exit(f"{path}: unknown .yolo.json option {key!r}")
-        dest, kind = YOLO_KEYS[norm]
-        if val is None:
-            continue  # explicit null = leave the key at its built-in default
-        if kind == "bool":
-            if not isinstance(val, bool):
-                sys.exit(f"{path}: {key!r} must be true or false")
-            out[dest] = val
-        elif kind == "auth":
-            # set_defaults bypasses argparse's `choices` check, so validate here.
-            if val not in AUTH_CHOICES:
-                sys.exit(f"{path}: {key!r} must be one of {', '.join(AUTH_CHOICES)}")
-            out[dest] = val
-        elif kind in ("str", "path"):
-            if not isinstance(val, str):
-                sys.exit(f"{path}: {key!r} must be a string")
-            out[dest] = os.path.expanduser(val) if kind == "path" else val
-        else:  # "list" (append_system_prompts): a string or list of strings
-            if isinstance(val, str):
-                val = [val]
-            if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
-                sys.exit(f"{path}: {key!r} must be a string or list of strings")
-            out[dest] = val
-    return out
+    return _parse_yolo_dict(raw, str(path))
 
 
-def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> dict:
-    """Merge ~/.yolo.json (base) with the nearest .yolo.json at/above `start`.
+def _read_projects_file(path: pathlib.Path) -> dict:
+    """~/.claude-yolo/projects.json as {directory: config object}; {} if absent."""
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"{path}: cannot read projects config: {e}")
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        sys.exit(f"{path}: must be a JSON object mapping directory paths to config objects")
+    return raw
 
-    Precedence low->high: ~/.yolo.json < nearest .yolo.json < CLI args (the caller
-    applies the returned dict via PARSER.set_defaults, so explicit flags still win).
-    append_system_prompts concatenates across the two files; every other key is
-    overridden by the higher-precedence layer. The two files may be the same path
-    (e.g. cwd is under $HOME with no closer .yolo.json); it's then loaded once.
+
+def _match_project_entry(projects: dict, start: pathlib.Path) -> tuple[str | None, dict | None]:
+    """The (key, raw entry) whose directory contains `start`; longest key wins.
+
+    An entry applies when `start` is at or under its key path, and only the most
+    specific match is used — the same nearest-wins rule the retired in-directory
+    .yolo.json search had, so running from a subdirectory picks up the project's
+    entry.
     """
-    files = []
-    home_file = home / ".yolo.json"
-    if home_file.is_file():
-        files.append(home_file.resolve())
-    for cur in [start.resolve(), *start.resolve().parents]:
-        cand = cur / ".yolo.json"
-        if cand.is_file():
-            if cand.resolve() not in files:
-                files.append(cand.resolve())  # nearest overlays ~/.yolo.json
-            break
+    start_res = start.resolve()
+    best_key, best_entry, best_depth = None, None, -1
+    for key, entry in projects.items():
+        key_path = pathlib.Path(os.path.expanduser(key)).resolve()
+        if start_res.is_relative_to(key_path) and len(key_path.parts) > best_depth:
+            best_key, best_entry, best_depth = key, entry, len(key_path.parts)
+    return best_key, best_entry
 
+
+def _warn_dangling_keys(projects: dict, *, no_entry: bool) -> None:
+    """Warn about projects.json keys whose directory no longer exists.
+
+    A dangling key is the signature of a moved/renamed/deleted project: its entry
+    silently stops matching, so a renamed project would otherwise fall back to the
+    global defaults — exactly the account/profile mix-up per-project config exists
+    to prevent. Entries are only ever created deliberately (`yolo config`), so a
+    dangling key is always actionable, never noise. The rename case produces a
+    dangling key *and* a no-entry cwd at once, in the renamed directory itself —
+    when both hold, connect the dots explicitly.
+    """
+    dangling = [k for k in projects if not pathlib.Path(os.path.expanduser(k)).is_dir()]
+    for k in dangling:
+        print(
+            f"warning: projects.json entry {k}: directory no longer exists (moved or renamed?)",
+            file=sys.stderr,
+        )
+    if dangling and no_entry:
+        print(
+            "warning: if this directory used to be one of those, re-run `yolo config` "
+            "here and remove the stale entry.",
+            file=sys.stderr,
+        )
+
+
+def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> tuple[dict, str | None]:
+    """Merge ~/.yolo.json with the matching ~/.claude-yolo/projects.json entry.
+
+    Returns (merged_defaults, matched_project_key). Precedence low->high:
+    ~/.yolo.json < projects.json entry < CLI args (the caller applies the dict via
+    PARSER.set_defaults, so explicit flags still win). append_system_prompts and
+    mounts concatenate across the layers; every other key is overridden by the
+    higher layer. Both files are host-side only — outside every container mount —
+    so nothing Claude writes inside a container can change what the next launch
+    mounts or which credentials it uses. Also prints the config provenance line
+    and the stale-state warnings (dangling project keys, leftover in-directory
+    .yolo.json files) to stderr.
+    """
     merged = {}
-    for path in files:
-        for dest, val in _parse_yolo_file(path).items():
-            if dest == "append_system_prompts":
+    layers = []
+
+    def merge(updates):
+        for dest, val in updates.items():
+            if dest in _CONCAT_DESTS:
                 merged[dest] = merged.get(dest, []) + val
             else:
                 merged[dest] = val
-    return merged
+
+    home_file = home / ".yolo.json"
+    if home_file.is_file():
+        merge(_parse_yolo_file(home_file))
+        layers.append("~/.yolo.json")
+
+    projects_file = home / ".claude-yolo" / "projects.json"
+    projects = _read_projects_file(projects_file)
+    matched_key, entry = _match_project_entry(projects, start)
+    _warn_dangling_keys(projects, no_entry=matched_key is None)
+    if matched_key is not None:
+        merge(_parse_yolo_dict(entry, f"{projects_file} [{matched_key}]"))
+        layers.append(f"projects.json[{matched_key}]")
+
+    # Warn about (but never read) a leftover in-directory .yolo.json — loudly
+    # enough that a file planted by a container can't go unnoticed, on every
+    # launch until it's migrated. ~/.yolo.json itself is exempt: it's the global
+    # layer, not an in-directory file.
+    for cur in [start.resolve(), *start.resolve().parents]:
+        cand = cur / ".yolo.json"
+        if cand.is_file():
+            if cand.resolve() != home_file.resolve():
+                print(
+                    f"warning: {cand} is no longer read; move its settings to "
+                    "~/.yolo.json or to this project's entry in "
+                    "~/.claude-yolo/projects.json (see `yolo config`).",
+                    file=sys.stderr,
+                )
+            break
+
+    provenance = " + ".join(layers) if layers else "built-in defaults"
+    if matched_key is None:
+        provenance += " (no project entry)"
+    print(f"config: {provenance}", file=sys.stderr)
+    return merged, matched_key
 
 
-def write_default_yolo(dest_dir: pathlib.Path) -> None:
-    """`init` verb: scaffold a .yolo.json of default values into dest_dir.
+def _parse_mount_spec(spec: str) -> tuple[pathlib.Path, str]:
+    """One --mount / `mounts` value, `PATH[:ro|:rw]` -> (resolved dir, mode).
 
-    Refuses to clobber an existing file. The scaffold's null values round-trip to
-    "no config" (the loader skips nulls), so it's a safe, editable starting point.
+    Read-only is the default (the use case is reference material; :rw is the
+    explicit opt-in). The directory must exist: docker silently creates a missing
+    bind-mount source as a root-owned dir on the host, which we never want.
     """
-    path = dest_dir / ".yolo.json"
-    if path.exists():
-        sys.exit(f"{path} already exists; not overwriting.")
-    path.write_text(json.dumps(YOLO_INIT_DEFAULTS, indent=2) + "\n")
-    print(f"Wrote {path}")
+    path_part, mode = spec, "ro"
+    if spec.endswith((":ro", ":rw")):
+        path_part, mode = spec[:-3], spec[-2:]
+    path = pathlib.Path(os.path.expanduser(path_part))
+    if not path.is_dir():
+        sys.exit(f"mount: not a directory: {path_part}")
+    return path.resolve(), mode
+
+
+def _resolve_mounts(specs: list[str]) -> list[tuple[pathlib.Path, str]]:
+    """Parse + dedupe the merged mount specs into (dir, mode) pairs.
+
+    Specs arrive lowest-precedence first (~/.yolo.json, projects.json entry, then
+    CLI values appended by argparse), so on a same-path ro/rw conflict the later
+    spec — the higher layer — wins.
+    """
+    out: dict[pathlib.Path, str] = {}
+    for spec in specs:
+        path, mode = _parse_mount_spec(spec)
+        out[path] = mode
+    return list(out.items())
+
+
+def _project_key(cwd: pathlib.Path) -> str:
+    """The projects.json key for this invocation.
+
+    The main repo root when inside a git repo — so subdirectory runs and worktree
+    sessions share the project's entry — else the cwd itself.
+    """
+    root = _main_root_or_none()
+    return str(root if root is not None else cwd.resolve())
+
+
+def _explicit_config_flags(script_argv: list[str]) -> dict:
+    """{config-key: value} for every YOLO_KEYS flag explicitly present in argv.
+
+    Re-parses with sentinel defaults: a plain parse can't distinguish "defaulted"
+    from "explicitly set to the default value", and `yolo config --auth keychain`
+    must persist auth even though keychain is the default. List-kind dests get a
+    fresh marker list (argparse's append action copies the default before
+    appending, so identity survives exactly when the flag never appeared).
+    """
+    markers = {dest: [] if kind == "list" else _UNSET for dest, kind in YOLO_KEYS.values()}
+    PARSER.set_defaults(**markers)
+    parsed = PARSER.parse_args(script_argv)
+    out = {}
+    for norm, (dest, _) in YOLO_KEYS.items():
+        val = getattr(parsed, dest)
+        if val is not markers[dest]:
+            out[norm.replace("_", "-")] = val
+    return out
+
+
+def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path) -> None:
+    """`config` verb: show or update this project's ~/.claude-yolo/projects.json entry.
+
+    With config flags, persists exactly the explicitly-passed YOLO_KEYS flags into
+    the entry for this project, per-key (other keys are left alone) — `yolo config`
+    is the *only* writer of the project layer; a plain launch never touches the
+    file, so it stays a deliberate, auditable ledger of per-project grants. With
+    no flags, prints the entry that currently applies (read-only), a la
+    `git config --list`. Mount paths are validated here so a typo can't be pinned.
+    """
+    projects_file = home / ".claude-yolo" / "projects.json"
+    projects = _read_projects_file(projects_file)
+    key = _project_key(cwd)
+    explicit = _explicit_config_flags(script_argv)
+
+    if not explicit:
+        matched_key, entry = _match_project_entry(projects, cwd)
+        print(f"projects file: {projects_file}")
+        if matched_key is None:
+            print(f"no entry for {key}")
+        else:
+            print(json.dumps({matched_key: entry}, indent=2))
+        _warn_dangling_keys(projects, no_entry=matched_key is None)
+        return
+
+    for spec in explicit.get("mounts", []):
+        _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
+
+    entry = dict(projects.get(key, {}))
+    for k, v in explicit.items():
+        norm = k.replace("-", "_")
+        for stale in [ek for ek in entry if ek.replace("-", "_") == norm and ek != k]:
+            del entry[stale]  # the same key in its other (underscored) spelling
+        entry[k] = v
+    _parse_yolo_dict(entry, f"{projects_file} [{key}]")  # never write an unloadable entry
+    projects[key] = entry
+    projects_file.parent.mkdir(parents=True, exist_ok=True)
+    projects_file.write_text(json.dumps(projects, indent=2) + "\n")
+    print(f"Updated {projects_file}:")
+    print(json.dumps({key: entry}, indent=2))
 
 
 def _version() -> str:
@@ -575,9 +763,11 @@ def _version() -> str:
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
-        "Defaults can be set in a .yolo.json file (nearest at/above the cwd, "
-        "overlaid on ~/.yolo.json); CLI flags override it. Arguments after -- are "
-        "passed directly to docker run (last-one-wins, so they override defaults)."
+        "Defaults come from ~/.yolo.json overlaid by this project's entry in "
+        "~/.claude-yolo/projects.json (created with `yolo config`); CLI flags "
+        "override both. Both files are host-side only — an in-directory .yolo.json "
+        "is no longer read. Arguments after -- are passed directly to docker run "
+        "(last-one-wins, so they override defaults)."
     ),
 )
 PARSER.add_argument(
@@ -588,14 +778,16 @@ PARSER.add_argument(
 PARSER.add_argument(
     "verb",
     nargs="?",
-    choices=["init", "start", "resume", "shell", "finish", "list", "setup-token"],
+    choices=["config", "start", "resume", "shell", "finish", "list", "setup-token"],
     help="Optional subcommand. start/resume/shell take an *optional* TOPIC: with a "
     "TOPIC they act on a git worktree of that name (start creates it, resume/shell "
     "require it); with no TOPIC they act on the current directory (start a fresh "
     "session, resume the most recent one, or open a shell). 'finish' removes a "
-    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'init' writes "
-    "a .yolo.json; 'setup-token' mints/caches a long-lived OAuth token (for --auth "
-    "oauth-token). A bare `yolo` is equivalent to `yolo start`.",
+    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'config' "
+    "shows this project's ~/.claude-yolo/projects.json entry, or — given config "
+    "flags — persists exactly those flags into it; 'setup-token' mints/caches a "
+    "long-lived OAuth token (for --auth oauth-token). A bare `yolo` is equivalent "
+    "to `yolo start`.",
 )
 PARSER.add_argument(
     "topic",
@@ -677,6 +869,36 @@ PARSER.add_argument(
     help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
 )
 PARSER.add_argument(
+    "--mount",
+    dest="mounts",
+    action="append",
+    default=[],
+    metavar="PATH[:ro|:rw]",
+    help="Extra host directory to bind-mount into the container at its identical "
+    "host path, read-only unless :rw is appended. Repeatable; also settable as "
+    "`mounts` in config, where the lists concatenate across the layers and the "
+    "CLI. Each directory is also passed to claude as --add-dir so it shows up as "
+    "a working directory.",
+)
+PARSER.add_argument(
+    "--require-project-entry",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Refuse to launch unless a ~/.claude-yolo/projects.json entry matches the "
+    "cwd (default: off). Set it in ~/.yolo.json to keep a renamed project from "
+    "silently falling back to the global defaults; --no-require-project-entry "
+    "overrides it for one run.",
+)
+PARSER.add_argument(
+    "--dangerously-allow-home",
+    action="store_true",
+    default=False,
+    help="Allow launching with the working directory at or above $HOME, which "
+    "mounts your entire home directory — including ~/.ssh and yolo's own config — "
+    "read-write into the container. Deliberately CLI-only: it cannot be set from "
+    "a config file.",
+)
+PARSER.add_argument(
     "--append-system-prompt",
     "-p",
     dest="append_system_prompts",
@@ -741,12 +963,14 @@ def build_claude_args(
     continue_session: bool = False,
     resume=None,
     name: str | None = None,
+    add_dirs=(),
 ) -> list[str]:
     """The args passed to `claude` inside the container (everything after the image).
 
     Always includes the container-only sandbox override and the built-in
-    "you're in a container" system prompt (plus any -p additions). Optionally adds
-    --continue / --resume [ID] and a session --name.
+    "you're in a container" system prompt (plus any -p additions). Extra mounts
+    are forwarded as --add-dir so they're first-class working directories.
+    Optionally adds --continue / --resume [ID] and a session --name.
     """
     extra_system_prompt = [
         "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
@@ -770,6 +994,10 @@ def build_claude_args(
         "--append-system-prompt",
         "... ".join(extra_system_prompt),
     ]
+    for d in add_dirs:
+        # Extra mounts double as claude working dirs so they're visible in /context;
+        # a mount Claude doesn't know about only helps if the user mentions it.
+        args += ["--add-dir", str(d)]
     if continue_session:
         args += ["--continue"]
     elif resume is not None:
@@ -833,6 +1061,7 @@ def launch_container(
     command: list,
     entrypoint: str | None = None,
     docker_args=(),
+    mounts=(),
 ) -> None:
     """Assemble the `docker run` argv from the credential/config flags and exec it.
 
@@ -840,7 +1069,8 @@ def launch_container(
     container name starts from container_base and gains -{config}/-{profile}
     suffixes; yolo.repo / yolo.worktree labels are stamped so the verbs can find
     the container later. `command` is the args after the image; `entrypoint`
-    overrides the image ENTRYPOINT (used to drop into bash for `shell`).
+    overrides the image ENTRYPOINT (used to drop into bash for `shell`); `mounts`
+    is the resolved (dir, mode) list from --mount / the `mounts` config key.
     """
     container = container_base
     args = [
@@ -856,6 +1086,11 @@ def launch_container(
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
     ]
+
+    # Extra reference mounts (--mount / `mounts` config): bind-mounted at their
+    # identical host paths, like the cwd, so paths match host<->container.
+    for path, mode in mounts:
+        args += ["-v", f"{path}:{path}:{mode}"]
 
     if parsed.ssh_agent:
         # Forward the host ssh-agent via the Docker engine's magic socket. We canNOT bind-mount
@@ -1106,9 +1341,10 @@ def main():
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
 
-    # Parse once with built-in defaults to dispatch `init`, which is terminal and
-    # must work even with a broken ancestor/global config (it writes a fresh one),
-    # so it runs *before* .yolo.json is layered in.
+    # Parse once with built-in defaults to dispatch `config`, which is terminal and
+    # runs *before* the config files are layered in: it must work even when those
+    # are broken (it reads only projects.json itself, with a pointed error), and
+    # its sentinel re-parse needs the pristine parser defaults.
     parsed = PARSER.parse_args(script_argv)
     verb, topic = parsed.verb, parsed.topic
 
@@ -1132,14 +1368,15 @@ def main():
     if parsed.force and verb != "finish":
         sys.exit("--force only applies to `finish`.")
 
-    if verb == "init":
-        write_default_yolo(cwd)
+    if verb == "config":
+        do_config(script_argv, home, cwd)
         return
 
-    # Every other verb gets the .yolo.json defaults layered under the CLI flags
+    # Every other verb gets the config defaults layered under the CLI flags
     # (so e.g. `list` honours a config-set `base`); re-parse so explicit flags win.
     # Uses the real cwd, before any worktree retargeting below.
-    PARSER.set_defaults(**load_yolo_config(cwd, home))
+    config_defaults, matched_project_key = load_yolo_config(cwd, home)
+    PARSER.set_defaults(**config_defaults)
     parsed = PARSER.parse_args(script_argv)
 
     # Terminal verbs (no credential config needed) — handle and return.
@@ -1185,6 +1422,36 @@ def main():
         generate_oauth_token(parsed.config_dir)
         return
 
+    # Guardrails — every path past this point launches a container. (The terminal
+    # verbs above, and `shell` exec'd into a running container, are exempt: they
+    # add no mounts.)
+    #
+    # Launching at or above $HOME mounts the whole home directory read-write into
+    # a skip-permissions container: ~/.ssh, shell rc files, and yolo's own trusted
+    # config (~/.yolo.json, ~/.claude-yolo) included. That dissolves the security
+    # model and is almost always a cd mistake, so it's a hard error; the override
+    # is deliberately CLI-only (a config key that permanently allowed it would
+    # quietly defeat the guard).
+    if not parsed.dangerously_allow_home and home.resolve().is_relative_to(cwd.resolve()):
+        sys.exit(
+            f"refusing to launch at or above your home directory ({cwd}): the "
+            f"container would mount {home} read-write, including ~/.ssh and yolo's "
+            "own config. Pass --dangerously-allow-home to do it anyway."
+        )
+    # Opt-in (usually via ~/.yolo.json): insist on a projects.json entry, so a
+    # renamed/moved project fails loudly here instead of silently falling back to
+    # the global defaults (wrong account/profile being the real hazard).
+    if parsed.require_project_entry and matched_project_key is None:
+        sys.exit(
+            f"require-project-entry is set and no projects.json entry matches {cwd}; "
+            "run `yolo config` here to create one, or pass --no-require-project-entry."
+        )
+
+    # Extra mounts, merged across config layers and the CLI. Resolved only on the
+    # launch paths so a stale mount path can't break `list`/`finish`/`config`.
+    mounts = _resolve_mounts(parsed.mounts)
+    mount_dirs = [path for path, _ in mounts]
+
     # Resolve where we run and the trailing command per verb.
     common_git = None
     slug = None
@@ -1221,16 +1488,25 @@ def main():
         entrypoint = "/bin/bash"
     elif verb == "resume" and parsed.resume is not None:
         command = build_claude_args(
-            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, resume=parsed.resume
+            parsed.append_system_prompts,
+            ssh_agent=parsed.ssh_agent,
+            resume=parsed.resume,
+            add_dirs=mount_dirs,
         )
     elif verb == "resume" and not parsed.new:
         command = build_claude_args(
-            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, continue_session=True
+            parsed.append_system_prompts,
+            ssh_agent=parsed.ssh_agent,
+            continue_session=True,
+            add_dirs=mount_dirs,
         )
     else:
         # start, or `resume TOPIC --new` (a fresh named session in the worktree).
         command = build_claude_args(
-            parsed.append_system_prompts, ssh_agent=parsed.ssh_agent, name=session_name
+            parsed.append_system_prompts,
+            ssh_agent=parsed.ssh_agent,
+            name=session_name,
+            add_dirs=mount_dirs,
         )
 
     launch_container(
@@ -1244,6 +1520,7 @@ def main():
         command=command,
         entrypoint=entrypoint,
         docker_args=docker_args,
+        mounts=mounts,
     )
 
 

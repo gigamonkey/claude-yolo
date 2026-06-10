@@ -74,7 +74,10 @@ yolo --auth oauth-token                # long-lived token (best for long/concurr
 yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
 yolo setup-token                       # mint+cache the long-lived OAuth token (once)
 yolo --no-ssh-agent                    # don't forward the host SSH agent
-yolo init                              # write a .yolo.json of defaults, then exit
+yolo --mount ~/refdocs                 # also mount ~/refdocs, read-only, at its host path
+yolo --mount ~/other-repo:rw           # extra mount, writable
+yolo config --mount ~/refdocs          # persist flags as this project's config, then exit
+yolo config                            # show this project's config entry, then exit
 yolo --version                         # print the version and exit
 yolo -- --network host                 # pass extra args to `docker run`
 
@@ -97,16 +100,16 @@ container's working directory and is the only host path Claude can modify.
 
 How Claude authenticates is one choice via `--auth`
 (`keychain` [default] / `oauth-token` / `bedrock`); `--config-dir`, `--claude-json`,
-and `--ssh-agent` are **orthogonal flags** that combine freely with it
+`--ssh-agent`, and `--mount` are **orthogonal flags** that combine freely with it
 and each other (see
 [Authentication modes](#authentication-modes) and
 [Configuration options](#other-configuration-options)). The
 positional arguments are an optional verb
-(`init`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its topic name.
+(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its topic name.
 You can also
 add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
-instructions onto Claude's system prompt, and set defaults for most flags in a
-[`.yolo.json` file](#configuring-defaults-with-yolojson).
+instructions onto Claude's system prompt, and set defaults for most flags in
+[host-side config files](#configuring-defaults-yolojson--yolo-config).
 
 ## The verbs (and the worktree workflow)
 
@@ -139,7 +142,7 @@ refactor-db` in another) on the **same repo** without them stepping on each othe
 
 - **`start [TOPIC]`** with a `TOPIC` creates a git **worktree** on a new branch
   `TOPIC`, branched off `HEAD` by default (change with `--base REF`, e.g. `--base
-  origin/main`, or set `"base"` in `.yolo.json`), and launches a fresh session named
+  origin/main`, or set `"base"` in your config), and launches a fresh session named
   `TOPIC`; it errors if that topic already exists (use `resume`). With no `TOPIC` it
   just starts a fresh session in the current directory.
 - **`resume [TOPIC]`** continues the most recent session — on the worktree `TOPIC`
@@ -423,38 +426,72 @@ These compose with any `--auth` mode:
 | `--config-dir PATH` | `~/.claude` | Mounts `PATH` at `/home/claude/.claude`. In `keychain`/`oauth-token` modes the credential is keyed per directory (the hashed keychain-entry name described above), so separate config dirs ≈ separate profiles. |
 | `--claude-json` / `--no-claude-json` | on | Whether to mount the host `~/.claude.json` (global config: MCP servers, project history/trust). Turn it off for a cleanly isolated profile alongside an alternate `--config-dir`. |
 | `--ssh-agent` / `--no-ssh-agent` | on | Whether to forward the host SSH agent (see [above](#why-forward-the-ssh-agent)). |
+| `--mount PATH[:ro|:rw]` | — | Bind-mount an extra host directory (reference docs, a sibling repo) into the container at its identical host path. **Read-only by default**; append `:rw` to make it writable. Repeatable. The directory must exist. Each mount is also passed to Claude as `--add-dir`, so it shows up as a working directory Claude knows about. |
 | `--rebuild-image` | off | Pass `--no-cache` to `docker build`, forcing a full image rebuild from scratch. |
+| `--require-project-entry` | off | Refuse to launch unless a `projects.json` entry matches the current directory. Set it in `~/.yolo.json` if you rely on per-project profiles: a renamed project then fails loudly instead of silently falling back to your global defaults. `--no-require-project-entry` overrides it for one run. |
+| `--dangerously-allow-home` | — | By default yolo **refuses to launch with the working directory at or above `$HOME`** — that would mount your whole home directory (including `~/.ssh` and yolo's own config) read-write into a skip-permissions container. This flag overrides the refusal; it is deliberately CLI-only and cannot be set from a config file. |
 
-## Configuring defaults with `.yolo.json`
+## Configuring defaults (`~/.yolo.json` + `yolo config`)
 
-Rather than re-typing the same flags every time, put their defaults in a
-`.yolo.json` file — a JSON object whose keys mirror the flag names:
+Rather than re-typing the same flags every time, set their defaults in
+**host-side config**. There are two layers:
 
-```json
-{
-  "config-dir": "~/.claude-work",
-  "auth": "oauth-token",
-  "ssh-agent": false,
-  "append-system-prompt": ["Prefer the standard library."]
-}
-```
+1. **`~/.yolo.json`** — global defaults, a JSON object whose keys mirror the
+   flag names:
 
-The script reads the **nearest `.yolo.json` at or above the directory you launch
-from**, overlaid on a global **`~/.yolo.json`**. Precedence runs low to high:
-`~/.yolo.json` < the project `.yolo.json` < explicit CLI flags — so a flag always
-wins, and a project file overrides your global one per key (`append-system-prompt`
-is the exception: prompts from all layers accumulate).
+   ```json
+   {
+     "auth": "oauth-token",
+     "ssh-agent": false,
+     "append-system-prompt": ["Prefer the standard library."]
+   }
+   ```
+
+2. **`~/.claude-yolo/projects.json`** — per-project config, a JSON object
+   mapping a project directory to the same kind of object. You don't edit it by
+   hand to get started: run `yolo config` *with the flags you want to pin* from
+   inside the project —
+
+   ```bash
+   yolo config --config-dir ~/.claude-work --mount ~/refdocs
+   ```
+
+   — and exactly those flags are saved as the project's entry (keyed by the repo
+   root, so subdirectory runs and worktree sessions share it). Re-running with a
+   flag updates just that key; a bare `yolo config` prints the entry that
+   currently applies without writing anything. An entry applies to any directory
+   at or under its key path; when several keys match, the most specific wins.
+
+Precedence runs low to high: `~/.yolo.json` < the project's `projects.json`
+entry < explicit CLI flags — so a flag always wins, and the project entry
+overrides your global file per key (`append-system-prompt` and `mounts` are the
+exceptions: those lists accumulate across all layers).
 
 Supported keys: `config-dir`, `auth` (`keychain`/`oauth-token`/`bedrock`),
 `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`, `ssh-agent`, `base`
-(the default branch point for `start`), and `append-system-prompt` (a string or
-list of strings). A `null` value leaves a key at its built-in default. The
-per-invocation actions (`--resume` and the verbs) are
-deliberately **not** config keys.
+(the default branch point for `start`), `append-system-prompt` (a string or
+list of strings), `mounts` (a string or list of `PATH[:ro|:rw]` specs), and
+`require-project-entry`. A `null` value leaves a key at its built-in default.
+The per-invocation actions (`--resume` and the verbs) are deliberately **not**
+config keys, and neither is `--dangerously-allow-home`.
 
-To get started, `yolo init` writes a `.yolo.json` of default values
-into the current directory (it won't overwrite an existing one), which you can
-then edit down to the settings you care about.
+**Why is there no in-project config file?** Earlier versions read a `.yolo.json`
+from the project directory. That file lives inside the tree that gets mounted
+into the container — so Claude, running unattended inside one, could edit it and
+quietly grant its *next* session more host access (an extra writable mount, say,
+via `mounts` or `config-dir`); a `.yolo.json` committed to a repo you cloned
+would likewise apply someone else's config to your machine. Both config files
+now live outside everything a container can write, which makes the safety
+property structural rather than policed. A leftover in-project `.yolo.json` is
+ignored with a warning on every run (loud on purpose: if one *appears*, you want
+to notice) telling you where to migrate it.
+
+Because `projects.json` is keyed by directory path, **renaming or moving a
+project orphans its entry** — the project would silently fall back to your
+global defaults. yolo warns on every run about entries whose directory no longer
+exists (and suggests the rename fix when the current directory has no entry of
+its own); set `require-project-entry` in `~/.yolo.json` to upgrade that warning
+to a hard refusal.
 
 ## Extra `docker run` arguments
 
