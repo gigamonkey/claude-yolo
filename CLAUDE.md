@@ -191,14 +191,14 @@ The three `--auth` values (the (c) block in `launch_container`):
 - **`oauth-token`** (default) → authenticate with a long-lived
   `CLAUDE_CODE_OAUTH_TOKEN` env var; **skips keychain extraction, the login check,
   and the `.credentials.json` mount**, just adding `-e CLAUDE_CODE_OAUTH_TOKEN=…`.
-  It's the default because it's the only mode that's safe regardless of session
-  length or concurrency. See
+  It's the default because it has no refresh boundary, so it's safe regardless
+  of session timing or concurrency. See
   [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token-the-default) below.
 - **`keychain`** → `ensure_logged_in` + `extract_credentials`, mounting
   the rotating keychain creds at `.credentials.json`. The only mode that runs the
-  login check. Unsafe for concurrent/overlapping sessions (see the oauth-token
-  section for why); kept for plans without `setup-token` and as an explicit
-  opt-in.
+  login check. Safe only when nothing crosses the credentials' shared refresh
+  boundary (see the oauth-token section for the mechanics); kept for plans
+  without `setup-token` (Claude Console accounts) and as an explicit opt-in.
 - **`bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
   `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
   **skips keychain extraction and the login check**. Container name gets a
@@ -216,13 +216,21 @@ Overriding a config file that sets `auth` is just an explicit `--auth keychain`
 
 The keychain credentials are an OAuth pair whose **refresh token rotates
 single-use on every refresh** — proven on 2026-06-08 (see `token-investigation.md`).
-yolo mounts a *snapshot* of that pair into each container, so the first party (a
-container *or* the host) to refresh silently invalidates every other snapshot's
-refresh token; the loser gets a 401 on its next refresh. That makes **concurrent
-(and even sequential-with-overlap) yolo sessions unsafe** under the snapshot model.
-We also confirmed (2026-06-09, `precedence-probe.sh` + `host-write-probe*.sh`) that
-a non-empty `~/.claude/.credentials.json` can override the host keychain, so simply
-co-locating a shared file in `~/.claude` is *not* a safe fix.
+yolo mounts a *snapshot* of that pair into each container, so every container and
+the host keychain hold the *same* pair and share one **refresh boundary** — the
+access token's expiry. Whoever makes the first API call past the boundary (a
+container *or* the host) refreshes and wins; every other holder's refresh token
+is dead, and 401s at its own next refresh moments later. The hazard is therefore
+not concurrency or session length per se but **anything running when the
+boundary arrives** — a session started five minutes before expiry breaks
+someone in five minutes. A container win also poisons the host keychain
+(nothing writes the new pair back), logging out the host CLI and every
+subsequent keychain-mode launch until a host re-login; `ensure_logged_in` can't
+detect it, since login *status* can't reveal a dead refresh token without
+spending it. We also confirmed (2026-06-09, `precedence-probe.sh` +
+`host-write-probe*.sh`) that a non-empty `~/.claude/.credentials.json` can
+override the host keychain, so simply co-locating a shared file in `~/.claude`
+is *not* a safe fix.
 
 `--auth oauth-token` sidesteps the whole problem by using a **different credential
 family** for containers: `claude setup-token` mints a **one-year token that is
@@ -232,8 +240,9 @@ it simultaneously with no interference. It's delivered purely as the
 `CLAUDE_CODE_OAUTH_TOKEN` env var, which in Claude Code's auth precedence
 out-ranks the file/keychain `/login` creds, so even a stale mounted
 `.credentials.json` can't shadow it. This is why it became the default in 0.6.0:
-keychain mode was an attractive nuisance, fine in a quick test and broken once
-sessions got long, parallel, or overlapped host use.
+keychain mode was an attractive nuisance — fine in a quick test, with breakage
+governed by an invisible refresh boundary rather than anything the user can see
+or control.
 
 Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 

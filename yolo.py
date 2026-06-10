@@ -25,7 +25,8 @@ DOCKER_IMAGE = "claude-yolo:latest"
 # The three mutually-exclusive auth mechanisms, selected by --auth (default
 # oauth-token). oauth-token = forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env
 # var; keychain = extract the rotating Claude.ai keychain creds into a mounted
-# file (unsafe for concurrent sessions — the refresh token rotates single-use);
+# file (hazard: the single-use refresh token means any session running when the
+# access token expires either wins the refresh or is broken by it — see README);
 # bedrock = AWS Bedrock creds.
 AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
@@ -516,9 +517,9 @@ def ensure_oauth_token(config_dir: str | None) -> str:
         )
         if input("Proceed? [Y/n] ").strip().lower() in ("n", "no"):
             sys.exit(
-                "Aborting. Use `--auth keychain` for snapshot credentials (unsafe for "
-                "concurrent sessions), run `yolo setup-token` later, or set "
-                "CLAUDE_CODE_OAUTH_TOKEN in the environment."
+                "Aborting. Use `--auth keychain` for snapshot credentials (see the "
+                "README for their refresh-boundary hazards), run `yolo setup-token` "
+                "later, or set CLAUDE_CODE_OAUTH_TOKEN in the environment."
             )
     return generate_oauth_token(config_dir)
 
@@ -1024,12 +1025,13 @@ PARSER.add_argument(
     default="oauth-token",
     help="Authentication mechanism (default: oauth-token). "
     "'oauth-token' forwards a long-lived CLAUDE_CODE_OAUTH_TOKEN from "
-    "`claude setup-token` (stable, safe for concurrent containers); 'keychain' "
-    "extracts the rotating Claude.ai keychain credentials and mounts them "
-    "(UNSAFE for concurrent or overlapping sessions: the refresh token rotates "
-    "single-use, so whichever session refreshes first invalidates the others'); "
-    "'bedrock' authenticates via AWS Bedrock (mounts ~/.aws, sets "
-    "CLAUDE_CODE_USE_BEDROCK=1). Also settable as `auth` in .yolo.json.",
+    "`claude setup-token` (stable; no refresh boundary, so safe regardless of "
+    "session timing or concurrency); 'keychain' extracts the rotating Claude.ai "
+    "keychain credentials and mounts a snapshot (CAUTION: the refresh token "
+    "rotates single-use, so any session running when the access token expires "
+    "either wins the refresh or is broken by it — and a container win logs out "
+    "the host too); 'bedrock' authenticates via AWS Bedrock (mounts ~/.aws, "
+    "sets CLAUDE_CODE_USE_BEDROCK=1). Also settable as `auth` in .yolo.json.",
 )
 PARSER.add_argument(
     "--aws-profile",
@@ -1347,8 +1349,10 @@ def launch_container(
     #     and the host can all use it at once. The env var also out-ranks any file
     #     creds, so a stale mounted .credentials.json can't shadow it.
     #   - bedrock: AWS creds + env (mounts ~/.aws), no keychain/login.
-    #   - keychain: extract the rotating keychain creds into a mounted file. Unsafe
-    #     for concurrent/overlapping sessions (single-use rotating refresh token).
+    #   - keychain: extract the rotating keychain creds into a mounted file. All
+    #     snapshots (and the host keychain) share one refresh boundary — the access
+    #     token's expiry — and whoever refreshes first there breaks every other
+    #     holder, host login included.
     if parsed.auth == "oauth-token":
         args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
     elif parsed.auth == "bedrock":
