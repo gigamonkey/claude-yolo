@@ -184,7 +184,8 @@ on top of whichever auth is chosen:
   **`require-project-entry`** (bool; set it in `~/.yolo.json`) refuses to launch
   when no `projects.json` entry matches the cwd, so a renamed project fails loudly
   instead of silently falling back to global defaults; `--no-require-project-entry`
-  overrides for one run.
+  overrides for one run, and `yolo config --init` registers an uncustomized
+  project with an empty entry to satisfy it.
 
 The three `--auth` values (the (c) block in `launch_container`):
 
@@ -422,6 +423,13 @@ worktree sessions share it; `_project_key`), else the cwd. Behavior à la
   applies (or "no entry for &lt;key&gt;") plus the projects.json path, and flags
   dangling keys. There is no scaffold/template behavior (and no
   `YOLO_INIT_DEFAULTS` anymore — built-in defaults live only in argparse).
+- **`yolo config --init`** registers the project with an **empty entry** — no
+  overrides, just enough to satisfy `require-project-entry` without pinning a
+  config value the user never chose (bare `config` stays read-only, so an
+  explicit flag is the only way to create one). Errors if the key already has
+  an entry; can't combine with config flags; warns when the new (most-specific,
+  empty) entry shadows an ancestor entry's config for this project. `--init` is
+  a verb-only flag, validated like `--force`/`--new` in dispatch.
 
 `config` is dispatched off the *first* `parse_args`, **before** the config files
 are layered in — a broken config can't block fixing the config — and it reads
@@ -516,8 +524,9 @@ Implementation shape:
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
   `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
-  `--resume`/`-r` (resume). Each is validated against its verb in dispatch (e.g. `-r`
-  outside `resume`, `--new` without a `TOPIC`, or `--new` with `-r` all error).
+  `--resume`/`-r` (resume), `--init` (config). Each is validated against its verb
+  in dispatch (e.g. `-r` outside `resume`, `--new` without a `TOPIC`, or `--new`
+  with `-r` all error).
 
 ## The worktree mechanics (`setup_worktree`)
 

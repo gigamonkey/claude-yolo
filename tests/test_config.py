@@ -383,6 +383,60 @@ def test_config_verb_rejects_malformed_projects_file(cy, run_cli, dirs):
         run_cli(["config", "--auth", "keychain"], home=home, cwd=work)
 
 
+# --- `config --init` (empty registration) -------------------------------------
+
+
+def test_config_init_writes_empty_entry(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    argv = run_cli(["config", "--init"], home=home, cwd=work)
+    assert argv is None  # terminal verb
+    assert read_projects(home) == {str(work): {}}
+    assert "Registered" in capsys.readouterr().out
+
+
+def test_config_init_satisfies_require_project_entry(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
+    run_cli(["config", "--init"], home=home, cwd=work)
+    assert run_cli([], home=home, cwd=work) is not None  # launches
+
+
+def test_config_init_errors_if_entry_exists(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"auth": "bedrock"}})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--init"], home=home, cwd=work)
+    assert "already has" in str(exc.value)
+    assert read_projects(home) == {str(work): {"auth": "bedrock"}}  # untouched
+
+
+def test_config_init_rejects_config_flags(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--init", "--auth", "bedrock"], home=home, cwd=work)
+    assert "no overrides" in str(exc.value)
+    assert not (home / ".claude-yolo" / "projects.json").exists()
+
+
+def test_config_init_warns_when_shadowing_ancestor_entry(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    sub = work / "sub"
+    sub.mkdir()
+    write_projects(home, {str(work): {"auth": "bedrock"}})
+    run_cli(["config", "--init"], home=home, cwd=sub)
+    assert "shadows" in capsys.readouterr().err
+    projects = read_projects(home)
+    assert projects[str(sub)] == {}
+    assert projects[str(work)] == {"auth": "bedrock"}  # ancestor entry kept
+
+
+def test_init_flag_requires_config_verb(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["start", "--init"], home=home, cwd=work)
+    assert "--init only applies" in str(exc.value)
+
+
 @pytest.fixture
 def dirs(tmp_path):
     """A fresh (home, work) pair of real directories."""

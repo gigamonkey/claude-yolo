@@ -872,8 +872,15 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     appending, so identity survives exactly when the flag never appeared).
     """
     markers = {dest: [] if kind == "list" else _UNSET for dest, kind in YOLO_KEYS.values()}
+    saved = {dest: PARSER.get_default(dest) for dest in markers}
     PARSER.set_defaults(**markers)
-    parsed = PARSER.parse_args(script_argv)
+    try:
+        parsed = PARSER.parse_args(script_argv)
+    finally:
+        # Restore the real defaults: the sentinels must not leak into any later
+        # parse (the process normally exits right after `config`, but don't bank
+        # on it — a leaked _UNSET shows up as a bizarre downstream type error).
+        PARSER.set_defaults(**saved)
     out = {}
     for norm, (dest, _) in YOLO_KEYS.items():
         val = getattr(parsed, dest)
@@ -882,7 +889,9 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     return out
 
 
-def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path) -> None:
+def do_config(
+    script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, *, init: bool = False
+) -> None:
     """`config` verb: show or update this project's ~/.claude-yolo/projects.json entry.
 
     With config flags, persists exactly the explicitly-passed YOLO_KEYS flags into
@@ -891,11 +900,40 @@ def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path) -> 
     file, so it stays a deliberate, auditable ledger of per-project grants. With
     no flags, prints the entry that currently applies (read-only), a la
     `git config --list`. Mount paths are validated here so a typo can't be pinned.
+
+    `--init` registers the project with an *empty* entry — no overrides, just
+    "yolo knows about this project". That's all `require-project-entry` needs,
+    and the alternative (pinning some explicitly-defaulted flag) would record a
+    customization the user never meant. Bare `yolo config` stays read-only, so
+    an explicit flag is the only way to create an empty entry.
     """
     projects_file = home / ".claude-yolo" / "projects.json"
     projects = _read_projects_file(projects_file)
     key = _project_key(cwd)
     explicit = _explicit_config_flags(script_argv)
+
+    if init:
+        if explicit:
+            sys.exit(
+                "--init registers the project with no overrides; to set config "
+                "values, use `yolo config` with just those flags."
+            )
+        if key in projects:
+            sys.exit(f"{key} already has a projects.json entry; `yolo config` shows it.")
+        matched_key, _ = _match_project_entry(projects, cwd)
+        if matched_key is not None:
+            # Longest key wins and only one entry applies, so an empty entry here
+            # switches this project OFF the ancestor's config — flag it.
+            print(
+                f"warning: this empty entry now shadows the entry for {matched_key} "
+                f"when running under {key}.",
+                file=sys.stderr,
+            )
+        projects[key] = {}
+        projects_file.parent.mkdir(parents=True, exist_ok=True)
+        projects_file.write_text(json.dumps(projects, indent=2) + "\n")
+        print(f"Registered {key} in {projects_file} (no overrides).")
+        return
 
     if not explicit:
         matched_key, entry = _match_project_entry(projects, cwd)
@@ -1006,6 +1044,13 @@ PARSER.add_argument(
     "--new",
     action="store_true",
     help="For `resume`: start a fresh session in the worktree instead of continuing.",
+)
+PARSER.add_argument(
+    "--init",
+    action="store_true",
+    help="For `config`: register this project in projects.json with an empty entry "
+    "(no overrides) — enough to satisfy require-project-entry. Errors if the "
+    "project already has its own entry.",
 )
 PARSER.add_argument(
     "--force",
@@ -1666,9 +1711,11 @@ def main():
         sys.exit("--new can't be combined with --resume/-r.")
     if parsed.force and verb != "finish":
         sys.exit("--force only applies to `finish`.")
+    if parsed.init and verb != "config":
+        sys.exit("--init only applies to `config`.")
 
     if verb == "config":
-        do_config(script_argv, home, cwd)
+        do_config(script_argv, home, cwd, init=parsed.init)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

@@ -451,25 +451,32 @@ always warns about entries whose directory no longer exists; setting this key in
 current project is not configured. (`--no-require-project-entry` overrides it
 for one run).
 
+For a project that needs no customization, register it with an empty entry:
+`yolo config --init` (see [the `config` verb](#the-config-verb)). That
+satisfies the guard without pinning any config values.
+
 ### CLI-only flags
 
 A few flags are deliberately *not* config keys:
 
 - **`--rebuild-image`** — pass `--no-cache` to `docker build`, forcing a full
-  image rebuild (useful when a baked-in tool is stale).
-- **`--dangerously-allow-home`** — by default yolo **refuses to launch with the
+  image rebuild (useful when a baked-in tool such as Claude Code itself is
+  stale).
+
+- **`--dangerously-allow-home`** — by default `yolo` **refuses to launch with the
   working directory at or above `$HOME`**, which would mount your whole home
-  directory (including `~/.ssh` and yolo's own config) read-write into a
+  directory (including `~/.ssh` and `yolo`'s own config) read-write into a
   skip-permissions container. This flag overrides the refusal for one run; it
   cannot be set from a config file, since a standing override would quietly
   defeat the guard.
+
 - The per-invocation actions — the verbs and `--resume`/`-r`/`--new`/`--force` —
   are also CLI-only by design.
 
 ### The `config` verb
 
-`yolo config` manages the per-project layer (`projects.json`), à la
-`git config`. Run it from inside the project *with the flags you want to pin*:
+`yolo config` manages the per-project layer (`projects.json`), à la `git
+config`. Run it from inside the project *with the flags you want to pin*:
 
 ```bash
 yolo config --config-dir ~/.claude-work --mount ~/refdocs
@@ -484,11 +491,27 @@ anything. `yolo config` is the only thing that writes `projects.json` — a plai
 launch never does — so the file stays a deliberate, auditable record of
 per-project grants.
 
+To register a project that needs no customization — which is all
+`require-project-entry` asks for — use:
+
+```bash
+yolo config --init
+```
+
+This writes an *empty* entry for the project: no overrides, just "yolo knows
+about this project". It errors if the project already has an entry, and it
+can't be combined with other config flags (an empty entry is the point). One
+subtlety: because only the most specific matching entry applies, an empty entry
+created inside a directory covered by some broader entry *shadows* that entry's
+config for this project — yolo warns when that happens.
+
 ## Extra `docker run` arguments
 
-Anything after a `--` separator is appended to the `docker run` command verbatim,
-*after* the script's own arguments. Because Docker uses last-one-wins for
-repeated flags, your arguments override the script's defaults:
+Anything after a `--` separator in the `yolo` invocation is appended to the
+`docker run` command verbatim, *after* the arguments `yolo` passes. Because
+Docker uses last-one-wins for repeated flags, these arguments override anything
+`yolo` passes. You can use this to set parameters like `--network host` or to
+change the `--memory`.
 
 ```bash
 yolo -- --network host --memory 4g
@@ -637,6 +660,7 @@ launch, so you can see exactly what's happening.
   help anyway: a default Docker container can't create unprivileged user
   namespaces, and granting that capability would weaken the very isolation this
   tool provides. (A `/doctor` sandbox note may still appear; that's expected.)
+
 - **Don't switch to `npm install -g`.** The npm global install lands at
   `/usr/local/bin/claude`, which `/doctor` flags as a broken install and which
   self-update can't manage. The native installer is deliberate.
@@ -661,5 +685,5 @@ launching anything.
 
 ## Provenance
 
-This started life as
-[Michal Migurski's gist](https://gist.github.com/migurski/6d7b718b364dfa4e7c8c63cd643ede2c).
+This started life as [Michal Migurski's
+gist](https://gist.github.com/migurski/6d7b718b364dfa4e7c8c63cd643ede2c).
