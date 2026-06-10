@@ -1,47 +1,45 @@
 # claude-yolo
 
-Run [Claude Code](https://claude.com/claude-code) in full "yolo mode"
-(`--dangerously-skip-permissions`) without giving it free rein over your laptop.
+This tool exists to allow relatively safe use of Claude Code in “yolo mode”,
+i.e. with `--dangerously-skip-permissions`. In particular it runs Claude Code in
+a Docker container that mounts just what is needed to work on a project either
+in the current directory or in a git worktree.
 
-The whole point is **blast-radius containment**: `yolo` launches Claude
-Code inside a throwaway Docker container. Claude can install packages, run
-commands, and edit files unattended — but the only part of your host it can touch
-is the directory you launch it from (which is bind-mounted in). Everything else
-stays on the other side of the container wall.
+Within the container Claude can install packages, run commands, and edit files
+unattended, but the only part of your host it can touch is either the directory
+you launch it from or the worktree directory. Everything else stays on the other
+side of the container wall. (Strictly speaking there are a few other directories
+it has access to, see below.)
 
-It's a single self-contained Python script with no runtime dependencies beyond
+The script is a self-contained Python script with no runtime dependencies beyond
 the standard library. You can install it as a `yolo` command (see below) or just
-run the file directly — either way it pulls in zero runtime dependencies. (The
-repo also carries a small uv-managed test/lint setup for working on the script;
-see [Development](#development).)
+run the file directly.
 
 ## Requirements
 
 - **macOS.** Credential extraction reads from the macOS keychain via the
-  `security` CLI. By default the script also forwards your running SSH agent
-  into the container (disable with `--no-ssh-agent`).
-- **A Docker engine** installed and running — either
-  [Docker Desktop](https://www.docker.com) or [OrbStack](https://orbstack.dev).
-  Both expose the host SSH agent at `/run/host-services/ssh-auth.sock`, which is
-  how agent forwarding works (see [below](#why-forward-the-ssh-agent)).
+  `security` CLI.
+
+- **Claude Code** on the host computer. Although Claude code sessions are run
+  within a Docker container which contains Claude Code, two of the main
+  authentication methods require running `claude` on the host to either create
+  an Oauth key or to login it to Claude.
+
+- **A Docker engine** The obvious choices are either the classic [Docker
+  Desktop](https://www.docker.com) or the new hotness,
+  [OrbStack](https://orbstack.dev). The `docker` command line tools `yolo`
+  depends on will use whichever one you are running.
+
 - **[uv](https://docs.astral.sh/uv/)** installed. The script's shebang is
-  `#!/usr/bin/env -S uv run --script`, so it self-runs under uv, which guarantees
-  a Python ≥3.10 (it's still stdlib-only — uv just picks the interpreter, since
-  macOS's system `python3` is often too old).
-- **Claude Code** already set up on your host. The default auth mode mints a
-  long-lived OAuth token via `claude setup-token`, which needs a
-  **Pro/Max/Team/Enterprise plan**; alternatives are your keychain login
-  credentials (`--auth keychain`) or **AWS credentials** (`--auth bedrock`).
-  See [Authentication modes](#authentication-modes).
+  `#!/usr/bin/env -S uv run --script`, so it self-runs under `uv`, which
+  guarantees a Python ≥3.10 (it's still stdlib-only — uv just picks the
+  interpreter, since macOS's system `python3` is often too old).
 
-## Install on your PATH
+## Installation
 
-The script installs as a `yolo` command. Two ways, depending on whether you want
-a clean managed install or a copy that tracks the repo:
-
-**Installed (recommended)** — `uv tool install` (or `pipx install`) builds it into
-an isolated venv and drops a `yolo` executable on your PATH, with zero runtime
-dependencies:
+The preferred way to install `yolo` is with `uv tool install` which will builds
+it into an isolated venv and put a `yolo` executable on your PATH, with zero
+runtime dependencies:
 
 ```bash
 uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
@@ -55,27 +53,80 @@ Or just run the bundled **`./install-from-git`** script, which wraps that
 You can also run it once without installing: `uvx --from
 git+https://github.com/gigamonkey/claude-yolo yolo`.
 
-**Standalone** — the file self-runs under uv via its PEP 723 header, so you can
-skip the build entirely and just symlink it; a symlink (not a copy) keeps it
-tracking the repo, so `git pull` updates it:
+Alternatively, the file self-runs under `uv` via its PEP 723 header, so you can
+skip the build entirely and just symlink it from somewhere in your path. This is
+probably only useful if you are working on `yolo` itself.
 
 ```bash
 chmod +x yolo.py
 ln -s "$PWD/yolo.py" ~/.local/bin/yolo   # ~/.local/bin is on PATH if you use uv
 ```
 
-You can also run it in place as `./yolo.py` (handy from a checkout).
+Or you can just run `/yolo.py` directly.
 
 ## Usage
 
+There are two modes for using `yolo`: current working directory and worktree.
+
+In **current working directory** mode, it mounts the directory where you ran
+`yolo` into the container. That means changes made by Claude are immediately
+reflected back onto you host computer. This is sometimes convenient but does run
+the risk of exposing files to Claude that aren't checked into git. It can
+scribble over or delete untracked files and there's nothing you can do about it
+and if there is any sensitive data anywhere under the current directory, it has
+access to it.
+
+In **worktree** mode, `yolo` creates a git worktree and then mounts the worktree
+directory (plus the shared `.git` directory) into the container. In this mode
+Claude can only see what has been checked into git and if it runs completely
+amok, you can just throw away the worktree and its branch and all you lost was
+some tokens. All work done in a worktree session is reflected in the worktree
+directory which `yolo` creates for you under `~/.claude-yolo/worktrees` and in
+the branch tied to the worktree. So when you are done you can merge the branch
+or push it to Github to make a PR or whatever your workflow calls for.
+
+### Current working directory mode
+
+The main subcommands that `yolo` understands are verbs for managing and
+interacting with yolo sessions.
+
 ```bash
-yolo                                   # default: long-lived OAuth token (minted on first run)
+yolo start                             # launch a session in the current directory
+yolo resume                            # resume the latest session in the current directory
+yolo shell                             # open a bash shell in dir's container
+```
+
+### Worktree mode
+
+For worktree mode use the same verbs followed by a worktree name. The `finish`
+command requires a worktree name and cleans up the worktree for you. The branch
+will still exist, however, until you `git branch -d` it. And the `list` command,
+run in a directory, shows the worktrees associated with that repo, i.e. the
+worktrees started via `yolo start <name>`.
+
+```bash
+yolo start something                    # new worktree+branch, launch a session
+yolo resume something                   # re-enter it, continue the session
+yolo shell something                    # open a bash shell in its container
+yolo finish something                   # remove the worktree, keep the branch
+yolo list                               # show this repo's worktrees
+```
+
+## Configuration
+
+{{CLAUDE: please rewrite this to explain first where the configuration can be
+stored. Then describe the keys that are used in the .yolo.json and projects.json
+files and the corresponding CLI args. Explain each configuration option under a
+`###` header. At the end explain how `yolo config` can be used to set values in
+projects.json. And for the --config-dir option, explain why one might want to
+have multiple Claude configs, which is pretty much independent of yolo, yolo
+just supports them and allows you to tie projects to Claude configs because
+that's going to be a common use case.}}
+
+```bash
 yolo --config-dir ~/.claude-work       # use an alternate config directory
 yolo --auth keychain                   # snapshot of your keychain login creds instead
 yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-yolo setup-token                       # mint+cache the long-lived OAuth token explicitly
-yolo tokens                            # list the tokens yolo has minted (and when)
-yolo forget-token                      # delete this config dir's token from the keychain
 yolo --no-ssh-agent                    # don't forward the host SSH agent
 yolo --mount ~/refdocs                 # also mount ~/refdocs, read-only, at its host path
 yolo --mount ~/other-repo:rw           # extra mount, writable
@@ -83,23 +134,7 @@ yolo config --mount ~/refdocs          # persist flags as this project's config,
 yolo config                            # show this project's config entry, then exit
 yolo --version                         # print the version and exit
 yolo -- --network host                 # pass extra args to `docker run`
-
-# verbs in the current directory (no worktree):
-yolo                                   # == `yolo start`: a fresh session here
-yolo resume                            # continue the most recent session here
-yolo resume -r [SESSION_ID]            # pick / resume a specific session here
-yolo shell                             # bash shell in this dir's container (or fresh)
-
-# the worktree workflow (see below) — the same verbs, plus a TOPIC:
-yolo start fix-auth                    # new worktree+branch, launch a session
-yolo resume fix-auth                   # re-enter it, continue the session
-yolo shell fix-auth                    # open a bash shell in its container
-yolo finish fix-auth                   # remove the worktree, keep the branch
-yolo list                              # show this repo's worktrees
 ```
-
-Run it from the directory you want Claude to work in. That directory becomes the
-container's working directory and is the only host path Claude can modify.
 
 How Claude authenticates is one choice via `--auth`
 (`oauth-token` [default] / `keychain` / `bedrock`); `--config-dir`, `--claude-json`,
@@ -114,6 +149,14 @@ You can also
 add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
 instructions onto Claude's system prompt, and set defaults for most flags in
 [host-side config files](#configuring-defaults-yolojson--yolo-config).
+
+### Claude config and token management
+
+```bash
+yolo setup-token                       # mint+cache a long-lived OAuth token for the current config dir.
+yolo tokens                            # list the tokens yolo has minted (and when)
+yolo forget-token                      # delete this config dir's token from the keychain
+```
 
 ## The verbs (and the worktree workflow)
 
@@ -133,15 +176,15 @@ the git worktree and the branch name, and you run from inside a repo:
 
 ```bash
 cd ~/hacks/bells
-yolo start fix-auth       # new worktree + branch `fix-auth`, fresh session
+yolo start something       # new worktree + branch `something`, fresh session
 # ...work, exit the container...
-yolo resume fix-auth      # back into it, continuing where you left off
-yolo shell fix-auth       # a bash shell in that worktree (poke around)
+yolo resume something      # back into it, continuing where you left off
+yolo shell something       # a bash shell in that worktree (poke around)
 yolo list                 # what worktrees exist, and which are running
-yolo finish fix-auth      # done — remove the worktree, keep the branch to merge/PR
+yolo finish something      # done — remove the worktree, keep the branch to merge/PR
 ```
 
-You can run several at once (`start fix-auth` in one terminal, `start
+You can run several at once (`start something` in one terminal, `start
 refactor-db` in another) on the **same repo** without them stepping on each other.
 
 - **`start [TOPIC]`** with a `TOPIC` creates a git **worktree** on a new branch
@@ -157,7 +200,7 @@ refactor-db` in another) on the **same repo** without them stepping on each othe
   one is up for that worktree (or, with no `TOPIC`, for this directory) — handy while
   a session works in another terminal — otherwise a fresh throwaway container. The
   prompt flags where you are (`yolo:<dir>$`), with the long worktree path shortened
-  to a `<repo>/<topic>` label (e.g. `yolo:claude-yolo/fix-auth$`).
+  to a `<repo>/<topic>` label (e.g. `yolo:claude-yolo/something$`).
 - **`finish TOPIC`** (worktree only) removes the worktree but **keeps the branch** (for you to
   merge or push). It refuses if a container is still running, or if there are
   uncommitted changes (override with `--force`).
