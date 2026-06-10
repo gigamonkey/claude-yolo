@@ -40,7 +40,10 @@ def test_default_run_assembles_expected_mounts(cy, run_cli, flag_values, dirs):
     assert container_name(argv) == "work"
     assert f"{home}/.claude:/home/claude/.claude" in mounts
     assert f"{home}/.claude.json:/home/claude/.claude.json" in mounts
-    assert "/tmp/creds.json:/home/claude/.claude/.credentials.json" in mounts
+    # the default auth mode is oauth-token: a forwarded env token, no mounted
+    # keychain-credentials snapshot (that mode is unsafe for concurrent sessions)
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    assert not any(".credentials.json" in m for m in mounts)
     assert "SSH_AUTH_SOCK=/run/ssh-agent" in envs
     # no CLAUDE_CONFIG_DIR in any mode (mount is always the default location)
     assert not any(e.startswith("CLAUDE_CONFIG_DIR=") for e in envs)
@@ -120,8 +123,8 @@ def test_aws_flag_without_bedrock_warns(cy, run_cli, flag_values, dirs, capsys):
     home, work = dirs
     argv = run_cli(["--aws-profile", "prod"], home=home, cwd=work)
     assert "ignored without --auth bedrock" in capsys.readouterr().err
-    # still a normal keychain run
-    assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    # still a normal (default oauth-token) run
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
 
 
 # --- auth: oauth-token ------------------------------------------------------
@@ -289,11 +292,12 @@ def test_project_entry_provides_defaults(cy, run_cli, flag_values, dirs):
 
 def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsys):
     home, work = dirs
-    (work / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
+    (work / ".yolo.json").write_text(json.dumps({"auth": "keychain"}))
     argv = run_cli([], home=home, cwd=work)
-    # the in-directory file no longer configures anything: still a keychain run
-    assert not any(e.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for e in flag_values(argv, "-e"))
-    assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    # the in-directory file no longer configures anything: still a default
+    # oauth-token run, not the keychain run the file asks for
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
     assert "no longer read" in capsys.readouterr().err
 
 

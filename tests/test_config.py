@@ -316,9 +316,9 @@ def test_config_verb_writes_only_explicit_flags(cy, run_cli, dirs):
 
 def test_config_verb_persists_explicit_default_value(cy, run_cli, dirs):
     home, work = dirs
-    # keychain is the built-in default, but explicitly passing it must still persist
-    run_cli(["config", "--auth", "keychain"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"auth": "keychain"}}
+    # oauth-token is the built-in default, but explicitly passing it must still persist
+    run_cli(["config", "--auth", "oauth-token"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"auth": "oauth-token"}}
 
 
 def test_config_verb_persists_bools_lists_and_mounts(cy, run_cli, dirs, tmp_path):

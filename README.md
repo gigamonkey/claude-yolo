@@ -28,10 +28,11 @@ see [Development](#development).)
   `#!/usr/bin/env -S uv run --script`, so it self-runs under uv, which guarantees
   a Python ≥3.10 (it's still stdlib-only — uv just picks the interpreter, since
   macOS's system `python3` is often too old).
-- **Claude Code** already set up on your host (so its credentials are in the
-  keychain). Alternatively a long-lived OAuth token via `--auth oauth-token`
-  (needs a Pro/Max/Team/Enterprise plan), or **AWS credentials** for
-  `--auth bedrock`. See [Authentication modes](#authentication-modes).
+- **Claude Code** already set up on your host. The default auth mode mints a
+  long-lived OAuth token via `claude setup-token`, which needs a
+  **Pro/Max/Team/Enterprise plan**; alternatives are your keychain login
+  credentials (`--auth keychain`) or **AWS credentials** (`--auth bedrock`).
+  See [Authentication modes](#authentication-modes).
 
 ## Install on your PATH
 
@@ -68,11 +69,13 @@ You can also run it in place as `./yolo.py` (handy from a checkout).
 ## Usage
 
 ```bash
-yolo                                   # default: keychain credentials from ~/.claude
+yolo                                   # default: long-lived OAuth token (minted on first run)
 yolo --config-dir ~/.claude-work       # use an alternate config directory
-yolo --auth oauth-token                # long-lived token (best for long/concurrent sessions)
+yolo --auth keychain                   # snapshot of your keychain login creds instead
 yolo --auth bedrock --aws-profile myprofile --aws-region us-west-2  # AWS Bedrock
-yolo setup-token                       # mint+cache the long-lived OAuth token (once)
+yolo setup-token                       # mint+cache the long-lived OAuth token explicitly
+yolo tokens                            # list the tokens yolo has minted (and when)
+yolo forget-token                      # delete this config dir's token from the keychain
 yolo --no-ssh-agent                    # don't forward the host SSH agent
 yolo --mount ~/refdocs                 # also mount ~/refdocs, read-only, at its host path
 yolo --mount ~/other-repo:rw           # extra mount, writable
@@ -99,13 +102,14 @@ Run it from the directory you want Claude to work in. That directory becomes the
 container's working directory and is the only host path Claude can modify.
 
 How Claude authenticates is one choice via `--auth`
-(`keychain` [default] / `oauth-token` / `bedrock`); `--config-dir`, `--claude-json`,
+(`oauth-token` [default] / `keychain` / `bedrock`); `--config-dir`, `--claude-json`,
 `--ssh-agent`, and `--mount` are **orthogonal flags** that combine freely with it
 and each other (see
 [Authentication modes](#authentication-modes) and
 [Configuration options](#other-configuration-options)). The
 positional arguments are an optional verb
-(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its topic name.
+(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`/`tokens`/`forget-token`)
+and its topic name.
 You can also
 add `--append-system-prompt "..."` (or `-p "..."`, repeatable) to tack extra
 instructions onto Claude's system prompt, and set defaults for most flags in
@@ -204,8 +208,9 @@ added to group 0 so it can reach the SSH agent socket — see
 
 ### 3. Extracts your credentials
 
-This describes the default **keychain** auth mode; `--auth oauth-token` and
-`--auth bedrock` work differently (see [Authentication modes](#authentication-modes)).
+This describes the **keychain** auth mode (`--auth keychain`); the default
+`oauth-token` mode and `--auth bedrock` work differently (see
+[Authentication modes](#authentication-modes)).
 
 Claude Code keeps its OAuth credentials in the macOS keychain. The script pulls
 them out with the `security` CLI into a temporary, `chmod 600` file, then
@@ -326,21 +331,109 @@ launch, so you can see exactly what's happening.
 ## Authentication modes
 
 `--auth` selects one of three mutually-exclusive ways for Claude to authenticate
-(default `keychain`). The [config flags](#other-configuration-options) below
+(default `oauth-token`). The [config flags](#other-configuration-options) below
 compose with whichever you pick.
 
 | `--auth` | How it authenticates | Best for |
 | --- | --- | --- |
-| `keychain` *(default)* | Mounts a snapshot of your rotating Claude.ai keychain credentials | Getting started; short, one-off sessions |
-| `oauth-token` | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var | Long-lived and/or concurrent sessions |
+| `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var | Everything, including long-lived and concurrent sessions |
+| `keychain` | Mounts a snapshot of your rotating Claude.ai keychain credentials | Plans without `setup-token`; short, solo sessions |
 | `bedrock` | AWS Bedrock credentials | Billing via AWS |
 
-### `keychain` (default)
+### `oauth-token` (default)
+
+Authenticates with a long-lived token from `claude setup-token` — a **one-year
+token that is never rotated and never written back** — forwarded into the
+container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable, with no
+`.credentials.json` mount. Because nothing ever rewrites it, **any number of
+concurrent containers (plus the host on its own keychain login) can use it at once**
+with no interference, for as long as each session runs. That's why it's the
+default: unlike keychain mode it has no failure mode that depends on how long
+your sessions run or how many you run at once.
+
+The first launch per config directory has no cached token, so yolo offers to mint
+one: it explains what's about to happen, asks for confirmation, then runs the
+browser OAuth flow and caches the token in your keychain. After that one-time
+step every launch is silent. You can also mint explicitly with
+**`yolo setup-token`** (it asks nothing — running it is the consent), and if
+`CLAUDE_CODE_OAUTH_TOKEN` is already set in your environment (e.g. CI), that
+value is used as-is. In a non-interactive context with no cached token, yolo
+exits with guidance instead of hanging on a browser flow nobody can drive.
+
+Requires a **Pro/Max/Team/Enterprise plan** (that's what `claude setup-token`
+needs); the token is scoped to inference only. If your plan doesn't support it,
+set `"auth": "keychain"` in `~/.yolo.json` and read the keychain section below.
+
+**Tokens are scoped per config directory.** Just like the keychain login
+credentials, each `--config-dir` (≈ each account/profile) gets its *own* long-lived
+token, rather than one global token silently authenticating as the wrong account.
+yolo resolves the token in this order: an explicit `CLAUDE_CODE_OAUTH_TOKEN` in your
+host environment wins (it's global by nature, for CI or self-managed tokens) → else
+the yolo-managed keychain entry for the active config directory → else (interactive
+launches only) offer to mint a fresh one and cache it there. `yolo setup-token`
+honours `--config-dir` too, so it caches under the same name a matching launch will
+read.
+
+**Stored in the macOS keychain, extract-only.** The token is kept as a
+generic-password entry in your login keychain — encrypted at rest, the same place
+Claude Code stores its own credentials, never written to a dotfile. The service
+name is `claude-yolo-oauth-token` for the default config directory, or
+`claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where `<hash8>`
+is the first 8 hex chars of the SHA-256 of the directory's resolved path (the same
+hashing scheme the keychain login credentials use). yolo only ever *reads* this
+entry to forward the token into the container — it never rotates or rewrites it,
+so unlike the keychain login credentials there are no rotation hazards from sharing
+it across sessions.
+
+Trade-off: unlike the SSH-agent design (where the secret never enters the
+container), this *does* put a bearer token in the container's environment — but
+it's a scoped, inference-only token, and no worse than the rotating snapshot
+keychain mode mounts.
+
+#### Tokens & revocation
+
+Minting a year-long credential deserves honest bookkeeping, so yolo keeps a
+**registry** of every token it mints — service name, config directory, and the
+exact mint timestamp — in `~/.claude-yolo/tokens.json` (metadata only; the token
+itself lives in the keychain). Three things use it:
+
+- **`yolo tokens`** lists what exists: per config dir, when it was minted, the
+  estimated expiry (mint + 1 year), and whether the keychain entry is still
+  present.
+- **`yolo forget-token`** deletes the active config dir's token from your
+  keychain and the registry. *Forget*, not *revoke* — see below.
+- At launch, yolo warns when the active token is within a week of its estimated
+  expiry (so it doesn't just silently start 401ing inside containers a year from
+  now); re-mint with `yolo setup-token`.
+
+**Revocation is the weak spot, and it's outside yolo's control.** There is no
+API or CLI command to revoke a `setup-token` token — `claude auth logout` only
+clears local state
+([#34198](https://github.com/anthropics/claude-code/issues/34198)), and the CLI
+has no list/revoke subcommands
+([#48373](https://github.com/anthropics/claude-code/issues/48373), open feature
+request). The only revocation path is manual:
+**<https://claude.ai/settings/claude-code>**, one trash-icon click per token
+([support article](https://support.claude.com/en/articles/10310342-how-do-i-log-out-of-all-active-sessions)).
+In practice that page is rough: normal Claude Code usage mints tokens of its own,
+so the list accumulates hundreds of near-identical entries with no bulk-revoke
+([#59378](https://github.com/anthropics/claude-code/issues/59378)), and
+revocation has been reported to lag by days
+([#43801](https://github.com/anthropics/claude-code/issues/43801)). The mint
+timestamps that `yolo tokens` records are your best handle for picking yolo's
+token out of that list.
+
+For perspective: if you use Claude Code's remote-control features at all, your
+account already has a long list of these tokens from routine usage. The one yolo
+mints is deliberately created with your consent, recorded with a timestamp, and
+stored encrypted — it will likely be the best-tracked token on the page.
+
+### `keychain`
 
 Extracts your Claude.ai login credentials from the macOS keychain and mounts them
 as `.credentials.json` (this is the mode described under
-[How it works → Extracts your credentials](#3-extracts-your-credentials)). Zero
-setup beyond being logged in on the host, so it's the fastest way to get going.
+[How it works → Extracts your credentials](#3-extracts-your-credentials)). No
+token mint, no plan requirement beyond being logged in on the host.
 
 The catch is **token rotation.** Those credentials are a short-lived access token
 (~8h) plus a **single-use refresh token**: when the access token expires, Claude
@@ -356,57 +449,10 @@ other snapshot. The loser gets a `401` and is effectively logged out the next ti
   one refreshes, the others break.
 - A **short, solo** session that finishes before any refresh happens is fine.
 
-So keychain mode is great for getting started and quick one-off runs — but for
-**long-lived or concurrent sessions, use `--auth oauth-token`.**
-
-### `oauth-token`
-
-Authenticates with a long-lived token from `claude setup-token` — a **one-year
-token that is never rotated and never written back** — forwarded into the
-container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable, with no
-`.credentials.json` mount. Because nothing ever rewrites it, **any number of
-concurrent containers (plus the host on its own keychain login) can use it at once**
-with no interference, for as long as each session runs. This is the mode for
-unattended, long-running, or parallel work — it sidesteps the rotation problem
-entirely by not sharing a rotating credential.
-
-Set it up once with **`yolo setup-token`**, which runs the browser OAuth flow and
-caches the token in your keychain. After that, `--auth oauth-token` just works. You
-can also run `yolo --auth oauth-token` straight away — with no cached token it mints
-one on the spot (interactively; in a non-interactive context it tells you to run
-`yolo setup-token` first). If `CLAUDE_CODE_OAUTH_TOKEN` is already set in your
-environment (e.g. CI), that value is used as-is.
-
-**Tokens are scoped per config directory.** Just like the keychain login
-credentials, each `--config-dir` (≈ each account/profile) gets its *own* long-lived
-token, rather than one global token silently authenticating as the wrong account.
-yolo resolves the token in this order: an explicit `CLAUDE_CODE_OAUTH_TOKEN` in your
-host environment wins (it's global by nature, for CI or self-managed tokens) → else
-the yolo-managed keychain entry for the active config directory → else (interactive
-launches only) mint a fresh one and cache it there. `yolo setup-token` honours
-`--config-dir` too, so it caches under the same name a matching launch will read.
-
-**Stored in the macOS keychain, extract-only.** The token is kept as a
-generic-password entry in your login keychain — encrypted at rest, the same place
-Claude Code stores its own credentials, never written to a dotfile. The service
-name is `claude-yolo-oauth-token` for the default config directory, or
-`claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where `<hash8>`
-is the first 8 hex chars of the SHA-256 of the directory's resolved path (the same
-hashing scheme the keychain login credentials use). yolo only ever *reads* this
-entry to forward the token into the container — it never rotates or rewrites it,
-so unlike the keychain login credentials there are no rotation hazards from sharing
-it across sessions. You can inspect or revoke it directly:
-
-```bash
-security find-generic-password -s claude-yolo-oauth-token -w   # print the token
-security delete-generic-password -s claude-yolo-oauth-token    # forget it (re-mint with setup-token)
-```
-
-Requires a **Pro/Max/Team/Enterprise plan**; the token is scoped to inference
-only. Trade-off: unlike the SSH-agent design (where the secret never enters the
-container), this *does* put a bearer token in the container's environment — but
-it's a scoped, individually **revocable** token, and no worse than the rotating
-snapshot keychain mode already mounts.
+This is why it's no longer the default: it behaves perfectly in a quick test
+and then bites once sessions get long, parallel, or overlap host use. Use it
+when your plan doesn't support `setup-token`, or when you specifically want
+snapshot semantics and accept the rules above.
 
 ### `bedrock`
 
@@ -505,8 +551,8 @@ yolo -- --network host --memory 4g
 
 ## Notes and gotchas
 
-- **Login is checked up front (keychain mode).** In the default keychain mode,
-  claude-yolo copies credentials from the macOS keychain rather than
+- **Login is checked up front (keychain mode).** In keychain mode (`--auth
+  keychain`), claude-yolo copies credentials from the macOS keychain rather than
   authenticating inside the container. Before launching it runs
   `claude auth status`; if you're logged out it offers to run `claude auth login`
   for you and re-checks. Requires a host `claude` recent enough to have the `auth`

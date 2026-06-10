@@ -5,6 +5,7 @@
 # ///
 
 import argparse
+import datetime
 import fcntl
 import hashlib
 import json
@@ -21,9 +22,10 @@ import termios
 
 DOCKER_IMAGE = "claude-yolo:latest"
 
-# The three mutually-exclusive auth mechanisms, selected by --auth (default the
-# first). keychain = extract the rotating Claude.ai keychain creds into a mounted
-# file; oauth-token = forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var;
+# The three mutually-exclusive auth mechanisms, selected by --auth (default
+# oauth-token). oauth-token = forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env
+# var; keychain = extract the rotating Claude.ai keychain creds into a mounted
+# file (unsafe for concurrent sessions — the refresh token rotates single-use);
 # bedrock = AWS Bedrock creds.
 AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
@@ -176,9 +178,16 @@ def ensure_logged_in(config_dir: str | None) -> None:
 # once. Auth precedence: this env var sits above the file/keychain /login creds,
 # so even a stale mounted .credentials.json can't shadow it.
 OAUTH_KC_SERVICE = "claude-yolo-oauth-token"
+# setup-token tokens last about a year. An assumption, not something we can read
+# off the token (it's opaque, and the mint flow states no expiry date) — which is
+# why the expiry warning fires a week early and says "estimated".
+TOKEN_LIFETIME_DAYS = 365
+TOKEN_EXPIRY_WARN_DAYS = 7
 # setup-token prints an OAuth token; detect it in the (ANSI-laden) terminal output.
 _TOKEN_RE = re.compile(rb"sk-ant-[A-Za-z0-9_\-]{20,}")
 _ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# claude.ai page where (and only where) a minted token can actually be revoked.
+TOKEN_REVOKE_URL = "https://claude.ai/settings/claude-code"
 
 
 def _looks_like_token(token: str) -> bool:
@@ -237,7 +246,12 @@ def _read_oauth_token(config_dir: str | None) -> str | None:
 
 
 def _store_oauth_token(token: str, config_dir: str | None) -> None:
-    """Upsert the yolo OAuth token for this config dir into the keychain (-U)."""
+    """Upsert the yolo OAuth token for this config dir into the keychain (-U).
+
+    Also records the mint in ~/.claude-yolo/tokens.json (the registry). On a
+    re-mint the old token stays valid server-side — there's no revocation API —
+    so print its mint date: the only handle for finding it on the claude.ai page.
+    """
     subprocess.run(
         [
             "security",
@@ -251,6 +265,159 @@ def _store_oauth_token(token: str, config_dir: str | None) -> None:
             token,
         ],
         check=True,
+    )
+    previous = _write_token_entry(config_dir)
+    if previous and previous.get("minted"):
+        print(
+            f"Note: the previously-minted token (minted {previous['minted']}) is still "
+            f"valid server-side; it can only be revoked at {TOKEN_REVOKE_URL}.",
+            file=sys.stderr,
+        )
+
+
+# Token registry: ~/.claude-yolo/tokens.json maps keychain service name ->
+# {"config_dir": ..., "minted": ...}. Non-secret metadata about tokens yolo has
+# minted; the keychain holds the secret itself. The registry exists for what the
+# keychain can't do: enumerate yolo's tokens across config dirs (`yolo tokens`),
+# and map a service name back to its config dir — the hash8 in the name is
+# one-way, so the mapping is recorded at mint time or lost. Host-side only and
+# never mounted, like projects.json.
+
+
+def _tokens_file() -> pathlib.Path:
+    return pathlib.Path.home() / ".claude-yolo" / "tokens.json"
+
+
+def _read_tokens_file() -> dict:
+    """~/.claude-yolo/tokens.json as {service: entry}; {} if absent."""
+    path = _tokens_file()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"{path}: cannot read token registry: {e}")
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        sys.exit(f"{path}: must be a JSON object mapping service names to entries")
+    return raw
+
+
+def _write_token_entry(config_dir: str | None) -> dict | None:
+    """Record a mint for this config dir's service; returns the replaced entry."""
+    tokens = _read_tokens_file()
+    service = _oauth_service(config_dir)
+    previous = tokens.get(service)
+    tokens[service] = {
+        "config_dir": str(pathlib.Path(config_dir).resolve()) if config_dir else None,
+        "minted": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    path = _tokens_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tokens, indent=2) + "\n")
+    return previous
+
+
+def _remove_token_entry(service: str) -> dict | None:
+    """Drop a service from the registry; returns the removed entry, if any."""
+    tokens = _read_tokens_file()
+    entry = tokens.pop(service, None)
+    if entry is not None:
+        _tokens_file().write_text(json.dumps(tokens, indent=2) + "\n")
+    return entry
+
+
+def _keychain_has(service: str) -> bool:
+    """Whether a keychain item exists for `service` (attributes only, no secret)."""
+    try:
+        return (
+            subprocess.run(
+                ["security", "find-generic-password", "-s", service],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        return False
+
+
+def _keychain_delete(service: str) -> bool:
+    """Delete the keychain item for `service`; True if something was deleted."""
+    try:
+        return (
+            subprocess.run(
+                ["security", "delete-generic-password", "-s", service],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        return False
+
+
+_KC_DATE_RE = re.compile(r'"(?:mdat|cdat)".*?"(\d{14})[^"]*"')
+
+
+def _keychain_mdat(service: str) -> datetime.datetime | None:
+    """The last-modified time of a keychain item, or None.
+
+    We upsert tokens with `add-generic-password -U`, so the item's modification
+    date *is* the last mint time — the keychain timestamps every entry for free,
+    which makes this the drift-proof source for the expiry estimate (it survives
+    re-mints done outside yolo and predates the tokens.json registry). Attributes
+    print without `-w`, so no secret is read and no auth prompt fires. Returns
+    None on any trouble (missing item, parse change): the expiry warning is
+    advisory and just stays quiet.
+    """
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    # Attribute lines look like: "mdat"<timeb>=0x...  "20260610123456Z\000"
+    # Prefer mdat (last upsert); fall back to cdat.
+    dates = {m.group(0)[1:5]: m.group(1) for m in _KC_DATE_RE.finditer(result.stdout)}
+    stamp = dates.get("mdat") or dates.get("cdat")
+    if not stamp:
+        return None
+    try:
+        return datetime.datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _token_expiry(minted: datetime.datetime) -> datetime.datetime:
+    return minted + datetime.timedelta(days=TOKEN_LIFETIME_DAYS)
+
+
+def _warn_token_expiry(config_dir: str | None) -> None:
+    """Warn when the cached token is past or within a week of its estimated expiry.
+
+    Without this, a token minted a year ago just starts 401ing inside containers
+    with no hint from yolo. Estimate only (TOKEN_LIFETIME_DAYS); quiet when the
+    keychain date can't be read.
+    """
+    mdat = _keychain_mdat(_oauth_service(config_dir))
+    if mdat is None:
+        return
+    expiry = _token_expiry(mdat)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if expiry >= now + datetime.timedelta(days=TOKEN_EXPIRY_WARN_DAYS):
+        return
+    when = expiry.date().isoformat()
+    state = f"expired around {when}" if expiry < now else f"expires around {when}"
+    dir_label = config_dir or "~/.claude"
+    print(
+        f"warning: the OAuth token for {dir_label} (minted {mdat.date().isoformat()}) "
+        f"{state}. Re-mint with `yolo setup-token`; the old token can only be revoked "
+        f"at {TOKEN_REVOKE_URL}.",
+        file=sys.stderr,
     )
 
 
@@ -325,14 +492,34 @@ def ensure_oauth_token(config_dir: str | None) -> str:
     CI / users who manage it themselves, and it's global by nature); else the
     yolo-managed keychain cache *for this config dir*; else mint a fresh one via
     `claude setup-token` and cache it under that config dir's service name.
+
+    A keychain-cached token gets the expiry warning (an env token's age is
+    unknowable — skip). The implicit mint asks first: minting creates a year-long
+    credential the user didn't explicitly request (unlike `yolo setup-token`,
+    where running the verb is the consent), and creating it silently was the
+    original argument against defaulting to this auth mode.
     """
     env_tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     if env_tok:
         return env_tok
     cached = _read_oauth_token(config_dir)
     if cached:
+        _warn_token_expiry(config_dir)
         return cached
-    print("No cached yolo OAuth token found; generating one.")
+    if sys.stdin.isatty():
+        dir_label = config_dir or "~/.claude"
+        print(
+            f"No OAuth token cached for {dir_label}. yolo will mint a 1-year Claude Code\n"
+            "token (browser authorization), stored encrypted in your macOS keychain.\n"
+            "It can later be removed locally with `yolo forget-token`; server-side\n"
+            f"revocation is only possible at {TOKEN_REVOKE_URL}."
+        )
+        if input("Proceed? [Y/n] ").strip().lower() in ("n", "no"):
+            sys.exit(
+                "Aborting. Use `--auth keychain` for snapshot credentials (unsafe for "
+                "concurrent sessions), run `yolo setup-token` later, or set "
+                "CLAUDE_CODE_OAUTH_TOKEN in the environment."
+            )
     return generate_oauth_token(config_dir)
 
 
@@ -678,8 +865,8 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     """{config-key: value} for every YOLO_KEYS flag explicitly present in argv.
 
     Re-parses with sentinel defaults: a plain parse can't distinguish "defaulted"
-    from "explicitly set to the default value", and `yolo config --auth keychain`
-    must persist auth even though keychain is the default. List-kind dests get a
+    from "explicitly set to the default value", and `yolo config --auth oauth-token`
+    must persist auth even though oauth-token is the default. List-kind dests get a
     fresh marker list (argparse's append action copies the default before
     appending, so identity survives exactly when the flag never appeared).
     """
@@ -778,7 +965,17 @@ PARSER.add_argument(
 PARSER.add_argument(
     "verb",
     nargs="?",
-    choices=["config", "start", "resume", "shell", "finish", "list", "setup-token"],
+    choices=[
+        "config",
+        "start",
+        "resume",
+        "shell",
+        "finish",
+        "list",
+        "setup-token",
+        "tokens",
+        "forget-token",
+    ],
     help="Optional subcommand. start/resume/shell take an *optional* TOPIC: with a "
     "TOPIC they act on a git worktree of that name (start creates it, resume/shell "
     "require it); with no TOPIC they act on the current directory (start a fresh "
@@ -786,8 +983,10 @@ PARSER.add_argument(
     "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry, or — given config "
     "flags — persists exactly those flags into it; 'setup-token' mints/caches a "
-    "long-lived OAuth token (for --auth oauth-token). A bare `yolo` is equivalent "
-    "to `yolo start`.",
+    "long-lived OAuth token (for --auth oauth-token); 'tokens' lists the tokens "
+    "yolo has minted; 'forget-token' deletes the active config dir's token from "
+    "the keychain (local only — see `tokens` output for revocation). A bare "
+    "`yolo` is equivalent to `yolo start`.",
 )
 PARSER.add_argument(
     "topic",
@@ -822,13 +1021,15 @@ PARSER.add_argument(
 PARSER.add_argument(
     "--auth",
     choices=AUTH_CHOICES,
-    default="keychain",
-    help="Authentication mechanism (default: keychain). "
-    "'keychain' extracts the rotating Claude.ai keychain credentials and mounts "
-    "them; 'oauth-token' forwards a long-lived CLAUDE_CODE_OAUTH_TOKEN from "
-    "`claude setup-token` (stable, safe for concurrent containers); 'bedrock' "
-    "authenticates via AWS Bedrock (mounts ~/.aws, sets CLAUDE_CODE_USE_BEDROCK=1). "
-    "Also settable as `auth` in .yolo.json.",
+    default="oauth-token",
+    help="Authentication mechanism (default: oauth-token). "
+    "'oauth-token' forwards a long-lived CLAUDE_CODE_OAUTH_TOKEN from "
+    "`claude setup-token` (stable, safe for concurrent containers); 'keychain' "
+    "extracts the rotating Claude.ai keychain credentials and mounts them "
+    "(UNSAFE for concurrent or overlapping sessions: the refresh token rotates "
+    "single-use, so whichever session refreshes first invalidates the others'); "
+    "'bedrock' authenticates via AWS Bedrock (mounts ~/.aws, sets "
+    "CLAUDE_CODE_USE_BEDROCK=1). Also settable as `auth` in .yolo.json.",
 )
 PARSER.add_argument(
     "--aws-profile",
@@ -1140,13 +1341,14 @@ def launch_container(
         args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
 
     # (c) Auth mechanism (--auth), one of three mutually-exclusive paths:
-    #   - oauth-token: forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var. No
-    #     keychain extraction, no login check, no .credentials.json mount — the
-    #     token is stable (never rotated/written back), so concurrent containers
+    #   - oauth-token (default): forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env
+    #     var. No keychain extraction, no login check, no .credentials.json mount —
+    #     the token is stable (never rotated/written back), so concurrent containers
     #     and the host can all use it at once. The env var also out-ranks any file
     #     creds, so a stale mounted .credentials.json can't shadow it.
     #   - bedrock: AWS creds + env (mounts ~/.aws), no keychain/login.
-    #   - keychain (default): extract the rotating keychain creds into a mounted file.
+    #   - keychain: extract the rotating keychain creds into a mounted file. Unsafe
+    #     for concurrent/overlapping sessions (single-use rotating refresh token).
     if parsed.auth == "oauth-token":
         args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
     elif parsed.auth == "bedrock":
@@ -1321,6 +1523,99 @@ def do_list(home: pathlib.Path, base: str) -> None:
         print(fmt(row))
 
 
+def do_tokens() -> None:
+    """`tokens` verb: list the tokens yolo has minted (the tokens.json registry).
+
+    The MINTED column is the practical reason this exists: the claude.ai token
+    list shows almost no per-token metadata, so a recorded mint timestamp is the
+    only handle for identifying yolo's token there. EXPIRES~ is minted +
+    TOKEN_LIFETIME_DAYS — an estimate, hence the tilde. STATUS reconciles against
+    the keychain: `stale` flags a registry entry whose keychain item is gone
+    (deleted outside yolo), `re-minted` one whose keychain date is materially
+    newer than the recorded mint (re-minted outside yolo — trust the keychain).
+    """
+    tokens = _read_tokens_file()
+    if not tokens:
+        print(
+            f"No tokens recorded. (yolo records tokens it mints in {_tokens_file()};\n"
+            "tokens minted by older yolo versions or by hand aren't listed.)"
+        )
+        return
+
+    rows = []
+    for service, entry in sorted(tokens.items()):
+        config_dir = entry.get("config_dir") or "(default ~/.claude)"
+        minted_raw = entry.get("minted", "")
+        minted_day, expires = minted_raw[:10] or "?", "?"
+        try:
+            minted_dt = datetime.datetime.fromisoformat(minted_raw)
+            expires = _token_expiry(minted_dt).date().isoformat()
+        except ValueError:
+            minted_dt = None
+        if not _keychain_has(service):
+            status = "stale (not in keychain)"
+        else:
+            mdat = _keychain_mdat(service)
+            if (
+                minted_dt is not None
+                and mdat is not None
+                and abs(mdat - minted_dt.astimezone(datetime.timezone.utc))
+                > datetime.timedelta(days=1)
+            ):
+                status = f"re-minted outside yolo (keychain says {mdat.date().isoformat()})"
+            else:
+                status = "ok"
+        rows.append((service, config_dir, minted_day, expires, status))
+
+    headers = ("SERVICE", "CONFIG DIR", "MINTED", "EXPIRES~", "STATUS")
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+
+    def fmt(cols):
+        return "  ".join(
+            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
+        )
+
+    print(fmt(headers))
+    for row in rows:
+        print(fmt(row))
+    print()
+    print(f"Tokens can only be revoked at {TOKEN_REVOKE_URL} — match by the MINTED date.")
+
+
+def do_forget_token(config_dir: str | None) -> None:
+    """`forget-token` verb: delete the active config dir's token, locally.
+
+    "Forget", not "revoke": there is no revocation API (no CLI command, no OAuth
+    endpoint — see the README's token section), so all yolo can do is delete its
+    keychain copy and registry entry, then be honest that the token itself stays
+    valid server-side and that finding it on the claude.ai page may not even be
+    possible. Honours --config-dir / a config-file config-dir, so it targets the
+    same service name a launch would read.
+    """
+    service = _oauth_service(config_dir)
+    dir_label = config_dir or "~/.claude"
+    entry = _remove_token_entry(service)
+    deleted = _keychain_delete(service)
+    if not deleted and entry is None:
+        print(f"No token cached for {dir_label} (keychain service '{service}').")
+        return
+    minted = f" (minted {entry['minted']})" if entry and entry.get("minted") else ""
+    if deleted:
+        print(f"Forgotten: deleted the cached token for {dir_label}{minted} from the keychain.")
+    else:
+        print(f"Removed the stale registry entry for {dir_label}{minted}; not in the keychain.")
+    print("yolo will no longer use it.")
+    print(
+        f"\nNOTE: the token itself is still valid server-side until roughly a year\n"
+        f"after it was minted. Anthropic provides no API or CLI to revoke it — the\n"
+        f"only revocation path is manual, at {TOKEN_REVOKE_URL} —\n"
+        f"and in practice identifying one token there may be impossible (the list\n"
+        f"shows no usable metadata and accumulates entries from normal Claude Code\n"
+        f"usage; see claude-code issues #48373 and #59378). Revocation, when it\n"
+        f"works, may also lag by days (#43801). This is outside yolo's control."
+    )
+
+
 def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:
     """(worktree_path, main_root, slug) for an existing topic; doesn't create it."""
     common_git, main_root, slug = _repo_paths()
@@ -1383,6 +1678,16 @@ def main():
     if verb == "list":
         do_list(home, parsed.base)
         return
+    if verb == "tokens":
+        do_tokens()
+        return
+    # forget-token honours a config-file/--config-dir (the re-parse above already
+    # layered those in) but is dispatched *before* the config-dir-must-exist check
+    # below: forgetting a token for an already-deleted config dir must work, and
+    # _oauth_service only hashes the resolved path — it never touches the dir.
+    if verb == "forget-token":
+        do_forget_token(parsed.config_dir)
+        return
     if verb == "finish":
         do_finish(topic, home, force=parsed.force)
         return
@@ -1418,6 +1723,8 @@ def main():
     # setup-token is terminal: mint/cache the OAuth token and exit. Dispatched here
     # (after config load) so it honours a `.yolo.json`/--config-dir — the token is
     # cached under that config dir's service name, matching what a launch will read.
+    # It needs no consent prompt: running the verb is the consent (unlike the
+    # implicit mint on launch).
     if verb == "setup-token":
         generate_oauth_token(parsed.config_dir)
         return

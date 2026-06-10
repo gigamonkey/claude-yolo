@@ -3,6 +3,39 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.6.0 — 2026-06-10
+
+- **`oauth-token` is the new default auth mode** (**breaking-ish**): a plain
+  `yolo` now authenticates with the long-lived `claude setup-token` token
+  instead of mounting a snapshot of the rotating keychain credentials. The
+  keychain snapshot was an attractive nuisance — its single-use refresh token
+  means any session that refreshes (long-running, concurrent, or overlapping
+  host use) silently invalidates every other snapshot, including the host's
+  login. The setup-token is never rotated, so none of that applies. On your
+  next interactive launch yolo will explain and ask before minting the 1-year
+  token (browser OAuth flow; needs a Pro/Max/Team/Enterprise plan);
+  non-interactive launches with no cached token exit with guidance instead.
+  To keep the old behavior: `echo '{"auth": "keychain"}' > ~/.yolo.json`, or
+  per-project `yolo config --auth keychain`.
+- **Token registry**: tokens yolo mints are recorded (service name, config
+  dir, mint timestamp) in host-side `~/.claude-yolo/tokens.json`. The mint
+  timestamp matters: the claude.ai token list shows almost no per-token
+  metadata, so it's the only practical handle for identifying a token there.
+- **`yolo tokens`**: lists the minted tokens with config dir, mint date,
+  estimated expiry (mint + 1 year), and keychain status.
+- **`yolo forget-token`**: deletes the active config dir's token from the
+  keychain and the registry. Named *forget* deliberately — there is no
+  revocation API (no CLI command, no OAuth endpoint), so the token stays
+  valid server-side until it expires; the only revocation path is manual at
+  <https://claude.ai/settings/claude-code>, and the command says so.
+- **Expiry warning**: launches warn when the active token is within a week of
+  its estimated 1-year expiry (read from the keychain entry's modification
+  date, so it works for tokens minted before the registry existed), instead
+  of letting it silently start 401ing inside containers.
+- README: new "Tokens & revocation" section documenting the manual-only
+  revocation reality, with links to the relevant claude-code issues
+  (#34198, #48373, #59378, #43801).
+
 ## v0.5.0 — 2026-06-10
 
 - **Extra mounts**: new repeatable `--mount PATH[:ro|:rw]` flag (and `mounts`

@@ -15,16 +15,18 @@ that tooling is never needed to *run* the script, only to develop it (see
 **Development** below). Run it directly:
 
 ```bash
-./yolo.py                          # default ~/.claude credentials
+./yolo.py                          # default: long-lived OAuth token (consent-prompted mint on first run)
 ./yolo.py --config-dir ~/.claude-work          # alternate config dir
+./yolo.py --auth keychain          # mount a snapshot of the rotating keychain creds instead
 ./yolo.py --auth bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
 ./yolo.py --auth bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
-./yolo.py setup-token              # mint+cache a long-lived OAuth token (once)
-./yolo.py --auth oauth-token       # auth via that token, not keychain creds
+./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
+./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
+./yolo.py forget-token             # delete this config dir's token (local only)
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py                          # == `yolo start`: fresh session in the cwd
 ./yolo.py resume                   # continue most recent session in this dir
@@ -40,12 +42,12 @@ that tooling is never needed to *run* the script, only to develop it (see
 ```
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
-(`keychain` [default] / `oauth-token` / `bedrock`). Everything else —
+(`oauth-token` [default] / `keychain` / `bedrock`). Everything else —
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount` — is an **orthogonal
 flag** that composes freely with the chosen auth mode and with each other. The
 only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`) and its `TOPIC`;
-see [Workflow verbs](#workflow-verbs).
+(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`/`tokens`/
+`forget-token`) and its `TOPIC`; see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
 `~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
@@ -117,7 +119,8 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    keep it. (SSH-agent socket access is *not* what needs this; that's granted
    separately by group-0 membership — see the gotchas.)
 3. **Checks host login** (`ensure_logged_in` / `_is_logged_in`) before launch in
-   the keychain modes (skipped for Bedrock). Runs `claude auth status --json` and
+   keychain mode only (the default oauth-token mode and Bedrock skip it). Runs
+   `claude auth status --json` and
    reads the `loggedIn` field; if logged out, offers to run `claude auth login`
    then re-checks. Checks login *status*, not token expiry, on purpose: an expired
    accessToken is auto-refreshed at runtime via the stored refreshToken, so expiry
@@ -125,9 +128,11 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    `CLAUDE_CONFIG_DIR` so the check targets the right keychain entry. If host
    `claude` is missing/too old for `auth`, it returns True and defers to the
    empty-file check in `extract_credentials`.
-4. **Extracts credentials** (`extract_credentials`) from the macOS keychain via
-   the `security` CLI, into a chmod-600 temp file that gets bind-mounted to
-   `.credentials.json`. Service name is `Claude Code-credentials` by default,
+4. **Extracts credentials** (`extract_credentials`; keychain mode only) from the
+   macOS keychain via the `security` CLI, into a chmod-600 temp file that gets
+   bind-mounted to `.credentials.json`. In the default oauth-token mode this
+   step is replaced by forwarding `CLAUDE_CODE_OAUTH_TOKEN` (see the oauth-token
+   section). Service name is `Claude Code-credentials` by default,
    or `Claude Code-credentials-{hash8}` for a non-default config dir, where
    `hash8` is the first 8 hex chars of the SHA-256 of the resolved config path.
    This mirrors how Claude Code itself names keychain entries — if that scheme
@@ -140,7 +145,7 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
 
 The old single overloaded positional (config dir *or* AWS profile, decided by
 `is_dir()`) is gone. The **auth mechanism** is now a single mutually-exclusive
-choice — `--auth {keychain,oauth-token,bedrock}` (default `keychain`,
+choice — `--auth {keychain,oauth-token,bedrock}` (default `oauth-token`,
 `AUTH_CHOICES`) — so argparse's `choices` enforces the exclusivity structurally
 (no hand-written "these two can't combine" guard). The config axes compose freely
 on top of whichever auth is chosen:
@@ -183,13 +188,17 @@ on top of whichever auth is chosen:
 
 The three `--auth` values (the (c) block in `launch_container`):
 
-- **`keychain`** (default) → `ensure_logged_in` + `extract_credentials`, mounting
+- **`oauth-token`** (default) → authenticate with a long-lived
+  `CLAUDE_CODE_OAUTH_TOKEN` env var; **skips keychain extraction, the login check,
+  and the `.credentials.json` mount**, just adding `-e CLAUDE_CODE_OAUTH_TOKEN=…`.
+  It's the default because it's the only mode that's safe regardless of session
+  length or concurrency. See
+  [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token-the-default) below.
+- **`keychain`** → `ensure_logged_in` + `extract_credentials`, mounting
   the rotating keychain creds at `.credentials.json`. The only mode that runs the
-  login check.
-- **`oauth-token`** → authenticate with a long-lived `CLAUDE_CODE_OAUTH_TOKEN` env
-  var; **skips keychain extraction, the login check, and the `.credentials.json`
-  mount**, just adding `-e CLAUDE_CODE_OAUTH_TOKEN=…`. See
-  [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token) below.
+  login check. Unsafe for concurrent/overlapping sessions (see the oauth-token
+  section for why); kept for plans without `setup-token` and as an explicit
+  opt-in.
 - **`bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
   `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
   **skips keychain extraction and the login check**. Container name gets a
@@ -203,9 +212,9 @@ separate profile) works, which the old positional scheme could not express.
 Overriding a config file that sets `auth` is just an explicit `--auth keychain`
 (etc.) on the CLI.
 
-## Long-lived OAuth token (`--auth oauth-token`)
+## Long-lived OAuth token (`--auth oauth-token`, the default)
 
-The default keychain credentials are an OAuth pair whose **refresh token rotates
+The keychain credentials are an OAuth pair whose **refresh token rotates
 single-use on every refresh** — proven on 2026-06-08 (see `token-investigation.md`).
 yolo mounts a *snapshot* of that pair into each container, so the first party (a
 container *or* the host) to refresh silently invalidates every other snapshot's
@@ -222,7 +231,9 @@ number of concurrent containers — and the host on its own keychain creds — c
 it simultaneously with no interference. It's delivered purely as the
 `CLAUDE_CODE_OAUTH_TOKEN` env var, which in Claude Code's auth precedence
 out-ranks the file/keychain `/login` creds, so even a stale mounted
-`.credentials.json` can't shadow it.
+`.credentials.json` can't shadow it. This is why it became the default in 0.6.0:
+keychain mode was an attractive nuisance, fine in a quick test and broken once
+sessions got long, parallel, or overlapped host use.
 
 Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 
@@ -230,10 +241,15 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   wins (for CI / self-managed tokens; it's global by nature) → else the
   yolo-managed macOS keychain entry **for the active config dir** → else mint a
   fresh one interactively and cache it there. That last (auto-mint) step is
-  **gated on `sys.stdin.isatty()`**: a non-interactive `--auth oauth-token` launch
-  with no cached token (script/cron/no TTY) exits with guidance to run
-  `yolo setup-token` or set the env var, rather than hanging on a browser flow
-  nobody can drive.
+  **consent-prompted and gated on `sys.stdin.isatty()`**: interactively, yolo
+  explains what's about to be minted (1-year token, keychain storage,
+  `forget-token` / the claude.ai revoke page) and asks `Proceed? [Y/n]` before
+  running the flow — minting a year-long credential the user didn't explicitly
+  ask for was the original argument against making this mode the default, so it
+  is never done silently (`yolo setup-token` skips the prompt: running the verb
+  *is* the consent). A non-interactive launch with no cached token (script/cron/
+  no TTY) exits with guidance to run `yolo setup-token` or set the env var,
+  rather than hanging on a browser flow nobody can drive.
 - **Per-config-dir, like the keychain creds.** The token is cached under
   `claude-yolo-oauth-token` for the default config dir, or
   `claude-yolo-oauth-token-{hash8}` for an alternate `--config-dir`, where `hash8`
@@ -262,9 +278,56 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   rotation hazards of the mounted `.credentials.json` apply.
 - **Caveat:** this *does* put a bearer token inside the container env (a shift from
   the "secret never enters the container" SSH-agent philosophy), but it's a scoped,
-  inference-only, **individually revocable** token — and no worse than the current
-  mounted refresh-token snapshot, which it replaces. Requires a Pro/Max/Team/
-  Enterprise plan.
+  inference-only token — and no worse than the mounted refresh-token snapshot,
+  which it replaces. Requires a Pro/Max/Team/Enterprise plan.
+
+### Token bookkeeping: registry, expiry warning, `tokens` / `forget-token`
+
+Because revocation is effectively out of our hands (verified 2026-06-10: no CLI
+command, no documented OAuth revocation endpoint; the only path is manual at
+<https://claude.ai/settings/claude-code>, whose token list shows near-zero
+per-token metadata, accumulates entries from normal Claude Code usage, and has a
+reported multi-day revocation lag — claude-code issues #34198/#48373/#59378/
+#43801), yolo does its own bookkeeping:
+
+- **Registry** (`~/.claude-yolo/tokens.json`; `_read_tokens_file` /
+  `_write_token_entry` / `_remove_token_entry`): maps keychain **service name →
+  `{config_dir, minted}`**. Non-secret metadata, host-side only, never mounted
+  (same safety property as `projects.json`). Written by `_store_oauth_token`
+  (the single funnel both mint paths go through); a re-mint replaces the entry
+  and prints the *previous* mint timestamp, since the old token stays valid
+  server-side. It exists for what the keychain can't do: enumerate yolo's tokens
+  across config dirs, and map a service name back to its config dir (the hash8
+  is one-way — the mapping is recorded at mint time or lost). The **mint
+  timestamp is the practical point**: it's the only handle for identifying a
+  token on the claude.ai page.
+- **Expiry warning** (`_warn_token_expiry`, called from `ensure_oauth_token` on
+  the cached-keychain-token path; skipped for env-supplied tokens, whose age is
+  unknowable): warns at launch when the token is past or within
+  `TOKEN_EXPIRY_WARN_DAYS` (7) of `mdat + TOKEN_LIFETIME_DAYS` (365 — an
+  *assumption*; the token is opaque and states no expiry). The date source is
+  the **keychain item's own `mdat`** (`_keychain_mdat`: `security
+  find-generic-password` *without* `-w` — attributes only, no secret read —
+  regex-parsed, falling back to `cdat`), not the registry: we upsert with
+  `add-generic-password -U`, so mdat = last mint, which can't drift and covers
+  tokens minted before the registry existed. Parse trouble → `None` → silently
+  no warning (it's advisory).
+- **`yolo tokens`** (`do_tokens`, terminal verb, registry-only — needs no config
+  dir): table of SERVICE / CONFIG DIR / MINTED / EXPIRES~ / STATUS. STATUS
+  reconciles against the keychain via `_keychain_has` (attributes-only
+  existence check): `stale (not in keychain)` for a deleted item,
+  `re-minted outside yolo` when keychain mdat disagrees with the registry mint
+  by > 1 day, else `ok`. Footer points at the claude.ai page and the
+  match-by-MINTED trick.
+- **`yolo forget-token`** (`do_forget_token`, terminal verb): deletes the active
+  config dir's keychain entry (`_keychain_delete`) and registry row, then is
+  explicit that the token is only *forgotten*, not revoked — still valid
+  server-side, revocable only at the claude.ai page, and probably impossible to
+  identify there (reasons above, outside yolo's control). Named `forget-token`
+  deliberately: the verb must not claim a power it doesn't have. Honours
+  `--config-dir`/config-file `config-dir`, and is dispatched *before* the
+  config-dir-must-exist check so a token for an already-deleted config dir can
+  still be forgotten (`_oauth_service` only hashes the resolved path).
 
 ## Host-side config: `~/.yolo.json` + `~/.claude-yolo/projects.json`
 
@@ -340,7 +403,7 @@ worktree sessions share it; `_project_key`), else the cwd. Behavior à la
   per-key (other keys in the entry are left alone; re-running with one flag
   updates just that key). "Explicitly passed" is detected by a **sentinel
   re-parse** (`_explicit_config_flags`): a plain parse can't distinguish
-  "defaulted" from "explicitly set to the default", and `config --auth keychain`
+  "defaulted" from "explicitly set to the default", and `config --auth oauth-token`
   must persist. List-kind dests use a fresh marker list, since argparse's append
   action copies the default before appending (identity survives exactly when the
   flag never appeared). `--mount` values are validated (exist + is-dir) *before*
@@ -412,10 +475,12 @@ Implementation shape:
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first. The other
-  terminal verbs (`list`, `finish`, `setup-token`, and `shell`'s
-  exec-into-running case) then handle-and-return — `setup-token` sits after the
-  config-dir resolution specifically so it caches the token under the right
-  per-dir service name. Launch verbs (`start`, `resume`, `shell`-fresh, and a
+  terminal verbs (`list`, `tokens`, `forget-token`, `finish`, `setup-token`, and
+  `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
+  after the config-dir resolution specifically so it caches the token under the
+  right per-dir service name, while `forget-token` is dispatched *before* the
+  config-dir-must-exist check (forgetting a token for a deleted config dir must
+  work). Launch verbs (`start`, `resume`, `shell`-fresh, and a
   bare `yolo`) pass the guardrails (home refusal, `require-project-entry` — see
   the orthogonal-flags section), then call `launch_container`; extra mounts are
   resolved only on these paths, so a stale mount path can't break
@@ -571,12 +636,15 @@ from the path also pins the tests to the source file regardless of any installed
 `yolo`. They
 never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
-`git_identity_args`, and `os.execvp`, then asserts on the captured `docker run`
-argv. `test_config.py` covers config parsing/merging (`~/.yolo.json` +
-`projects.json`), mount-spec parsing, the stale-state warnings, and the
-`config` verb; `test_cli.py` covers verb dispatch and arg assembly across the
-credential/config axes, extra mounts, and the guardrails. `test_verbs.py`
-covers the worktree verbs against a
+`ensure_oauth_token`, `git_identity_args`, and `os.execvp`, then asserts on the
+captured `docker run` argv. `test_config.py` covers config parsing/merging
+(`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
+warnings, and the `config` verb; `test_cli.py` covers verb dispatch and arg
+assembly across the credential/config axes, extra mounts, and the guardrails.
+`test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
+`test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
+expiry warning, the implicit-mint consent prompt, and the `tokens` /
+`forget-token` verbs (the `security`-wrapping helpers stubbed).
 Keep them green when changing flags or mounts.
