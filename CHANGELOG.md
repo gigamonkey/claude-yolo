@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.5.0 — 2026-06-10
 
 - **Extra mounts**: new repeatable `--mount PATH[:ro|:rw]` flag (and `mounts`
   config key) bind-mounts additional host directories — reference docs, sibling
@@ -94,4 +94,4 @@ Initial packaged version (starting from Migurski's gist):
   (both later superseded); PEP 723 self-running script under uv; dev tooling
   (pytest suite, ruff).
 
-[Unreleased]: https://github.com/gigamonkey/claude-yolo/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/gigamonkey/claude-yolo/compare/v0.5.0...HEAD
