@@ -178,6 +178,65 @@ def test_generate_oauth_token_requires_a_tty(cy, monkeypatch):
     assert "interactive terminal" in str(exc.value)
 
 
+FULL_TOKEN = "sk-ant-oat01-" + "A" * 95  # realistic ~108-char setup-token output
+
+
+def test_scrape_token_extracts_from_noisy_output(cy):
+    raw = (
+        b"\x1b[1mClaude Code\x1b[0m\r\nYour token:\r\n\r\n"
+        + FULL_TOKEN.encode()
+        + b"\r\n\r\nStore it somewhere safe.\r\n"
+    )
+    assert cy._scrape_token(raw) == FULL_TOKEN
+
+
+def test_scrape_token_rejects_hard_wrapped_token(cy):
+    # Regression: with a narrow pty, `claude setup-token` hard-wraps the token at
+    # the terminal width; the scrape must fail (-> manual-paste fallback) rather
+    # than silently return the first line as a truncated token.
+    wrapped = FULL_TOKEN[:79].encode() + b"\r\n" + FULL_TOKEN[79:].encode()
+    raw = b"Your token:\r\n\r\n" + wrapped + b"\r\n\r\nDone.\r\n"
+    assert cy._scrape_token(raw) == ""
+
+
+def test_generate_oauth_token_widens_the_pty(cy, monkeypatch):
+    # The pty must be resized wide enough that the token never hard-wraps (the
+    # truncation bug behind the scrape guard above). Drive generate_oauth_token
+    # with a fake pty.spawn that feeds output through the real master/slave pair,
+    # then check the window size the child would have seen.
+    import fcntl
+    import os
+    import struct
+    import termios
+
+    stored = {}
+    seen = {}
+
+    def fake_spawn(argv, master_read):
+        assert argv == ["claude", "setup-token"]
+        master, slave = cy.pty.openpty()
+        try:
+            os.write(slave, b"Your token:\n" + FULL_TOKEN.encode() + b"\n")
+            master_read(master)
+            rows, cols, *_ = struct.unpack(
+                "HHHH", fcntl.ioctl(slave, termios.TIOCGWINSZ, b"\0" * 8)
+            )
+            seen["size"] = (rows, cols)
+        finally:
+            os.close(master)
+            os.close(slave)
+        return 0
+
+    monkeypatch.setattr(cy.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cy.shutil, "which", lambda cmd: "/usr/local/bin/claude")
+    monkeypatch.setattr(cy.pty, "spawn", fake_spawn)
+    monkeypatch.setattr(cy, "_store_oauth_token", lambda tok, cfg: stored.__setitem__("tok", tok))
+
+    assert cy.generate_oauth_token(None) == FULL_TOKEN
+    assert stored["tok"] == FULL_TOKEN
+    assert seen["size"][1] >= 200  # wide enough that a ~108-char token can't wrap
+
+
 def test_oauth_service_is_keyed_to_config_dir(cy, tmp_path):
     import hashlib
 

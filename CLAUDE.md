@@ -223,7 +223,13 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   matches what a launch will read. It runs `claude setup-token`
   under a **pty** so the child sees a real terminal (the browser/paste OAuth flow
   works) while yolo tees *and* captures the output, then scrapes the `sk-ant-…`
-  token out (ANSI-stripped, last match). If scraping fails (output shape changed),
+  token out (`_scrape_token`: ANSI-stripped, last match). The pty is resized
+  **wide (512 cols)** via `TIOCSWINSZ` on first read — `pty.spawn` leaves the
+  window 0×0, which `claude` treats as 80 columns and hard-wraps to, splitting
+  the ~108-char token across lines so the scrape silently cached a truncated
+  token that 401'd at runtime. As a backstop, a scraped match that ends at a
+  line break with the next line continuing in the token alphabet is treated as
+  wrapped and rejected. If scraping fails (wrap detected, output shape changed),
   it falls back to prompting for a manual paste. The token is upserted into the
   keychain with `security add-generic-password -U`.
 - **Storage rationale:** the keychain (not a dotfile) keeps the secret encrypted

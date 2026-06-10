@@ -5,6 +5,7 @@
 # ///
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -12,9 +13,11 @@ import pathlib
 import pty
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 
 DOCKER_IMAGE = "claude-yolo:latest"
 
@@ -183,6 +186,29 @@ def _looks_like_token(token: str) -> bool:
     return bool(token) and not any(c.isspace() for c in token) and len(token) >= 20
 
 
+def _scrape_token(raw: bytes) -> str:
+    """Extract the OAuth token from captured `claude setup-token` output, or ''.
+
+    ANSI-strips the capture and takes the last `sk-ant-…` match. Returns '' (a
+    failed scrape, triggering the manual-paste fallback) when the match looks
+    hard-wrapped: it runs right up to a line break and the next line continues in
+    the token alphabet. `claude` wraps its output to the pty width, so a
+    too-narrow pty splits the token across lines and the regex would otherwise
+    silently capture just the first piece — a truncated token that stores fine
+    but 401s at runtime. The wide TIOCSWINSZ window in `generate_oauth_token`
+    prevents the wrap; this check keeps a truncated token from ever being cached
+    if it recurs.
+    """
+    clean = _ANSI_RE.sub(b"", raw)
+    matches = list(_TOKEN_RE.finditer(clean))
+    if not matches:
+        return ""
+    last = matches[-1]
+    if re.match(rb"\r?\n[A-Za-z0-9_\-]", clean[last.end() :]):
+        return ""
+    return last.group().decode()
+
+
 def _oauth_service(config_dir: str | None) -> str:
     """Keychain service name for the yolo OAuth token, keyed to the config dir.
 
@@ -257,8 +283,19 @@ def generate_oauth_token(config_dir: str | None) -> str:
     print("Authorize in the browser when prompted.\n", flush=True)
 
     captured = bytearray()
+    resized = False
 
     def _read(fd):
+        # pty.spawn leaves the pty window size unset (0x0), which `claude`
+        # treats as 80 columns and hard-wraps to — splitting the token across
+        # lines, where the scrape would only catch the first piece. Make the
+        # pty wide enough that the token can never wrap. (Done here because
+        # pty.spawn only exposes the master fd via this callback; the token
+        # prints long after the first read, so the resize always lands first.)
+        nonlocal resized
+        if not resized:
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 512, 0, 0))
+            resized = True
         data = os.read(fd, 1024)
         captured.extend(data)
         return data
@@ -267,9 +304,7 @@ def generate_oauth_token(config_dir: str | None) -> str:
     if status != 0:
         print("\n`claude setup-token` did not exit cleanly.", file=sys.stderr)
 
-    clean = _ANSI_RE.sub(b"", bytes(captured))
-    matches = _TOKEN_RE.findall(clean)
-    token = matches[-1].decode() if matches else ""
+    token = _scrape_token(bytes(captured))
     if not token:
         # Couldn't auto-detect (unexpected output shape) — ask for a manual paste.
         token = input("\nCouldn't auto-detect the token. Paste it here: ").strip()
