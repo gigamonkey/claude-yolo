@@ -1,6 +1,6 @@
 [project]
 name = "claude-yolo"
-version = "0.3.1"
+version = "0.4.0"
 description = "Run Claude Code in an ephemeral Docker container (yolo mode)."
 requires-python = ">=3.10"
 dependencies = []
@@ -31,7 +31,7 @@ dev = [
 # the version here and in uv.lock, then commits and tags v{new_version}.
 # Requires a clean working tree (allow_dirty defaults to false).
 [tool.bumpversion]
-current_version = "0.3.1"
+current_version = "0.4.0"
 commit = true
 tag = true
 tag_name = "v{new_version}"
