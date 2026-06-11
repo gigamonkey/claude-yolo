@@ -3,6 +3,45 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.7.0 — 2026-06-11
+
+- **`--append-system-prompt`/`-p` renamed to `--prompt`/`-p`** (**breaking**),
+  with the config key `append-system-prompt` → `prompts`. This makes the prompt
+  family exactly parallel to the mount family (`--prompt` → `prompts` →
+  `--add-prompt`/`--remove-prompt`, like `--mount` → `mounts` →
+  `--add-mount`/`--remove-mount`). A config file still using the old key draws a
+  pointed rename error naming the one-call migration
+  (`yolo config --unset append-system-prompt --add-prompt …`); inside the
+  container the merged prompts still feed claude's own `--append-system-prompt`.
+- **`--ssh-agent` now defaults to off** (**breaking-ish**): forwarding the host
+  ssh-agent lets Claude authenticate as you to *any* host your keys allow, not
+  just GitHub — too much standing reach to grant a skip-permissions container by
+  default. Opt in per-project with `--ssh-agent` or `ssh-agent: true` in config.
+  When off (the default), the built-in system prompt tells Claude it can't
+  `git push`, as before. To restore the old behavior globally:
+  `yolo config --global --ssh-agent`.
+- **`yolo config` is now a flexible editor**, à la `git config`:
+  - **`--global`** shows or updates `~/.yolo.json` (the global layer) instead of
+    the project's `projects.json` entry.
+  - **`--unset KEY`** drops a key entirely so lower layers / built-in defaults
+    apply. Any *present* key can be unset — even one yolo no longer recognizes —
+    so a broken entry can be repaired without hand-editing the file.
+  - **`--add-mount`/`--remove-mount`** and **`--add-prompt`/`--remove-prompt`**
+    edit single elements of the list-valued keys, unlike `--mount`/`--prompt`,
+    which replace the whole list. `--remove-mount` matches by path and doesn't
+    require the directory to exist, so a stale mount is always removable.
+  - Contradictory instructions in one call (set + `--unset` of the same key,
+    `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`)
+    are errors, not silently ordered.
+
+## v0.6.1 — 2026-06-10
+
+- **`yolo config --init`**: register the current project in `projects.json` with
+  an *empty* entry — no overrides, just enough to satisfy `require-project-entry`
+  without pinning a config value you never chose. Errors if the project already
+  has an entry; warns when the new (most-specific) entry shadows an ancestor
+  entry's config.
+
 ## v0.6.0 — 2026-06-10
 
 - **`oauth-token` is the new default auth mode** (**breaking-ish**): a plain
@@ -127,4 +166,4 @@ Initial packaged version (starting from Migurski's gist):
   (both later superseded); PEP 723 self-running script under uv; dev tooling
   (pytest suite, ruff).
 
-[Unreleased]: https://github.com/gigamonkey/claude-yolo/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/gigamonkey/claude-yolo/compare/v0.7.0...HEAD
