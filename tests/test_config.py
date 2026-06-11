@@ -58,10 +58,10 @@ def test_parse_null_leaves_key_unset(cy, tmp_path):
 
 
 def test_parse_list_accepts_string_or_list(cy, tmp_path):
-    one = write(tmp_path / "a.json", {"append-system-prompt": "x"})
-    many = write(tmp_path / "b.json", {"append-system-prompt": ["x", "y"]})
-    assert cy._parse_yolo_file(one) == {"append_system_prompts": ["x"]}
-    assert cy._parse_yolo_file(many) == {"append_system_prompts": ["x", "y"]}
+    one = write(tmp_path / "a.json", {"prompts": "x"})
+    many = write(tmp_path / "b.json", {"prompts": ["x", "y"]})
+    assert cy._parse_yolo_file(one) == {"prompts": ["x"]}
+    assert cy._parse_yolo_file(many) == {"prompts": ["x", "y"]}
 
 
 def test_parse_mounts_accepts_string_or_list(cy, tmp_path):
@@ -82,7 +82,7 @@ def test_parse_accepts_require_project_entry(cy, tmp_path):
         {"ssh_agnet": True},  # typo / unknown key
         {"ssh-agent": "yes"},  # bool wants bool
         {"config-dir": 7},  # str wants str
-        {"append-system-prompt": [1]},  # list must be of strings
+        {"prompts": [1]},  # list must be of strings
         {"mounts": [1]},  # ditto
         {"worktree": "x"},  # action keys are not config keys
         {"dangerously-allow-home": True},  # deliberately CLI-only, never a config key
@@ -92,6 +92,13 @@ def test_parse_rejects_bad_input(cy, tmp_path, obj):
     p = write(tmp_path / ".yolo.json", obj)
     with pytest.raises(SystemExit):
         cy._parse_yolo_file(p)
+
+
+def test_parse_rejects_renamed_prompt_key_with_hint(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"append-system-prompt": ["x"]})
+    with pytest.raises(SystemExit) as exc:
+        cy._parse_yolo_file(p)
+    assert "renamed to 'prompts'" in str(exc.value)
 
 
 def test_parse_rejects_non_object_and_bad_json(cy, tmp_path):
@@ -117,7 +124,7 @@ def test_load_merges_home_and_project_entry(cy, tmp_path):
         {
             "ssh-agent": False,
             "auth": "bedrock",
-            "append-system-prompt": ["home"],
+            "prompts": ["home"],
             "mounts": ["/from-home"],
         },
     )
@@ -126,7 +133,7 @@ def test_load_merges_home_and_project_entry(cy, tmp_path):
         {
             str(proj): {
                 "ssh-agent": True,
-                "append-system-prompt": ["proj"],
+                "prompts": ["proj"],
                 "mounts": ["/from-proj"],
             }
         },
@@ -135,7 +142,7 @@ def test_load_merges_home_and_project_entry(cy, tmp_path):
     assert key == str(proj)
     assert merged["ssh_agent"] is True  # project entry overrides home
     assert merged["auth"] == "bedrock"  # only in home
-    assert merged["append_system_prompts"] == ["home", "proj"]  # concatenated
+    assert merged["prompts"] == ["home", "proj"]  # concatenated
     assert merged["mounts"] == ["/from-home", "/from-proj"]  # concatenated
 
 
@@ -333,7 +340,7 @@ def test_config_verb_persists_bools_lists_and_mounts(cy, run_cli, dirs, tmp_path
     assert read_projects(home) == {
         str(work): {
             "ssh-agent": False,
-            "append-system-prompt": ["EXTRA"],
+            "prompts": ["EXTRA"],
             "mounts": [f"{ref}:rw"],
         }
     }
@@ -435,6 +442,244 @@ def test_init_flag_requires_config_verb(cy, run_cli, dirs):
     with pytest.raises(SystemExit) as exc:
         run_cli(["start", "--init"], home=home, cwd=work)
     assert "--init only applies" in str(exc.value)
+
+
+# --- `config` list edits: --add-mount / --remove-mount / --add/--remove-prompt --
+
+
+def test_config_add_mount_appends_to_existing_list(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    write_projects(home, {str(work): {"mounts": ["/kept"], "auth": "bedrock"}})
+    run_cli(["config", "--add-mount", str(ref)], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"mounts": ["/kept", str(ref)], "auth": "bedrock"}}
+
+
+def test_config_add_mount_updates_mode_for_same_path(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    write_projects(home, {str(work): {"mounts": [str(ref), "/kept"]}})
+    run_cli(["config", "--add-mount", f"{ref}:rw"], home=home, cwd=work)
+    assert read_projects(home)[str(work)]["mounts"] == ["/kept", f"{ref}:rw"]
+
+
+def test_config_add_mount_validates_path(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["config", "--add-mount", str(work / "nope")], home=home, cwd=work)
+    assert not (home / ".claude-yolo" / "projects.json").exists()  # typo not pinned
+
+
+def test_config_remove_mount_removes_without_requiring_dir(cy, run_cli, dirs):
+    home, work = dirs
+    # /gone:rw doesn't exist on disk — removal must still work (that's the point)
+    write_projects(home, {str(work): {"mounts": ["/gone:rw", "/kept"]}})
+    run_cli(["config", "--remove-mount", "/gone"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}
+
+
+def test_config_remove_mount_drops_emptied_key(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"mounts": "/only", "auth": "bedrock"}})
+    run_cli(["config", "--remove-mount", "/only"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"auth": "bedrock"}}
+
+
+def test_config_remove_mount_errors_when_absent(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"mounts": ["/kept"]}})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--remove-mount", "/nope"], home=home, cwd=work)
+    assert "no such mount" in str(exc.value)
+    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}  # untouched
+
+
+def test_config_mount_conflicts_with_add_remove_mount(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--mount", str(ref), "--add-mount", str(ref)], home=home, cwd=work)
+    assert "don't combine" in str(exc.value)
+
+
+def test_config_add_and_remove_prompt(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"prompts": ["OLD", "KEPT"]}})
+    run_cli(
+        ["config", "--remove-prompt", "OLD", "--add-prompt", "NEW", "--add-prompt", "KEPT"],
+        home=home,
+        cwd=work,
+    )
+    # OLD removed, NEW appended, KEPT not duplicated
+    assert read_projects(home) == {str(work): {"prompts": ["KEPT", "NEW"]}}
+
+
+def test_config_remove_prompt_errors_when_absent(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"prompts": ["KEPT"]}})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--remove-prompt", "NOPE"], home=home, cwd=work)
+    assert "no such prompt" in str(exc.value)
+
+
+# --- `config --unset` ---------------------------------------------------------
+
+
+def test_config_unset_removes_key(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"auth": "bedrock", "mounts": ["/kept"]}})
+    run_cli(["config", "--unset", "auth"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}
+
+
+def test_config_unset_accepts_either_spelling(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"aws-profile": "prod"}})
+    run_cli(["config", "--unset", "aws_profile"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {}}
+
+
+def test_config_unset_errors_when_not_set(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"auth": "bedrock"}})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--unset", "mounts"], home=home, cwd=work)
+    assert "not set" in str(exc.value)
+
+
+def test_config_unset_conflicts_with_setting_same_key(cy, run_cli, dirs):
+    home, work = dirs
+    write_projects(home, {str(work): {"auth": "bedrock"}})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--unset", "auth", "--auth", "keychain"], home=home, cwd=work)
+    assert "set and --unset" in str(exc.value)
+
+
+def test_config_unset_repairs_unknown_key(cy, run_cli, dirs):
+    home, work = dirs
+    # an unknown key makes every launch fail; --unset must be able to remove it
+    write_projects(home, {str(work): {"bogus-key": 1, "auth": "bedrock"}})
+    run_cli(["config", "--unset", "bogus-key"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"auth": "bedrock"}}
+
+
+def test_config_migrates_renamed_prompt_key(cy, run_cli, dirs):
+    home, work = dirs
+    # the migration the rename error suggests: unset the pre-0.7 key in the same
+    # call that re-adds its value under `prompts`
+    write_projects(home, {str(work): {"append-system-prompt": ["OLD"]}})
+    run_cli(
+        ["config", "--unset", "append-system-prompt", "--add-prompt", "OLD"],
+        home=home,
+        cwd=work,
+    )
+    assert read_projects(home) == {str(work): {"prompts": ["OLD"]}}
+
+
+# --- `config --global` (~/.yolo.json) ------------------------------------------
+
+
+def test_config_global_sets_keys_in_home_yolo_json(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"ssh-agent": False}))
+    run_cli(["config", "--global", "--auth", "bedrock"], home=home, cwd=work)
+    assert json.loads((home / ".yolo.json").read_text()) == {
+        "ssh-agent": False,
+        "auth": "bedrock",
+    }
+    assert not (home / ".claude-yolo" / "projects.json").exists()  # project layer untouched
+
+
+def test_config_global_creates_missing_file(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--global", "--no-ssh-agent"], home=home, cwd=work)
+    assert json.loads((home / ".yolo.json").read_text()) == {"ssh-agent": False}
+
+
+def test_config_global_list_edits_and_unset(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (home / ".yolo.json").write_text(
+        json.dumps({"auth": "bedrock", "mounts": ["/gone"], "prompts": "P"})
+    )
+    run_cli(
+        [
+            "config",
+            "--global",
+            "--unset",
+            "auth",
+            "--remove-mount",
+            "/gone",
+            "--add-mount",
+            str(ref),
+            "--add-prompt",
+            "Q",
+        ],
+        home=home,
+        cwd=work,
+    )
+    assert json.loads((home / ".yolo.json").read_text()) == {
+        "mounts": [str(ref)],
+        "prompts": ["P", "Q"],
+    }
+
+
+def test_config_global_bare_is_read_only_show(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    argv = run_cli(["config", "--global"], home=home, cwd=work)
+    assert argv is None
+    assert "no global config" in capsys.readouterr().out
+    assert not (home / ".yolo.json").exists()
+
+    (home / ".yolo.json").write_text(json.dumps({"auth": "bedrock"}))
+    run_cli(["config", "--global"], home=home, cwd=work)
+    out = capsys.readouterr().out
+    assert ".yolo.json" in out and "bedrock" in out
+
+
+def test_config_global_rejects_malformed_file(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text("not json")
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--global", "--auth", "bedrock"], home=home, cwd=work)
+    assert "cannot read" in str(exc.value)
+    assert (home / ".yolo.json").read_text() == "not json"  # never clobbered
+
+
+def test_config_init_rejects_global(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--init", "--global"], home=home, cwd=work)
+    assert "--global" in str(exc.value)
+
+
+def test_config_init_rejects_list_edits(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--init", "--add-prompt", "P"], home=home, cwd=work)
+    assert "no overrides" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["start", "--global"],
+        ["start", "--unset", "auth"],
+        ["start", "--add-mount", "/x"],
+        ["start", "--remove-mount", "/x"],
+        ["start", "--add-prompt", "P"],
+        ["start", "--remove-prompt", "P"],
+    ],
+)
+def test_config_only_flags_require_config_verb(cy, run_cli, dirs, argv):
+    home, work = dirs
+    with pytest.raises(SystemExit) as exc:
+        run_cli(argv, home=home, cwd=work)
+    assert "only applies to `config`" in str(exc.value)
 
 
 @pytest.fixture

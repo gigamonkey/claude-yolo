@@ -649,14 +649,14 @@ YOLO_KEYS = {
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
     "base": ("base", "str"),
-    "append_system_prompt": ("append_system_prompts", "list"),
+    "prompts": ("prompts", "list"),
     "mounts": ("mounts", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
 }
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("append_system_prompts", "mounts")
+_CONCAT_DESTS = ("prompts", "mounts")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -670,6 +670,12 @@ def _parse_yolo_dict(raw: dict, source: str) -> dict:
     out = {}
     for key, val in raw.items():
         norm = key.replace("-", "_")
+        if norm == "append_system_prompt":  # the key's pre-0.7 name
+            sys.exit(
+                f"{source}: {key!r} was renamed to 'prompts'; "
+                "rename it (same value), e.g. via `yolo config --unset "
+                f"{key} --add-prompt ...`."
+            )
         if norm not in YOLO_KEYS:
             sys.exit(f"{source}: unknown config option {key!r}")
         dest, kind = YOLO_KEYS[norm]
@@ -688,7 +694,7 @@ def _parse_yolo_dict(raw: dict, source: str) -> dict:
             if not isinstance(val, str):
                 sys.exit(f"{source}: {key!r} must be a string")
             out[dest] = os.path.expanduser(val) if kind == "path" else val
-        else:  # "list" (append_system_prompts, mounts): a string or list of strings
+        else:  # "list" (prompts, mounts): a string or list of strings
             if isinstance(val, str):
                 val = [val]
             if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
@@ -768,7 +774,7 @@ def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> tuple[dict, str
 
     Returns (merged_defaults, matched_project_key). Precedence low->high:
     ~/.yolo.json < projects.json entry < CLI args (the caller applies the dict via
-    PARSER.set_defaults, so explicit flags still win). append_system_prompts and
+    PARSER.set_defaults, so explicit flags still win). prompts and
     mounts concatenate across the layers; every other key is overridden by the
     higher layer. Both files are host-side only — outside every container mount —
     so nothing Claude writes inside a container can change what the next launch
@@ -889,17 +895,128 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     return out
 
 
-def do_config(
-    script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, *, init: bool = False
-) -> None:
-    """`config` verb: show or update this project's ~/.claude-yolo/projects.json entry.
+def _spec_path(spec: str) -> pathlib.Path:
+    """The (expanded, resolved) directory a PATH[:ro|:rw] mount spec names.
 
-    With config flags, persists exactly the explicitly-passed YOLO_KEYS flags into
-    the entry for this project, per-key (other keys are left alone) — `yolo config`
-    is the *only* writer of the project layer; a plain launch never touches the
-    file, so it stays a deliberate, auditable ledger of per-project grants. With
-    no flags, prints the entry that currently applies (read-only), a la
-    `git config --list`. Mount paths are validated here so a typo can't be pinned.
+    Unlike _parse_mount_spec this never requires the directory to exist — it's
+    used to *match* stored specs, including for --remove-mount, whose whole point
+    may be deleting a mount whose directory is gone.
+    """
+    if spec.endswith((":ro", ":rw")):
+        spec = spec[:-3]
+    return pathlib.Path(os.path.expanduser(spec)).resolve()
+
+
+def _take_list_key(entry: dict, key: str, where: str) -> list[str]:
+    """Pop `key` (in either dash/underscore spelling) out of `entry`, as a list.
+
+    Config list keys accept a bare string or a list of strings; normalize to a
+    list so the --add-*/--remove-* edits have one shape to work on. Any other
+    type would fail validation at load time — fail here with the same message,
+    before the edit code touches the value.
+    """
+    norm = key.replace("-", "_")
+    vals: list[str] = []
+    for ek in [k for k in entry if k.replace("-", "_") == norm]:
+        v = entry.pop(ek)
+        if isinstance(v, str):
+            v = [v]
+        if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            sys.exit(f"{where}: {key!r} must be a string or list of strings")
+        vals.extend(v)
+    return vals
+
+
+def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> dict:
+    """One updated config object: whole-key sets, then --unset, then list edits.
+
+    Shared by the project-entry and --global paths of `do_config`; `where` names
+    the target in error messages. Conflicting instructions for the same key in
+    one invocation (set + unset, --mount alongside --add/--remove-mount, -p
+    alongside --add/--remove-prompt) are errors, not silently ordered.
+    """
+    if "mounts" in explicit and (parsed.add_mounts or parsed.remove_mounts):
+        sys.exit(
+            "--mount replaces the whole `mounts` list; "
+            "don't combine it with --add-mount/--remove-mount."
+        )
+    if "prompts" in explicit and (parsed.add_prompts or parsed.remove_prompts):
+        sys.exit(
+            "--prompt/-p replaces the whole list; "
+            "don't combine it with --add-prompt/--remove-prompt."
+        )
+    unsets = [u.replace("_", "-") for u in parsed.unsets]
+    for u in unsets:
+        if u in explicit:
+            sys.exit(f"can't both set and --unset {u!r}.")
+    if "mounts" in unsets and (parsed.add_mounts or parsed.remove_mounts):
+        sys.exit("can't combine --unset mounts with --add-mount/--remove-mount.")
+    if "prompts" in unsets and (parsed.add_prompts or parsed.remove_prompts):
+        sys.exit("can't combine --unset prompts with --add-prompt/--remove-prompt.")
+
+    for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
+        _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
+
+    entry = dict(current)
+    for k, v in explicit.items():
+        norm = k.replace("-", "_")
+        for stale in [ek for ek in entry if ek.replace("-", "_") == norm and ek != k]:
+            del entry[stale]  # the same key in its other (underscored) spelling
+        entry[k] = v
+
+    for u in unsets:
+        norm = u.replace("-", "_")
+        present = [ek for ek in entry if ek.replace("-", "_") == norm]
+        if not present:
+            sys.exit(f"--unset {u}: not set in {where}.")
+        # Any *present* key may be unset — even one YOLO_KEYS doesn't know — so a
+        # stale/unknown key that breaks loading can be repaired from here.
+        for ek in present:
+            del entry[ek]
+
+    if parsed.add_mounts or parsed.remove_mounts:
+        mounts = _take_list_key(entry, "mounts", where)
+        for rm in parsed.remove_mounts:
+            kept = [s for s in mounts if _spec_path(s) != _spec_path(rm)]
+            if len(kept) == len(mounts):
+                sys.exit(f"--remove-mount {rm}: no such mount in {where}.")
+            mounts = kept
+        for add in parsed.add_mounts:
+            # Same path already listed -> replace it (so :ro/:rw can be flipped).
+            mounts = [s for s in mounts if _spec_path(s) != _spec_path(add)]
+            mounts.append(add)
+        if mounts:  # an emptied list is dropped: for a concat key, [] ≡ absent
+            entry["mounts"] = mounts
+
+    if parsed.add_prompts or parsed.remove_prompts:
+        prompts = _take_list_key(entry, "prompts", where)
+        for rm in parsed.remove_prompts:
+            if rm not in prompts:
+                sys.exit(f"--remove-prompt {rm!r}: no such prompt in {where}.")
+            prompts.remove(rm)
+        for add in parsed.add_prompts:
+            if add not in prompts:  # exact dup -> no-op, so re-runs are idempotent
+                prompts.append(add)
+        if prompts:
+            entry["prompts"] = prompts
+
+    return entry
+
+
+def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, parsed) -> None:
+    """`config` verb: show or update yolo's host-side config, then exit.
+
+    Operates on this project's ~/.claude-yolo/projects.json entry, or — with
+    --global — on ~/.yolo.json itself (a la `git config --global`). With config
+    flags, persists exactly the explicitly-passed YOLO_KEYS flags into the
+    target, per-key (other keys are left alone) — `yolo config` is the *only*
+    writer of the project layer; a plain launch never touches the file, so it
+    stays a deliberate, auditable ledger of per-project grants. On top of
+    whole-key sets, --add-mount/--remove-mount and --add-prompt/--remove-prompt
+    edit single elements of the list-valued keys, and --unset KEY deletes a key
+    entirely (see _apply_config_edits). With no flags, prints the target that
+    currently applies (read-only), a la `git config --list`. Mount paths are
+    validated on set/add so a typo can't be pinned.
 
     `--init` registers the project with an *empty* entry — no overrides, just
     "yolo knows about this project". That's all `require-project-entry` needs,
@@ -908,16 +1025,25 @@ def do_config(
     an explicit flag is the only way to create an empty entry.
     """
     projects_file = home / ".claude-yolo" / "projects.json"
-    projects = _read_projects_file(projects_file)
-    key = _project_key(cwd)
     explicit = _explicit_config_flags(script_argv)
+    editing = bool(
+        parsed.add_mounts
+        or parsed.remove_mounts
+        or parsed.add_prompts
+        or parsed.remove_prompts
+        or parsed.unsets
+    )
 
-    if init:
-        if explicit:
+    if parsed.init:
+        if explicit or editing:
             sys.exit(
                 "--init registers the project with no overrides; to set config "
                 "values, use `yolo config` with just those flags."
             )
+        if parsed.cfg_global:
+            sys.exit("--init registers a project entry; it can't combine with --global.")
+        projects = _read_projects_file(projects_file)
+        key = _project_key(cwd)
         if key in projects:
             sys.exit(f"{key} already has a projects.json entry; `yolo config` shows it.")
         matched_key, _ = _match_project_entry(projects, cwd)
@@ -935,7 +1061,35 @@ def do_config(
         print(f"Registered {key} in {projects_file} (no overrides).")
         return
 
-    if not explicit:
+    if parsed.cfg_global:
+        # Target the flat ~/.yolo.json. Read it raw (not via _parse_yolo_file,
+        # which transforms values): this is read-modify-write, and a file that
+        # fails validation must still be repairable here via --unset.
+        global_file = home / ".yolo.json"
+        where = str(global_file)
+        current = {}
+        if global_file.is_file():
+            try:
+                current = json.loads(global_file.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                sys.exit(f"{global_file}: cannot read config: {e}")
+            if not isinstance(current, dict):
+                sys.exit(f"{global_file}: must contain a JSON object")
+        if not explicit and not editing:
+            print(f"global config file: {global_file}")
+            print(json.dumps(current, indent=2) if global_file.is_file() else "no global config")
+            return
+        updated = _apply_config_edits(current, explicit, parsed, where)
+        _parse_yolo_dict(updated, where)  # never write an unloadable config
+        global_file.write_text(json.dumps(updated, indent=2) + "\n")
+        print(f"Updated {global_file}:")
+        print(json.dumps(updated, indent=2))
+        return
+
+    projects = _read_projects_file(projects_file)
+    key = _project_key(cwd)
+
+    if not explicit and not editing:
         matched_key, entry = _match_project_entry(projects, cwd)
         print(f"projects file: {projects_file}")
         if matched_key is None:
@@ -945,16 +1099,9 @@ def do_config(
         _warn_dangling_keys(projects, no_entry=matched_key is None)
         return
 
-    for spec in explicit.get("mounts", []):
-        _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
-
-    entry = dict(projects.get(key, {}))
-    for k, v in explicit.items():
-        norm = k.replace("-", "_")
-        for stale in [ek for ek in entry if ek.replace("-", "_") == norm and ek != k]:
-            del entry[stale]  # the same key in its other (underscored) spelling
-        entry[k] = v
-    _parse_yolo_dict(entry, f"{projects_file} [{key}]")  # never write an unloadable entry
+    where = f"{projects_file} [{key}]"
+    entry = _apply_config_edits(dict(projects.get(key, {})), explicit, parsed, where)
+    _parse_yolo_dict(entry, where)  # never write an unloadable entry
     projects[key] = entry
     projects_file.parent.mkdir(parents=True, exist_ok=True)
     projects_file.write_text(json.dumps(projects, indent=2) + "\n")
@@ -1020,8 +1167,10 @@ PARSER.add_argument(
     "require it); with no TOPIC they act on the current directory (start a fresh "
     "session, resume the most recent one, or open a shell). 'finish' removes a "
     "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'config' "
-    "shows this project's ~/.claude-yolo/projects.json entry, or — given config "
-    "flags — persists exactly those flags into it; 'setup-token' mints/caches a "
+    "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
+    "with --global), or — given config flags — persists exactly those flags into "
+    "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
+    "--remove-prompt); 'setup-token' mints/caches a "
     "long-lived OAuth token (for --auth oauth-token); 'tokens' lists the tokens "
     "yolo has minted; 'forget-token' deletes the active config dir's token from "
     "the keychain (local only — see `tokens` output for revocation). A bare "
@@ -1051,6 +1200,62 @@ PARSER.add_argument(
     help="For `config`: register this project in projects.json with an empty entry "
     "(no overrides) — enough to satisfy require-project-entry. Errors if the "
     "project already has its own entry.",
+)
+PARSER.add_argument(
+    "--global",
+    dest="cfg_global",
+    action="store_true",
+    help="For `config`: show or update the global ~/.yolo.json instead of this "
+    "project's projects.json entry (a la `git config --global`).",
+)
+PARSER.add_argument(
+    "--unset",
+    dest="unsets",
+    action="append",
+    default=[],
+    metavar="KEY",
+    help="For `config`: delete KEY (e.g. `auth`, `mounts`) from the entry entirely, "
+    "so it falls back to the lower config layers / built-in default. Errors if the "
+    "key isn't set. Repeatable.",
+)
+PARSER.add_argument(
+    "--add-mount",
+    dest="add_mounts",
+    action="append",
+    default=[],
+    metavar="PATH[:ro|:rw]",
+    help="For `config`: add one directory to the stored `mounts` list (or update "
+    "its :ro/:rw mode if the path is already listed), leaving the rest of the "
+    "list alone — unlike --mount, which replaces the whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-mount",
+    dest="remove_mounts",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="For `config`: remove PATH's entry from the stored `mounts` list (any "
+    ":ro/:rw suffix is ignored; the directory needn't exist, so a stale mount "
+    "can be removed). Errors if the path isn't listed. Repeatable.",
+)
+PARSER.add_argument(
+    "--add-prompt",
+    dest="add_prompts",
+    action="append",
+    default=[],
+    metavar="PROMPT",
+    help="For `config`: add one prompt to the stored `prompts` list (no-op if "
+    "already present), leaving the rest alone — unlike --prompt, which replaces "
+    "the whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-prompt",
+    dest="remove_prompts",
+    action="append",
+    default=[],
+    metavar="PROMPT",
+    help="For `config`: remove an exact prompt string from the stored `prompts` "
+    "list. Errors if not present. Repeatable.",
 )
 PARSER.add_argument(
     "--force",
@@ -1147,13 +1352,16 @@ PARSER.add_argument(
     "a config file.",
 )
 PARSER.add_argument(
-    "--append-system-prompt",
+    "--prompt",
     "-p",
-    dest="append_system_prompts",
+    dest="prompts",
     action="append",
     default=[],
     metavar="PROMPT",
-    help="Extra --append-system-prompt value passed to claude inside the container repeatable in addition to one about the container itself",
+    help="Extra system-prompt text passed to claude inside the container (via its "
+    "--append-system-prompt), on top of a built-in prompt about the container "
+    "itself. Repeatable; also settable as `prompts` in config, where the lists "
+    "concatenate across the layers and the CLI.",
 )
 # Resume a prior session. Session history lives in the bind-mounted ~/.claude/projects/
 # and is keyed by the project path, which matches between host and container (cwd is mounted
@@ -1205,7 +1413,7 @@ def running_container_for(
 
 
 def build_claude_args(
-    append_system_prompts: list,
+    prompts: list,
     *,
     ssh_agent: bool = True,
     continue_session: bool = False,
@@ -1229,7 +1437,7 @@ def build_claude_args(
             if not ssh_agent
             else []
         ),
-        *append_system_prompts,
+        *prompts,
     ]
     args = [
         # The container is the sandbox, so disable Claude's in-process OS sandbox.
@@ -1711,11 +1919,20 @@ def main():
         sys.exit("--new can't be combined with --resume/-r.")
     if parsed.force and verb != "finish":
         sys.exit("--force only applies to `finish`.")
-    if parsed.init and verb != "config":
-        sys.exit("--init only applies to `config`.")
+    for flag, val in (
+        ("--init", parsed.init),
+        ("--global", parsed.cfg_global),
+        ("--unset", parsed.unsets),
+        ("--add-mount", parsed.add_mounts),
+        ("--remove-mount", parsed.remove_mounts),
+        ("--add-prompt", parsed.add_prompts),
+        ("--remove-prompt", parsed.remove_prompts),
+    ):
+        if val and verb != "config":
+            sys.exit(f"{flag} only applies to `config`.")
 
     if verb == "config":
-        do_config(script_argv, home, cwd, init=parsed.init)
+        do_config(script_argv, home, cwd, parsed)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags
@@ -1846,14 +2063,14 @@ def main():
         entrypoint = "/bin/bash"
     elif verb == "resume" and parsed.resume is not None:
         command = build_claude_args(
-            parsed.append_system_prompts,
+            parsed.prompts,
             ssh_agent=parsed.ssh_agent,
             resume=parsed.resume,
             add_dirs=mount_dirs,
         )
     elif verb == "resume" and not parsed.new:
         command = build_claude_args(
-            parsed.append_system_prompts,
+            parsed.prompts,
             ssh_agent=parsed.ssh_agent,
             continue_session=True,
             add_dirs=mount_dirs,
@@ -1861,7 +2078,7 @@ def main():
     else:
         # start, or `resume TOPIC --new` (a fresh named session in the worktree).
         command = build_claude_args(
-            parsed.append_system_prompts,
+            parsed.prompts,
             ssh_agent=parsed.ssh_agent,
             name=session_name,
             add_dirs=mount_dirs,

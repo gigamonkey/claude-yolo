@@ -338,12 +338,13 @@ default so you don't re-type it. Configuration comes from three places, lowest
 to highest precedence:
 
 1. **`~/.yolo.json`** — global defaults, a JSON object whose keys mirror the
-   flag names (dashes or underscores both work):
+   flag names (dashes or underscores both work). Edit it by hand or with
+   `yolo config --global`:
 
    ```json
    {
      "ssh-agent": false,
-     "append-system-prompt": ["Prefer the standard library."]
+     "prompts": ["Prefer the standard library."]
    }
    ```
 
@@ -355,8 +356,8 @@ to highest precedence:
 
 3. **CLI flags** — always win over both files.
 
-Per key, a higher layer overrides a lower one, except `append-system-prompt`
-and `mounts`, whose lists *accumulate* across all the layers. A JSON `null`
+Per key, a higher layer overrides a lower one, except `prompts` and
+`mounts`, whose lists *accumulate* across all the layers. A JSON `null`
 leaves a key at its built-in default.
 
 Both files live **outside directories a session in a container can write**, and
@@ -429,7 +430,7 @@ The git ref worktree branches are created from (`yolo start TOPIC`) and judged
 your worktrees should branch from the remote rather than whatever the main
 checkout is on.
 
-### `append-system-prompt` (`--append-system-prompt` / `-p`, repeatable)
+### `prompts` (`--prompt` / `-p`, repeatable)
 
 Extra instructions tacked onto Claude's system prompt, on top of a built-in one
 telling Claude it's in an ephemeral Ubuntu container. In config, a string or
@@ -477,8 +478,8 @@ A few flags are deliberately *not* config keys:
 
 ### The `config` verb
 
-`yolo config` manages the per-project layer (`projects.json`), à la `git
-config`. Run it from inside the project *with the flags you want to pin*:
+`yolo config` manages the stored config layers, à la `git config`. Run it from
+inside the project *with the flags you want to pin*:
 
 ```bash
 yolo config --config-dir ~/.claude-work --mount ~/refdocs
@@ -492,6 +493,34 @@ that currently applies (and the path of `projects.json`) without writing
 anything. `yolo config` is the only thing that writes `projects.json` — a plain
 launch never does — so the file stays a deliberate, auditable record of
 per-project grants.
+
+With **`--global`**, the same invocations read and write `~/.yolo.json` — the
+global layer — instead of the project entry (you can also just edit that file;
+it's plain JSON):
+
+```bash
+yolo config --global --no-ssh-agent   # set a global default
+yolo config --global                  # show the global config (read-only)
+```
+
+A few editing flags go beyond whole-key sets:
+
+- **`--unset KEY`** (repeatable) deletes a key from the entry entirely, so it
+  falls back to the lower layers / built-in default — handy because a flag like
+  `--ssh-agent` can only set the key true or false, not remove it. Any key
+  actually present can be unset, even one yolo no longer recognizes, so a
+  broken entry can be repaired without hand-editing the file.
+- **`--add-mount PATH[:ro|:rw]` / `--remove-mount PATH`** (repeatable) edit
+  single elements of the stored `mounts` list. `--mount` replaces the whole
+  list; these leave the rest alone. `--add-mount` validates the directory
+  (and updates the `:ro`/`:rw` mode if the path is already listed);
+  `--remove-mount` matches by path, ignoring any mode suffix, and doesn't
+  require the directory to exist — so a stale mount can always be removed.
+- **`--add-prompt PROMPT` / `--remove-prompt PROMPT`** (repeatable) do the same
+  for the `prompts` list (removal is by exact string match).
+
+Contradictory instructions in one call — setting and `--unset`ting the same
+key, or `--mount` alongside `--add-mount`/`--remove-mount` — are errors.
 
 To register a project that needs no customization if you are using
 `require-project-entry: true` use:
@@ -645,7 +674,7 @@ Finally it `os.execvp`s into `docker run -it --rm`, replacing itself with the
 interactive container. The container's entrypoint is
 `claude --dangerously-skip-permissions`, plus a built-in system prompt telling
 Claude it's running in an ephemeral Ubuntu container (and any
-`--append-system-prompt` additions you configured). When you exit, `--rm`
+`--prompt` additions you configured). When you exit, `--rm`
 cleans up the container.
 
 The full `docker run` command is printed (between two dashed lines) before

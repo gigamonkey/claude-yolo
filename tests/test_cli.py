@@ -303,8 +303,8 @@ def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsy
 
 def test_append_prompt_concatenates_builtin_entry_and_cli(cy, run_cli, dirs):
     home, work = dirs
-    (home / ".yolo.json").write_text(json.dumps({"append-system-prompt": ["FROM_HOME"]}))
-    write_projects(home, {str(work): {"append-system-prompt": ["FROM_PROJECT"]}})
+    (home / ".yolo.json").write_text(json.dumps({"prompts": ["FROM_HOME"]}))
+    write_projects(home, {str(work): {"prompts": ["FROM_PROJECT"]}})
     argv = run_cli(["-p", "FROM_CLI"], home=home, cwd=work)
     cargs = claude_args(cy, argv)
     joined = cargs[cargs.index("--append-system-prompt") + 1]

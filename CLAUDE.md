@@ -55,12 +55,15 @@ written with the `config` verb (see the config section below; an in-directory
 `.yolo.json` is deliberately **no longer read**):
 
 ```bash
-echo '{"ssh-agent": false}' > ~/.yolo.json   # global defaults
+./yolo.py config --global --no-ssh-agent     # set a global default in ~/.yolo.json
 ./yolo.py config --config-dir ~/.claude-work --mount ~/refdocs
                           # persist those flags as THIS project's entry
 ./yolo.py                 # picks up both layers; equals passing those flags
 ./yolo.py --ssh-agent     # explicit flag still overrides the files
 ./yolo.py config          # show the entry that currently applies (read-only)
+./yolo.py config --add-mount ~/other:rw      # edit the mounts list element-wise
+./yolo.py config --remove-mount ~/refdocs    #   (vs --mount, which replaces it)
+./yolo.py config --unset config-dir          # drop a key -> lower layers apply
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
@@ -367,7 +370,7 @@ draws a **warning on every run** (never an error — the file is inert) naming t
 migration path; `~/.yolo.json` itself is exempt from the walk.
 
 Precedence overall: `~/.yolo.json` < `projects.json` entry < CLI flags. Per key
-the higher layer **overrides**, except `append-system-prompt` and `mounts`
+the higher layer **overrides**, except `prompts` and `mounts`
 (`_CONCAT_DESTS`), which **concatenate** across the layers and then the CLI
 values (prompts and mounts accumulate; everything else replaces).
 
@@ -375,7 +378,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `auth` (one of `keychain`/`oauth-token`/`bedrock` — validated against
 `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults` bypasses argparse's
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
-`ssh-agent`, `base`, `append-system-prompt` (string or list of strings),
+`ssh-agent`, `base`, `prompts` (string or list of strings; the pre-0.7 name
+`append-system-prompt` draws a pointed rename error),
 `mounts` (string or list, `PATH[:ro|:rw]`), `require-project-entry`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
@@ -403,10 +407,10 @@ directory configures nothing and writes nothing. The hard-mode version is the
 ### `config` verb
 
 `yolo.py config [CONFIG FLAGS]` (`do_config`) shows or updates this project's
-`projects.json` entry, then exits — it does **not** run a container. The entry
-key is the **main repo root** when inside a git repo (so subdirectory runs and
-worktree sessions share it; `_project_key`), else the cwd. Behavior à la
-`git config`:
+`projects.json` entry — or, with **`--global`**, `~/.yolo.json` itself — then
+exits; it does **not** run a container. The entry key is the **main repo root**
+when inside a git repo (so subdirectory runs and worktree sessions share it;
+`_project_key`), else the cwd. Behavior à la `git config`:
 
 - **With config flags** — `yolo config --auth bedrock --mount ~/refdocs` —
   persists **exactly the explicitly-passed `YOLO_KEYS` flags** into the entry,
@@ -423,18 +427,42 @@ worktree sessions share it; `_project_key`), else the cwd. Behavior à la
   applies (or "no entry for &lt;key&gt;") plus the projects.json path, and flags
   dangling keys. There is no scaffold/template behavior (and no
   `YOLO_INIT_DEFAULTS` anymore — built-in defaults live only in argparse).
+- **Editing flags beyond whole-key sets** (all `config`-only, repeatable;
+  applied by `_apply_config_edits`, the helper shared by the project and
+  `--global` paths): **`--unset KEY`** deletes a key entirely (any *present*
+  key may be unset, even one not in `YOLO_KEYS` — the repair path for an entry
+  that breaks loading; an absent key errors). **`--add-mount PATH[:ro|:rw]` /
+  `--remove-mount PATH`** edit single elements of `mounts` (vs `--mount`, which
+  replaces the list): add validates via `_parse_mount_spec` and replaces a
+  same-path element (so the mode can be flipped); remove matches by path
+  (`_spec_path`: mode suffix stripped, `~` expanded, resolved) and deliberately
+  *doesn't* require the dir to exist, so a stale mount is removable; an
+  emptied list drops the key (for a concat key, `[]` ≡ absent).
+  **`--add-prompt` / `--remove-prompt`** do the same for `prompts`
+  (exact-string match; duplicate add is a no-op, absent remove errors).
+  Contradictory instructions in one call (set + `--unset` of the same key,
+  `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`)
+  are errors, not silently ordered; sets apply first, then unsets, then list
+  edits.
+- **`yolo config --global`** targets the flat `~/.yolo.json` instead of the
+  project entry, for both shows and writes (read raw + read-modify-write, so
+  unknown keys can be `--unset` even though `_parse_yolo_file` would reject the
+  file; a malformed file is a pointed error, never clobbered). Can't combine
+  with `--init`.
 - **`yolo config --init`** registers the project with an **empty entry** — no
   overrides, just enough to satisfy `require-project-entry` without pinning a
   config value the user never chose (bare `config` stays read-only, so an
   explicit flag is the only way to create one). Errors if the key already has
-  an entry; can't combine with config flags; warns when the new (most-specific,
-  empty) entry shadows an ancestor entry's config for this project. `--init` is
-  a verb-only flag, validated like `--force`/`--new` in dispatch.
+  an entry; can't combine with config flags, the editing flags, or `--global`;
+  warns when the new (most-specific, empty) entry shadows an ancestor entry's
+  config for this project. `--init` — like `--global`, `--unset`, and the
+  `--add/--remove-*` flags — is a verb-only flag, validated like
+  `--force`/`--new` in dispatch.
 
 `config` is dispatched off the *first* `parse_args`, **before** the config files
 are layered in — a broken config can't block fixing the config — and it reads
-only `projects.json` itself, failing with a pointed message on a malformed file
-(never clobbering it).
+only `projects.json` (or, under `--global`, `~/.yolo.json`) itself, failing
+with a pointed message on a malformed file (never clobbering it).
 
 AWS sub-keys without `auth: bedrock` just **warn** (and are ignored) rather than
 erroring, since the auth mode may legitimately be set to bedrock in a config file
@@ -524,9 +552,10 @@ Implementation shape:
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
   `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
-  `--resume`/`-r` (resume), `--init` (config). Each is validated against its verb
-  in dispatch (e.g. `-r` outside `resume`, `--new` without a `TOPIC`, or `--new`
-  with `-r` all error).
+  `--resume`/`-r` (resume), and the `config` family — `--init`, `--global`,
+  `--unset`, `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`.
+  Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
+  `--new` without a `TOPIC`, or `--new` with `-r` all error).
 
 ## The worktree mechanics (`setup_worktree`)
 
@@ -604,8 +633,9 @@ worktree session and so omits the resume flags.
 - **Argument splitting:** `main` splits `sys.argv` on `--` *before* argparse
   sees it. Everything after `--` is appended to `docker run` last, so
   user-supplied flags win (last-one-wins).
-- **`--append-system-prompt` / `-p`** is repeatable and is added *on top of* a
-  built-in prompt telling Claude it's in an ephemeral Ubuntu container.
+- **`--prompt` / `-p`** is repeatable and is added *on top of* a built-in
+  prompt telling Claude it's in an ephemeral Ubuntu container (it feeds
+  claude's own `--append-system-prompt` flag, the option's pre-0.7 name).
 - **Git identity is forwarded as env vars, not a mounted gitconfig.**
   `git_identity_args` reads the host's *effective* `user.name`/`user.email` (so a
   repo-local identity wins) and exports them as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
