@@ -44,12 +44,15 @@ def test_default_run_assembles_expected_mounts(cy, run_cli, flag_values, dirs):
     # keychain-credentials snapshot (that mode is unsafe for concurrent sessions)
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
     assert not any(".credentials.json" in m for m in mounts)
-    assert "SSH_AUTH_SOCK=/run/ssh-agent" in envs
+    # ssh-agent is off by default: no socket forwarded into the container
+    assert "SSH_AUTH_SOCK=/run/ssh-agent" not in envs
+    assert not any("ssh-auth.sock" in m for m in mounts)
     # no CLAUDE_CONFIG_DIR in any mode (mount is always the default location)
     assert not any(e.startswith("CLAUDE_CONFIG_DIR=") for e in envs)
 
 
 def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, dirs):
+    # --no-ssh-agent is now also the default; assert it's a no-op-equivalent
     home, work = dirs
     argv = run_cli(["--no-ssh-agent"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
@@ -57,6 +60,15 @@ def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, dirs):
     assert "SSH_AUTH_SOCK=/run/ssh-agent" not in envs
     assert not any("ssh-auth.sock" in m for m in mounts)
     assert not any("known_hosts" in m for m in mounts)
+
+
+def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli(["--ssh-agent"], home=home, cwd=work)
+    mounts = flag_values(argv, "-v")
+    envs = flag_values(argv, "-e")
+    assert "SSH_AUTH_SOCK=/run/ssh-agent" in envs
+    assert any("ssh-auth.sock" in m for m in mounts)
 
 
 def test_no_claude_json_drops_that_mount(cy, run_cli, flag_values, dirs):
@@ -265,13 +277,14 @@ def write_projects(home, mapping):
 
 def test_yolo_provides_defaults_and_cli_overrides(cy, run_cli, flag_values, dirs):
     home, work = dirs
-    (home / ".yolo.json").write_text(json.dumps({"ssh-agent": False}))
+    # config opts ssh-agent on (it's off by built-in default); the CLI overrides back
+    (home / ".yolo.json").write_text(json.dumps({"ssh-agent": True}))
 
     no_flag = run_cli([], home=home, cwd=work)
-    assert "SSH_AUTH_SOCK=/run/ssh-agent" not in flag_values(no_flag, "-e")
+    assert "SSH_AUTH_SOCK=/run/ssh-agent" in flag_values(no_flag, "-e")
 
-    override = run_cli(["--ssh-agent"], home=home, cwd=work)
-    assert "SSH_AUTH_SOCK=/run/ssh-agent" in flag_values(override, "-e")
+    override = run_cli(["--no-ssh-agent"], home=home, cwd=work)
+    assert "SSH_AUTH_SOCK=/run/ssh-agent" not in flag_values(override, "-e")
 
 
 def test_cli_auth_overrides_yolo(cy, run_cli, flag_values, dirs):

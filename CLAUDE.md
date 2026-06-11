@@ -21,7 +21,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --auth bedrock --aws-profile myprofile --aws-region us-west-2 --bedrock-model some.model.id
 ./yolo.py --auth bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
-./yolo.py --no-ssh-agent           # don't forward the host ssh-agent
+./yolo.py --ssh-agent              # forward the host ssh-agent (off by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
@@ -55,7 +55,7 @@ written with the `config` verb (see the config section below; an in-directory
 `.yolo.json` is deliberately **no longer read**):
 
 ```bash
-./yolo.py config --global --no-ssh-agent     # set a global default in ~/.yolo.json
+./yolo.py config --global --ssh-agent        # set a global default in ~/.yolo.json
 ./yolo.py config --config-dir ~/.claude-work --mount ~/refdocs
                           # persist those flags as THIS project's entry
 ./yolo.py                 # picks up both layers; equals passing those flags
@@ -163,10 +163,12 @@ on top of whichever auth is chosen:
   `$HOME/.claude.json` regardless of `CLAUDE_CONFIG_DIR`, so there's only ever one.
   `--no-claude-json` gives a cleanly isolated profile — the intended pairing with an
   alternate `--config-dir`.
-- **`--ssh-agent` / `--no-ssh-agent`** (default on) → forward the host ssh-agent
-  socket (see gotchas). `--no-ssh-agent` drops the socket mount, `SSH_AUTH_SOCK`, and
-  the `known_hosts` mount; in-container GitHub git auth then won't work, since the
-  baked HTTPS→SSH rewrite relies on the agent.
+- **`--ssh-agent` / `--no-ssh-agent`** (default **off**) → forward the host
+  ssh-agent socket (see gotchas). Off by default to keep your SSH keys out of the
+  skip-permissions container — opt in with `--ssh-agent` (or `ssh-agent: true` in
+  config) when you need in-container git auth. When off, there's no socket mount,
+  `SSH_AUTH_SOCK`, or `known_hosts` mount; in-container GitHub git auth then won't
+  work, since the baked HTTPS→SSH rewrite relies on the agent.
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
   host directories ("reference" dirs) at their **identical host paths**, like the
   cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would
@@ -596,8 +598,8 @@ worktree session and so omits the resume flags.
 ## Conventions / gotchas
 
 - **macOS only as written; Docker Desktop or OrbStack as the engine.** Credential
-  extraction uses the macOS `security` CLI. SSH agent forwarding (on by default,
-  disabled with `--no-ssh-agent`) mounts the Docker engine's
+  extraction uses the macOS `security` CLI. SSH agent forwarding (off by default,
+  enabled with `--ssh-agent`) mounts the Docker engine's
   `/run/host-services/ssh-auth.sock` (the VM-side socket the engine proxies to
   the host agent — both Docker Desktop and OrbStack expose it at that path), NOT
   the raw host `$SSH_AUTH_SOCK` — that socket's listener lives in the macOS kernel

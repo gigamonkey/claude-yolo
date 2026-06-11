@@ -1310,9 +1310,11 @@ PARSER.add_argument(
 PARSER.add_argument(
     "--ssh-agent",
     action=argparse.BooleanOptionalAction,
-    default=True,
-    help="Forward the host ssh-agent socket into the container (default: on). "
-    "Use --no-ssh-agent to skip it (GitHub git auth won't work then).",
+    default=False,
+    help="Forward the host ssh-agent socket into the container (default: off). "
+    "Off keeps your SSH keys out of the skip-permissions container; turn it on "
+    "with --ssh-agent (or `ssh-agent: true` in config) when you need in-container "
+    "GitHub git auth, which won't work without it.",
 )
 PARSER.add_argument(
     "--rebuild-image",
@@ -1415,7 +1417,7 @@ def running_container_for(
 def build_claude_args(
     prompts: list,
     *,
-    ssh_agent: bool = True,
+    ssh_agent: bool = False,
     continue_session: bool = False,
     resume=None,
     name: str | None = None,

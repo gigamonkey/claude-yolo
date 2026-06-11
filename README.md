@@ -343,7 +343,7 @@ to highest precedence:
 
    ```json
    {
-     "ssh-agent": false,
+     "ssh-agent": true,
      "prompts": ["Prefer the standard library."]
    }
    ```
@@ -402,16 +402,18 @@ Whether to mount the host `~/.claude.json` — Claude Code's *global* config fil
 no matter what the config dir is. Turn it off for a cleanly isolated profile
 alongside an alternate `config-dir`.
 
-### `ssh-agent` (`--ssh-agent` / `--no-ssh-agent`, default on)
+### `ssh-agent` (`--ssh-agent` / `--no-ssh-agent`, default off)
 
-Whether to forward the host SSH agent into the container. With it off,
-in-container git operations against GitHub won't authenticate. {{CLAUDE: check
-this next sentence.}} However, with it on, you are essentially handing your ssh
-keys to Claude Code—it can connect anywhere your keys allow, not just to Github.
-If you don’t enable `ssh-agent`, `yolo` will tell Claude in the system prompt
-that it can’t `git push` so it will probably tell you when you need to push
-things from your host. (See also [Why forward the SSH
-agent](#why-forward-the-ssh-agent)).
+Whether to forward the host SSH agent into the container. **Off by default**, so
+you opt in deliberately: forwarding the agent effectively hands your SSH keys to
+Claude Code — the keys themselves never leave the host, but the agent will sign
+challenges for whatever Claude asks, so it can reach *any* host your keys allow,
+not just GitHub. Turn it on with `--ssh-agent` (or `ssh-agent: true` in config)
+on projects where you want Claude to push to GitHub itself. With it off,
+in-container git operations against GitHub won't authenticate, and `yolo` tells
+Claude in the system prompt that it can't `git push` — so it will generally let
+you know when something needs pushing from your host. (See also [Why forward the
+SSH agent](#why-forward-the-ssh-agent)).
 
 ### `mounts` (`--mount PATH[:ro|:rw]`, repeatable)
 
@@ -499,7 +501,7 @@ global layer — instead of the project entry (you can also just edit that file;
 it's plain JSON):
 
 ```bash
-yolo config --global --no-ssh-agent   # set a global default
+yolo config --global --ssh-agent      # set a global default
 yolo config --global                  # show the global config (read-only)
 ```
 
@@ -592,9 +594,10 @@ It assembles the `docker run` arguments:
 
 - Bind-mounts your current directory into the container at the same path and sets
   it as the working directory.
-- Forwards your SSH agent socket so Claude can use your SSH keys (e.g. for
-  `git push`) without copying any private keys into the container.
-- Mounts your `~/.ssh/known_hosts` read-only so SSH host-key verification works.
+- *If you opted in with `--ssh-agent`* (off by default): forwards your SSH agent
+  socket so Claude can use your SSH keys (e.g. for `git push`) without copying any
+  private keys into the container, and mounts your `~/.ssh/known_hosts` read-only
+  so SSH host-key verification works.
 - Forwards your git identity (`user.name`/`user.email`) so commits made in the
   container are attributed to you (see below).
 - Mounts your config/credentials according to the mode (see above).
@@ -618,6 +621,12 @@ Linux — that genuinely *is* the working directory inside the container.) Mount
 at `/workspace` instead would make every recorded path mismatch the host layout.
 
 #### Why forward the SSH agent?
+
+This is **off by default** — forwarding the agent lets Claude authenticate as you
+to *any* host your keys allow, so it's a deliberate opt-in (`--ssh-agent`, or
+`ssh-agent: true` in config) for projects where you want Claude to push to GitHub
+itself. When you do opt in, here's the mechanism and why it's the safe way to do
+it:
 
 Working autonomously usually means Claude needs to talk to remote services over
 SSH — most commonly `git pull`/`git push` against GitHub or another host. That
