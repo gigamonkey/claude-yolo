@@ -38,15 +38,18 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
 ./yolo.py finish fix-auth          # remove the worktree, keep the branch
 ./yolo.py list                     # this repo's worktrees
+./yolo.py ps                       # running yolo containers, across all repos
+./yolo.py ps --watch               # ...refreshing every 2s (the tmux dashboard)
+./yolo.py --tmux                   # spawn the session as a tmux window instead
 ./yolo.py --version                # print the version and exit
 ```
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 (`oauth-token` [default] / `keychain` / `bedrock`). Everything else —
-`--config-dir`, `--claude-json`, `--ssh-agent`, `--mount` — is an **orthogonal
-flag** that composes freely with the chosen auth mode and with each other. The
-only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`finish`/`list`/`setup-token`/`tokens`/
+`--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--tmux` — is an
+**orthogonal flag** that composes freely with the chosen auth mode and with
+each other. The only positional args are an optional `verb`
+(`config`/`start`/`resume`/`shell`/`finish`/`list`/`ps`/`setup-token`/`tokens`/
 `forget-token`) and its `TOPIC`; see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
@@ -181,6 +184,10 @@ on top of whichever auth is chosen:
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
+- **`--tmux` / `--no-tmux`** (default **off**; `tmux` in config) → spawn the
+  session as a window of a shared tmux session instead of exec'ing in the
+  invoking terminal; `--tmux-session NAME` / `tmux-session` names that session
+  (default `yolo`). See [tmux mode](#tmux-mode---tmux-and-the-ps-verb).
 - **Guardrails** (checked just before any container launch; the terminal verbs and
   `shell`-into-running are exempt): launching with the cwd **at or above `$HOME`**
   is a hard error — it would mount the whole home dir (incl. `~/.ssh` and yolo's
@@ -382,7 +389,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
 `ssh-agent`, `base`, `prompts` (string or list of strings; the pre-0.7 name
 `append-system-prompt` draws a pointed rename error),
-`mounts` (string or list, `PATH[:ro|:rw]`), `require-project-entry`.
+`mounts` (string or list, `PATH[:ro|:rw]`), `require-project-entry`, `tmux`,
+`tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
 (CLI-only by design); any of them in a config file is a hard error (not in
@@ -515,6 +523,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
   to the main checkout, not the worktree's own branch.
+- **`ps`** — every **running** yolo container, across **all** repos (the
+  cross-repo counterpart to `list`), as a table (NAME/TOPIC/DIRECTORY/UP) read
+  from the `yolo.*` labels (`docker ps --filter label=yolo.cwd`); needs no git
+  repo. `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's the dashboard
+  tmux mode seeds (see below), but it's an ordinary verb usable anywhere.
 
 Implementation shape:
 
@@ -522,8 +535,8 @@ Implementation shape:
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first. The other
-  terminal verbs (`list`, `tokens`, `forget-token`, `finish`, `setup-token`, and
-  `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
+  terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `setup-token`,
+  and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
   right per-dir service name, while `forget-token` is dispatched *before* the
   config-dir-must-exist check (forgetting a token for a deleted config dir must
@@ -532,13 +545,14 @@ Implementation shape:
   the orthogonal-flags section), then call `launch_container`; extra mounts are
   resolved only on these paths, so a stale mount path can't break
   `list`/`finish`/`config`.
-- **`launch_container`** is the single assembly+exec path shared by every launch
+- **`launch_container`** is the single assembly path shared by every launch
   (extracted from the old inline `main`): mounts (cwd + the extra `--mount`
   dirs), ssh-agent block, the credential/config blocks, labels, `--entrypoint`
-  override, then `os.execvp`. It takes `container_base`, `command` (args after
-  the image), optional `entrypoint`, and the resolved `mounts`.
-  `build_claude_args` builds the `claude` command (settings, built-in prompt,
-  `--add-dir` per extra mount, `--continue`/`--resume`, `--name`).
+  override, then hands the finished argv to `_dispatch_launch` (the run-it-here
+  vs run-it-in-tmux seam — see the tmux section). It takes `container_base`,
+  `command` (args after the image), optional `entrypoint`, and the resolved
+  `mounts`. `build_claude_args` builds the `claude` command (settings, built-in
+  prompt, `--add-dir` per extra mount, `--continue`/`--resume`, `--name`).
 - **Containers are found by docker label, not name.** Every launch is stamped
   `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`, and (for worktrees)
   `--label yolo.worktree=<topic>`. `running_container_for(slug, topic=None, *,
@@ -554,10 +568,66 @@ Implementation shape:
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
   `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
-  `--resume`/`-r` (resume), and the `config` family — `--init`, `--global`,
-  `--unset`, `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`.
+  `--resume`/`-r` (resume), `--watch` (ps), and the `config` family — `--init`,
+  `--global`, `--unset`, `--add-mount`/`--remove-mount`,
+  `--add-prompt`/`--remove-prompt`.
   Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
   `--new` without a `TOPIC`, or `--new` with `-r` all error).
+
+## tmux mode (`--tmux`) and the `ps` verb
+
+Opt-in (`--tmux`, or `tmux: true` in config): instead of exec'ing the launch in
+the invoking terminal, every session becomes a **window of one shared tmux
+session** (default name `yolo`; `--tmux-session`/`tmux-session` overrides), so
+parallel sessions live in one terminal window and tmux keys switch between
+them. Windows, not panes, deliberately: Claude Code is a full-screen TUI and
+panes would cramp it; tmux windows already are the navigation UX.
+
+The mechanics, all funneled through two functions:
+
+- **`_dispatch_launch`** is the seam at the tail of `launch_container` (and the
+  `shell`-into-running `docker exec` path in `main`): tmux off → `os.execvp`,
+  byte-for-byte the pre-tmux behavior; tmux on → `_launch_in_tmux`. It also
+  decides **window reuse**: if `running_container_for` (same label query the
+  `shell` verb uses) finds the matching container already running, the
+  same-named existing window is focused instead of spawning a `docker run`
+  doomed to the container-name conflict — but if no window matches (container
+  started outside tmux mode), it spawns anyway and lets docker report the
+  conflict in the window.
+- **`_launch_in_tmux`** ensures the session exists (`_ensure_tmux_session` —
+  a fresh one is created detached with window 0 running the `yolo ps --watch`
+  dashboard, re-invoked via `_self_invocation`: sys.argv[0] resolved through
+  `which()` and absolutized, since the tmux server's PATH/cwd differ), creates
+  the window (`new-window -n <container-name> -P -F '#{window_id}'`), then
+  focuses it — inside tmux (`$TMUX` set) by `select-window` + `switch-client`
+  on the current client; outside by exec'ing into `tmux select-window \;
+  attach-session`, so the invoking terminal becomes the tmux client.
+
+Details that matter:
+
+- **Window names are container names** (already unique among running
+  containers, suffixes included); the exec'd-shell windows get a
+  `-shell` suffix and never reuse (docker exec can't conflict — a second
+  `yolo shell` deliberately opens a second window).
+- The window command is `shlex.join(run_cmd)` (the argv contains `--settings`
+  JSON and the OAuth token — quoting is load-bearing) wrapped by
+  `_tmux_window_command`: on **nonzero** exit it prints the code and waits for
+  Enter, because tmux's default remain-on-exit off would otherwise vaporize the
+  window before a fast `docker run` failure can be read. Clean exits still
+  close the window. The same wrapper guards the dashboard window (a bad
+  self-invocation can't kill the just-created session).
+- **Everything interactive happens before tmux**: credential prompts
+  (`ensure_oauth_token` consent/mint, `ensure_logged_in`) run in the invoking
+  terminal — only the finished `docker run` argv moves into the window. The
+  terminal verbs never touch tmux.
+- Caveat (accepted for now): the window command string — including
+  `CLAUDE_CODE_OAUTH_TOKEN` — is retained in tmux server state
+  (`#{pane_start_command}`). Not a new exposure class (the exec'd argv is
+  visible in `ps` for the container's lifetime either way); an `--env-file`
+  hardening would fix both and is a possible follow-up.
+- All tmux commands go through the `_tmux()` wrapper — the test seam
+  (`tests/test_tmux.py` fakes the server there and asserts on exact argv
+  sequences).
 
 ## The worktree mechanics (`setup_worktree`)
 
@@ -697,4 +767,8 @@ stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
 `test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
 expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the `security`-wrapping helpers stubbed).
+`test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux
+server patched in at the `_tmux` seam (session creation + dashboard seeding,
+window command quoting, inside-vs-outside `$TMUX` focusing, window reuse, the
+config keys) and the `ps` verb's table from canned `docker ps` output.
 Keep them green when changing flags or mounts.

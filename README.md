@@ -162,6 +162,51 @@ There are also three token-management verbs — `setup-token`, `tokens`, and
 `forget-token` — described under [Authentication modes](#authentication-modes),
 and a `config` verb described under [Configuration](#configuration).
 
+### tmux mode
+
+By default every `yolo` session takes over the terminal you launched it from,
+so several parallel sessions mean several terminal windows. **tmux mode**
+(`--tmux`, or `tmux: true` in config) instead collects them all in one place: a
+shared tmux session (named `yolo` by default) where each `yolo` session — and
+each `yolo shell` — is its own tmux window, so you switch between them with
+tmux keys (`prefix n`, `prefix <number>`, `prefix w`) instead of hunting for
+windows on your desktop.
+
+```bash
+yolo start --tmux                 # this session becomes a window of tmux session "yolo"
+yolo start fix-auth --tmux        # so does this one, alongside it
+yolo config --global --tmux       # make tmux mode the default everywhere
+yolo ps                           # list running yolo containers, across all repos
+yolo ps --watch                   # ...refreshing every 2 seconds
+```
+
+What `--tmux` does on each launch:
+
+- Makes sure the shared tmux session exists, creating it detached if not. A
+  fresh session gets a **dashboard** as window 0: `yolo ps --watch`, a live
+  table of every running yolo container (NAME / TOPIC / DIRECTORY / UP) across
+  all repos. (`ps` is an ordinary verb — useful on its own, with or without
+  tmux mode.)
+- Opens a new window named after the container, running the same `docker run`
+  the default mode would have exec'd. The window closes when Claude exits; a
+  window whose command *fails* sticks around showing the error until you press
+  Enter.
+- Focuses it: outside tmux your terminal execs into `tmux attach` (so it
+  becomes the tmux client, much as the default mode becomes the session);
+  inside tmux your current client just switches to the new window.
+
+If the matching container is already running — say you `yolo resume foo` twice
+— yolo switches to its existing window instead of spawning a `docker run` that
+would only die on the container-name conflict.
+
+Everything that *isn't* a session launch (`list`, `ps`, `config`, `finish`, the
+token verbs, and interactive credential prompts) stays in the terminal you ran
+`yolo` from. The session name is configurable with `--tmux-session NAME` / the
+`tmux-session` config key — one global session is the point, but a per-project
+entry can group sessions per project instead. tmux mode needs `tmux` installed
+on the host (`brew install tmux`); `--no-tmux` overrides a config-file default
+for one run.
+
 ## Authentication modes
 
 `--auth` (or the `auth` config key) selects one of three mutually-exclusive ways
@@ -459,6 +504,14 @@ for one run).
 For a project that needs no customization, register it with an empty entry:
 `yolo config --init` (see [the `config` verb](#the-config-verb)). That
 satisfies the guard without pinning any config values.
+
+### `tmux`, `tmux-session` (`--tmux` / `--no-tmux`, `--tmux-session NAME`)
+
+Spawn sessions as windows of a shared tmux session instead of in the invoking
+terminal — see [tmux mode](#tmux-mode). `tmux` is a boolean (default off);
+`tmux-session` names the shared session (default `yolo`). Set `tmux: true` in
+`~/.yolo.json` to live in tmux mode by default and `--no-tmux` your way out for
+one run.
 
 ### CLI-only flags
 

@@ -13,12 +13,14 @@ import os
 import pathlib
 import pty
 import re
+import shlex
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import termios
+import time
 
 DOCKER_IMAGE = "claude-yolo:latest"
 
@@ -652,6 +654,8 @@ YOLO_KEYS = {
     "prompts": ("prompts", "list"),
     "mounts": ("mounts", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
+    "tmux": ("tmux", "bool"),
+    "tmux_session": ("tmux_session", "str"),
 }
 
 # dests whose values concatenate across the config layers and the CLI (everything
@@ -1158,6 +1162,7 @@ PARSER.add_argument(
         "shell",
         "finish",
         "list",
+        "ps",
         "setup-token",
         "tokens",
         "forget-token",
@@ -1166,7 +1171,8 @@ PARSER.add_argument(
     "TOPIC they act on a git worktree of that name (start creates it, resume/shell "
     "require it); with no TOPIC they act on the current directory (start a fresh "
     "session, resume the most recent one, or open a shell). 'finish' removes a "
-    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'config' "
+    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'ps' shows "
+    "all running yolo containers across repos (see --watch); 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
     "with --global), or — given config flags — persists exactly those flags into "
     "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
@@ -1306,6 +1312,30 @@ PARSER.add_argument(
     help="Mount the host ~/.claude.json into the container (default: on). "
     "Use --no-claude-json for a cleanly isolated profile (e.g. with an "
     "alternate --config-dir).",
+)
+PARSER.add_argument(
+    "--tmux",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Spawn the session as a window of a shared tmux session instead of "
+    "running in this terminal (default: off). Ensures the tmux session exists — "
+    "seeding window 0 with a `yolo ps --watch` dashboard — opens a new window "
+    "running the container, and attaches to it (or switches the current client, "
+    "when already inside tmux). Also settable as `tmux` in config; "
+    "--no-tmux overrides it for one run.",
+)
+PARSER.add_argument(
+    "--tmux-session",
+    metavar="NAME",
+    default="yolo",
+    help="With --tmux: name of the shared tmux session (default: yolo). One "
+    "global session is the point — every yolo session lands in it regardless of "
+    "repo — but `tmux-session` in per-project config can group differently.",
+)
+PARSER.add_argument(
+    "--watch",
+    action="store_true",
+    help="For `ps`: refresh the listing every 2 seconds until interrupted.",
 )
 PARSER.add_argument(
     "--ssh-agent",
@@ -1507,6 +1537,164 @@ def _ps1_env_args(cwd: pathlib.Path, worktree_name: str | None) -> list[str]:
     return [*extra, "-e", f"YOLO_PS1={tag}{blue}{where}{reset}\\$ "]
 
 
+TMUX_DASHBOARD_WINDOW = "yolo-ps"
+
+
+def _tmux(*args: str) -> subprocess.CompletedProcess:
+    """Run one tmux command with output captured; callers branch on returncode."""
+    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+
+def _self_invocation() -> str:
+    """An absolute path for re-invoking yolo (the dashboard window's command).
+
+    sys.argv[0] is however we were invoked — a console script found on PATH, a
+    ./yolo.py relative path, or a symlink. which() resolves the PATH case, and
+    the result is absolutized so the command still works from tmux's own working
+    directory. A symlink is deliberately *not* resolve()d away: the symlink is
+    the install (and resolving could land on a non-executable file).
+    """
+    argv0 = sys.argv[0]
+    found = shutil.which(argv0) or argv0
+    return str(pathlib.Path(found).absolute())
+
+
+def _tmux_window_command(run_cmd: list) -> str:
+    """The shell command a tmux window runs: run_cmd, held open on failure.
+
+    tmux windows close when their command exits (remain-on-exit is off by
+    default) — right for a clean `claude` exit, but it would eat the error when
+    docker fails instantly (name conflict, daemon down): the window flashes and
+    is gone. The wrapper keeps a *failed* window alive until Enter.
+    """
+    cmd = shlex.join(str(a) for a in run_cmd)
+    return (
+        f"{cmd}; ec=$?; if [ $ec -ne 0 ]; then "
+        'printf "\\n[exited %d -- press Enter to close]\\n" "$ec"; read -r _; fi'
+    )
+
+
+def _find_tmux_window(session: str, name: str) -> str | None:
+    """The window id of the window called `name` in `session`, or None."""
+    res = _tmux("list-windows", "-t", f"={session}", "-F", "#{window_id}\t#{window_name}")
+    if res.returncode != 0:
+        return None
+    for line in res.stdout.splitlines():
+        wid, _, wname = line.partition("\t")
+        if wname == name:
+            return wid
+    return None
+
+
+def _ensure_tmux_session(session: str) -> None:
+    """Make sure the shared tmux session exists, creating it detached if not.
+
+    A fresh session gets the dashboard as window 0: `yolo ps --watch`, re-invoked
+    via the absolute path we were launched from (a bare `yolo` may not be on the
+    tmux server's PATH). The dashboard gets the same keep-open-on-failure wrapper
+    as the container windows — which also keeps a bad self-invocation from
+    killing the just-created session before the real window is added.
+    """
+    if _tmux("has-session", "-t", f"={session}").returncode == 0:
+        return
+    dashboard = _tmux_window_command([_self_invocation(), "ps", "--watch"])
+    res = _tmux("new-session", "-d", "-s", session, "-n", TMUX_DASHBOARD_WINDOW, dashboard)
+    if res.returncode != 0:
+        sys.exit(f"tmux new-session failed: {res.stderr.strip()}")
+
+
+def _launch_in_tmux(
+    run_cmd: list, window_name: str, *, session: str, reuse_existing: bool = False
+) -> None:
+    """Spawn run_cmd as a named window of the shared tmux session and focus it.
+
+    Focusing depends on where yolo was invoked: inside tmux (this session or
+    another) the current client is switched over; outside, the invoking terminal
+    execs into `tmux attach`, mirroring the default mode's
+    this-terminal-becomes-the-session feel. With reuse_existing (the caller
+    found the matching container already running), an existing same-named window
+    is focused instead of spawning a duplicate `docker run` that would only die
+    on the container-name conflict; if no window matches (the container was
+    started outside tmux mode), we still spawn and let docker report the
+    conflict in the new window.
+    """
+    if not shutil.which("tmux"):
+        sys.exit("--tmux needs tmux installed and on PATH (brew install tmux).")
+    _ensure_tmux_session(session)
+
+    window_id = _find_tmux_window(session, window_name) if reuse_existing else None
+    if window_id:
+        print(
+            f"'{window_name}' is already running in tmux; switching to its window.",
+            file=sys.stderr,
+        )
+    else:
+        res = _tmux(
+            "new-window",
+            "-t",
+            f"={session}:",
+            "-n",
+            window_name,
+            "-P",
+            "-F",
+            "#{window_id}",
+            _tmux_window_command(run_cmd),
+        )
+        if res.returncode != 0:
+            sys.exit(f"tmux new-window failed: {res.stderr.strip()}")
+        window_id = res.stdout.strip()
+
+    if os.environ.get("TMUX"):
+        # Already a tmux client: re-point it at the session and window. (Window
+        # ids are server-global, so select-window works across sessions.)
+        _tmux("select-window", "-t", window_id)
+        _tmux("switch-client", "-t", f"={session}")
+        print(f"Spawned '{window_name}' in tmux session '{session}'.")
+    else:
+        # Become the tmux client, focused on the new window. select-window runs
+        # first (it works detached — it just moves the session's current-window
+        # pointer); the ";" argument is tmux's command separator, not shell
+        # syntax — there's no shell here, this is an exec.
+        os.execvp(
+            "tmux",
+            [
+                "tmux",
+                "select-window",
+                "-t",
+                window_id,
+                ";",
+                "attach-session",
+                "-t",
+                f"={session}",
+            ],
+        )
+
+
+def _dispatch_launch(
+    run_cmd: list,
+    parsed,
+    *,
+    window_name: str,
+    slug: str | None = None,
+    worktree_name: str | None = None,
+    cwd: pathlib.Path | None = None,
+) -> None:
+    """Run an assembled launch command: exec it here, or spawn it into tmux.
+
+    The seam between assembling a launch and deciding where it runs. Default:
+    exec in the invoking terminal, exactly the pre-tmux behavior. With --tmux
+    (or `tmux: true` in config) the command becomes a window of the shared tmux
+    session instead; when the matching container is already running (the same
+    label query the `shell` verb uses), its window is reused rather than
+    spawning a docker run that's doomed to the container-name conflict.
+    """
+    if not parsed.tmux:
+        os.execvp(run_cmd[0], run_cmd)
+        return
+    reuse = bool(running_container_for(slug, worktree_name, cwd=None if worktree_name else cwd))
+    _launch_in_tmux(run_cmd, window_name, session=parsed.tmux_session, reuse_existing=reuse)
+
+
 def launch_container(
     parsed,
     *,
@@ -1654,7 +1842,14 @@ def launch_container(
     print(sep)
     print(" ".join(run_cmd))
     print(sep)
-    os.execvp("docker", run_cmd)
+    _dispatch_launch(
+        run_cmd,
+        parsed,
+        window_name=container,
+        slug=slug,
+        worktree_name=worktree_name,
+        cwd=cwd,
+    )
 
 
 def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
@@ -1727,6 +1922,21 @@ def _branch_merged(branch: str, base: str) -> bool:
     )
 
 
+def _print_table(headers: tuple, rows: list) -> None:
+    """Print rows as a column-aligned table (no trailing whitespace)."""
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+
+    def fmt(cols):
+        # pad every column except the last so there's no trailing whitespace
+        return "  ".join(
+            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
+        )
+
+    print(fmt(headers))
+    for row in rows:
+        print(fmt(row))
+
+
 def do_list(home: pathlib.Path, base: str) -> None:
     """`list` verb: show this repo's worktrees, their branch, status, and directory.
 
@@ -1768,18 +1978,62 @@ def do_list(home: pathlib.Path, base: str) -> None:
             directory = str(wt)
         rows.append((topic, branch, status, directory))
 
-    headers = ("TOPIC", "BRANCH", "STATUS", "DIRECTORY")
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    _print_table(("TOPIC", "BRANCH", "STATUS", "DIRECTORY"), rows)
 
-    def fmt(cols):
-        # pad every column except the last so there's no trailing whitespace
-        return "  ".join(
-            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
-        )
 
-    print(fmt(headers))
-    for row in rows:
-        print(fmt(row))
+PS_WATCH_INTERVAL = 2  # seconds between `ps --watch` refreshes
+
+
+def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str]]:
+    """(name, topic, directory, up) for every running yolo container, any repo.
+
+    Read from the yolo.* labels every launch stamps; the yolo.cwd filter is what
+    distinguishes yolo's containers from everything else `docker ps` knows.
+    """
+    fmt = "\t".join(
+        ("{{.Names}}", '{{.Label "yolo.worktree"}}', '{{.Label "yolo.cwd"}}', "{{.RunningFor}}")
+    )
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "--filter", "label=yolo.cwd", "--format", fmt],
+            capture_output=True,
+            text=True,
+        ).stdout
+    except FileNotFoundError:
+        sys.exit("docker not found; is it installed and on PATH?")
+    rows = []
+    for line in out.splitlines():
+        name, topic, cwd, up = (line.split("\t") + [""] * 4)[:4]
+        if cwd.startswith(f"{home}/"):
+            cwd = "~" + cwd[len(str(home)) :]
+        rows.append((name, topic or "-", cwd, up))
+    return rows
+
+
+def do_ps(home: pathlib.Path, *, watch: bool) -> None:
+    """`ps` verb: every running yolo container, across all repos.
+
+    The cross-repo counterpart to `list` (which shows one repo's worktrees,
+    running or not, and needs a git repo to run from). `--watch` redraws every
+    PS_WATCH_INTERVAL seconds — this is the dashboard tmux mode seeds into
+    window 0 of its session, but it's just a command, usable anywhere.
+    """
+    try:
+        while True:
+            rows = _ps_rows(home)
+            if watch:
+                print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
+            if rows:
+                _print_table(("NAME", "TOPIC", "DIRECTORY", "UP"), rows)
+            else:
+                print("No yolo containers running.")
+            if not watch:
+                return
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"\nupdated {now} — Ctrl-C exits; in tmux, prefix+<n> switches windows")
+            time.sleep(PS_WATCH_INTERVAL)
+    except KeyboardInterrupt:
+        print()
 
 
 def do_tokens() -> None:
@@ -1826,17 +2080,7 @@ def do_tokens() -> None:
                 status = "ok"
         rows.append((service, config_dir, minted_day, expires, status))
 
-    headers = ("SERVICE", "CONFIG DIR", "MINTED", "EXPIRES~", "STATUS")
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
-
-    def fmt(cols):
-        return "  ".join(
-            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
-        )
-
-    print(fmt(headers))
-    for row in rows:
-        print(fmt(row))
+    _print_table(("SERVICE", "CONFIG DIR", "MINTED", "EXPIRES~", "STATUS"), rows)
     print()
     print(f"Tokens can only be revoked at {TOKEN_REVOKE_URL} — match by the MINTED date.")
 
@@ -1921,6 +2165,8 @@ def main():
         sys.exit("--new can't be combined with --resume/-r.")
     if parsed.force and verb != "finish":
         sys.exit("--force only applies to `finish`.")
+    if parsed.watch and verb != "ps":
+        sys.exit("--watch only applies to `ps`.")
     for flag, val in (
         ("--init", parsed.init),
         ("--global", parsed.cfg_global),
@@ -1948,6 +2194,9 @@ def main():
     if verb == "list":
         do_list(home, parsed.base)
         return
+    if verb == "ps":
+        do_ps(home, watch=parsed.watch)
+        return
     if verb == "tokens":
         do_tokens()
         return
@@ -1973,7 +2222,13 @@ def main():
         if cid:
             where = f"for '{topic}'" if topic else "in this directory"
             print(f"Opening a shell in the running container {where} ({cid[:12]}).")
-            os.execvp("docker", ["docker", "exec", "-it", cid, "/bin/bash"])
+            exec_cmd = ["docker", "exec", "-it", cid, "/bin/bash"]
+            if parsed.tmux:
+                # docker exec never conflicts, so no reuse_existing: a second
+                # `yolo shell` deliberately opens a second shell window.
+                _launch_in_tmux(exec_cmd, f"{topic or cwd.name}-shell", session=parsed.tmux_session)
+                return
+            os.execvp("docker", exec_cmd)
             return  # execvp doesn't return on success; guard the stubbed/failed case
         # No container running: fall through to launch a fresh bash container below.
 
