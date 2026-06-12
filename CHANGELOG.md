@@ -3,6 +3,26 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.8.0 — 2026-06-12
+
+- **`--tmux` mode**: instead of exec'ing the session in your terminal, each
+  session becomes a *window* of one shared tmux session (default name `yolo`;
+  `--tmux-session`/`tmux-session` overrides), so parallel sessions live in one
+  terminal and tmux keys switch between them. Window 0 of a fresh session runs a
+  live `yolo ps --watch` dashboard. Enable per-invocation with `--tmux` or
+  globally/per-project with `tmux: true` in config. Window reuse: relaunching a
+  session whose container is already running focuses its existing window instead
+  of colliding on the container name.
+- **`yolo ps`**: list every running yolo container across *all* repos (the
+  cross-repo counterpart to `list`) as a table (NAME/TOPIC/DIRECTORY/UP), read
+  from the `yolo.*` container labels — needs no git repo. `--watch` redraws every
+  2s.
+- **`ps --watch` is an interactive session picker inside tmux**: run from within
+  tmux (TTY stdin + `$TMUX` set), `--watch` becomes a picker — j/k/arrows move,
+  Enter `select-window`s to the chosen container's window, q/ESC quits — while the
+  2s redraw cadence continues. Outside tmux it stays the passive redraw loop.
+  Containers started outside tmux mode render with a `*` and Enter no-ops.
+
 ## v0.7.0 — 2026-06-11
 
 - **`--append-system-prompt`/`-p` renamed to `--prompt`/`-p`** (**breaking**),
