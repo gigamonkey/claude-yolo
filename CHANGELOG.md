@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.8.2 — 2026-06-12
+
+- **README: documented the limits of containerization.** New "What the
+  container does and doesn't protect" section: the container's job is to
+  contain filesystem damage to the mounted directories; container escape is
+  theoretically possible (Claude runs arbitrary code, and a container is not a
+  hard security boundary); and most importantly, the container does nothing to
+  constrain what Claude can do with credentials you hand it — via
+  `--ssh-agent`, mounted directories containing credentials, or secrets pasted
+  into a session.
+
 ## v0.8.1 — 2026-06-12
 
 - **`--tmux` no longer mirrors the session into a second terminal**: launching a
