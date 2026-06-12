@@ -13,6 +13,7 @@ import os
 import pathlib
 import pty
 import re
+import select
 import shlex
 import shutil
 import struct
@@ -21,6 +22,7 @@ import sys
 import tempfile
 import termios
 import time
+import tty
 
 DOCKER_IMAGE = "claude-yolo:latest"
 
@@ -1335,7 +1337,9 @@ PARSER.add_argument(
 PARSER.add_argument(
     "--watch",
     action="store_true",
-    help="For `ps`: refresh the listing every 2 seconds until interrupted.",
+    help="For `ps`: refresh the listing every 2 seconds until interrupted. Run "
+    "interactively inside tmux it's a picker: j/k/arrows move, Enter switches "
+    "to the selected session's window, q quits.",
 )
 PARSER.add_argument(
     "--ssh-agent",
@@ -1922,8 +1926,8 @@ def _branch_merged(branch: str, base: str) -> bool:
     )
 
 
-def _print_table(headers: tuple, rows: list) -> None:
-    """Print rows as a column-aligned table (no trailing whitespace)."""
+def _format_table(headers: tuple, rows: list) -> list[str]:
+    """Rows as column-aligned table lines (no trailing whitespace)."""
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
 
     def fmt(cols):
@@ -1932,9 +1936,13 @@ def _print_table(headers: tuple, rows: list) -> None:
             c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
         )
 
-    print(fmt(headers))
-    for row in rows:
-        print(fmt(row))
+    return [fmt(headers)] + [fmt(row) for row in rows]
+
+
+def _print_table(headers: tuple, rows: list) -> None:
+    """Print rows as a column-aligned table."""
+    for line in _format_table(headers, rows):
+        print(line)
 
 
 def do_list(home: pathlib.Path, base: str) -> None:
@@ -2010,30 +2018,186 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str]]:
     return rows
 
 
+PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "UP")
+
+
 def do_ps(home: pathlib.Path, *, watch: bool) -> None:
     """`ps` verb: every running yolo container, across all repos.
 
     The cross-repo counterpart to `list` (which shows one repo's worktrees,
     running or not, and needs a git repo to run from). `--watch` redraws every
-    PS_WATCH_INTERVAL seconds — this is the dashboard tmux mode seeds into
-    window 0 of its session, but it's just a command, usable anywhere.
+    PS_WATCH_INTERVAL seconds — and when it's interactive *and* inside tmux
+    (the dashboard window tmux mode seeds is both), the table is a picker:
+    j/k/arrows move the highlight, Enter switches the tmux client to the
+    selected session's window. Outside a TTY or tmux, `--watch` falls back to
+    the plain passive redraw loop, so the verb stays usable anywhere.
     """
+    if not watch:
+        rows = _ps_rows(home)
+        if rows:
+            _print_table(PS_HEADERS, rows)
+        else:
+            print("No yolo containers running.")
+        return
+    if sys.stdin.isatty() and os.environ.get("TMUX"):
+        _ps_picker(home)
+    else:
+        _ps_watch_passive(home)
+
+
+def _ps_watch_passive(home: pathlib.Path) -> None:
+    """`ps --watch` outside tmux / without a TTY: a plain auto-refreshing table."""
     try:
         while True:
             rows = _ps_rows(home)
-            if watch:
-                print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
+            print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
             if rows:
-                _print_table(("NAME", "TOPIC", "DIRECTORY", "UP"), rows)
+                _print_table(PS_HEADERS, rows)
             else:
                 print("No yolo containers running.")
-            if not watch:
-                return
             now = datetime.datetime.now().strftime("%H:%M:%S")
             print(f"\nupdated {now} — Ctrl-C exits; in tmux, prefix+<n> switches windows")
             time.sleep(PS_WATCH_INTERVAL)
     except KeyboardInterrupt:
         print()
+
+
+def _tmux_session_name() -> str | None:
+    """The tmux session this process's pane belongs to (None if that fails)."""
+    res = _tmux("display-message", "-p", "#{session_name}")
+    name = res.stdout.strip() if res.returncode == 0 else ""
+    return name or None
+
+
+def _all_tmux_windows() -> dict[str, tuple[str, str]]:
+    """{window_name: (window_id, session_name)} across every tmux session.
+
+    The picker looks across sessions, not just its own, so it can switch to a
+    yolo window wherever it lives — e.g. when `ps --watch` runs in a personal
+    tmux session separate from the shared yolo one. On a duplicate name the
+    first window wins, matching _find_tmux_window.
+    """
+    res = _tmux("list-windows", "-a", "-F", "#{window_id}\t#{session_name}\t#{window_name}")
+    if res.returncode != 0:
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for line in res.stdout.splitlines():
+        wid, session, name = line.split("\t", 2)
+        out.setdefault(name, (wid, session))
+    return out
+
+
+def _read_key(fd: int) -> str:
+    """One keypress from a cbreak-mode fd; arrow keys decoded to 'up'/'down'.
+
+    Reads raw bytes from the fd, NOT sys.stdin: Python's buffered reader can
+    slurp the tail of an escape sequence into its own buffer, where select()
+    can't see it — making a real arrow key indistinguishable from a bare ESC.
+    The bare-ESC case is the opposite: nothing follows, which the short
+    timeouts detect.
+    """
+    ch = os.read(fd, 1)
+    if ch != b"\x1b":
+        return ch.decode(errors="replace")
+    if not select.select([fd], [], [], 0.05)[0] or os.read(fd, 1) != b"[":
+        return "\x1b"
+    if not select.select([fd], [], [], 0.05)[0]:
+        return "\x1b"
+    return {b"A": "up", b"B": "down"}.get(os.read(fd, 1), "\x1b")
+
+
+def _wait_key(fd: int, timeout: float) -> str | None:
+    """The next keypress within `timeout` seconds, or None on the deadline."""
+    if not select.select([fd], [], [], timeout)[0]:
+        return None
+    return _read_key(fd)
+
+
+def _ps_picker(home: pathlib.Path) -> None:
+    """Interactive `ps --watch`: cbreak terminal setup around the picker loop.
+
+    Only the terminal plumbing lives here — cbreak mode (key-at-a-time, no
+    echo; ISIG stays on so Ctrl-C still works), hidden cursor, and the
+    restore-on-any-exit in the finally (without which the dashboard window's
+    shell is left wrecked). The loop itself takes an injectable key source.
+    """
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\x1b[?25l")  # hide the cursor; restored in the finally
+    try:
+        _ps_picker_loop(home, _tmux_session_name(), lambda timeout: _wait_key(fd, timeout))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\x1b[?25h\n")
+        sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _ps_picker_loop(home: pathlib.Path, session: str | None, wait_key) -> None:
+    """The picker's event loop, separated from the terminal setup for testing.
+
+    `wait_key(timeout)` returns the next key ('up'/'down'/'q'/'\\r'/...) or
+    None when the refresh deadline passes. The selection is tracked by
+    container *name*, not row index, so a refresh that adds or removes
+    containers doesn't silently move the highlight to a different session.
+    Enter switches the tmux client to the selected container's window
+    (switch-client too when it lives in another session) and the picker keeps
+    running: selection IS select-window, and the dashboard persists for next
+    time.
+    """
+    rows = _ps_rows(home)
+    windows = _all_tmux_windows()
+    selected = None
+    deadline = time.monotonic() + PS_WATCH_INTERVAL
+    while True:
+        names = [r[0] for r in rows]
+        if selected not in names:
+            selected = names[0] if names else None
+        _draw_picker(rows, windows, selected)
+        key = wait_key(max(0.0, deadline - time.monotonic()))
+        if key is None:  # refresh deadline, no keypress
+            rows = _ps_rows(home)
+            windows = _all_tmux_windows()
+            deadline = time.monotonic() + PS_WATCH_INTERVAL
+        elif key in ("q", "\x1b"):
+            return
+        elif key in ("up", "k") and selected in names:
+            selected = names[max(0, names.index(selected) - 1)]
+        elif key in ("down", "j") and selected in names:
+            selected = names[min(len(names) - 1, names.index(selected) + 1)]
+        elif key in ("\r", "\n") and selected in windows:
+            wid, wsession = windows[selected]
+            _tmux("select-window", "-t", wid)
+            if session and wsession != session:
+                _tmux("switch-client", "-t", f"={wsession}")
+
+
+def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
+    """One picker frame: the ps table with the selected row highlighted.
+
+    Containers with no tmux window anywhere (started outside tmux mode) are
+    marked with ' *' — Enter has nowhere to switch for those.
+    """
+    print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
+    orphans = False
+    if rows:
+        display = []
+        for name, topic, cwd, up in rows:
+            mark = "" if name in windows else " *"
+            orphans = orphans or bool(mark)
+            display.append((name + mark, topic, cwd, up))
+        lines = _format_table(PS_HEADERS, display)
+        print(lines[0])
+        for row, line in zip(rows, lines[1:], strict=True):
+            print(f"\x1b[7m{line}\x1b[0m" if row[0] == selected else line)
+    else:
+        print("No yolo containers running.")
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"\nupdated {now} — j/k/arrows move, Enter switches, q quits")
+    if orphans:
+        print("* no tmux window (started outside tmux mode)")
 
 
 def do_tokens() -> None:

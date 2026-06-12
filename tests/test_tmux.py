@@ -10,6 +10,7 @@ or `tmux attach` (tmux mode, invoked outside tmux).
 import json
 import shlex
 import subprocess
+import types
 
 import pytest
 
@@ -19,12 +20,19 @@ def cp(rc=0, out="", err=""):
 
 
 class FakeTmux:
-    """A minimal in-memory tmux server: tracks the session and its windows."""
+    """A minimal in-memory tmux server: tracks the session and its windows.
+
+    Windows are (window_id, window_name) pairs, assumed to live in
+    `session_name` — except entries with an explicit third element, the
+    session, for cross-session picker tests (only `list-windows -a` shows
+    those).
+    """
 
     def __init__(self):
         self.calls = []
         self.has_session = False
-        self.windows = []  # (window_id, window_name)
+        self.session_name = "yolo"
+        self.windows = []  # (window_id, window_name[, session_name])
         self._next = 10
 
     def __call__(self, *args):
@@ -42,8 +50,17 @@ class FakeTmux:
             self.windows.append((wid, args[list(args).index("-n") + 1]))
             return cp(0, out=wid + "\n")
         if verb == "list-windows":
-            return cp(0, out="".join(f"{w}\t{n}\n" for w, n in self.windows))
+            if "-a" in args:
+                lines = (f"{w[0]}\t{self._session(w)}\t{w[1]}\n" for w in self.windows)
+            else:
+                lines = (f"{w[0]}\t{w[1]}\n" for w in self.windows)
+            return cp(0, out="".join(lines))
+        if verb == "display-message":
+            return cp(0, out=self.session_name + "\n")
         return cp(0)  # select-window / switch-client
+
+    def _session(self, window):
+        return window[2] if len(window) == 3 else self.session_name
 
     def named(self, verb):
         return [c for c in self.calls if c[0] == verb]
@@ -276,3 +293,106 @@ def test_watch_only_applies_to_ps(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit, match="--watch"):
         run_cli(["start", "--watch"], home=home, cwd=work)
+
+
+# --- the ps --watch picker -------------------------------------------------------
+
+
+@pytest.fixture
+def ps_rows(cy, monkeypatch):
+    """Canned _ps_rows, returned as a mutable list so tests can vary refreshes."""
+    rows = [
+        ["alpha", "-", "~/hacks/alpha", "2 hours"],
+        ["beta-fix", "fix", "~/wt/fix", "5 minutes"],
+    ]
+    monkeypatch.setattr(cy, "_ps_rows", lambda home: [tuple(r) for r in rows])
+    return rows
+
+
+def keys(*pressed):
+    """A scripted wait_key: plays the given keys, then quits the picker."""
+    seq = list(pressed)
+
+    def wait_key(timeout):
+        return seq.pop(0) if seq else "q"
+
+    return wait_key
+
+
+def test_picker_enter_switches_to_selected_window(cy, tmux, ps_rows, tmp_path):
+    tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
+    cy._ps_picker_loop(tmp_path, "yolo", keys("j", "\r"))
+    # j moved the highlight from alpha to beta-fix; Enter selected its window —
+    # same session, so no switch-client
+    assert ["select-window", "-t", "@2"] in tmux.calls
+    assert tmux.named("switch-client") == []
+
+
+def test_picker_arrows_match_jk(cy, tmux, ps_rows, tmp_path):
+    tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
+    cy._ps_picker_loop(tmp_path, "yolo", keys("down", "down", "up", "\r"))
+    # down/down clamps at the last row, up returns to the first
+    assert ["select-window", "-t", "@1"] in tmux.calls
+
+
+def test_picker_switches_client_across_sessions(cy, tmux, ps_rows, tmp_path):
+    tmux.windows += [("@1", "alpha"), ("@9", "beta-fix", "other")]
+    cy._ps_picker_loop(tmp_path, "yolo", keys("j", "\r"))
+    assert ["select-window", "-t", "@9"] in tmux.calls
+    assert ["switch-client", "-t", "=other"] in tmux.calls
+
+
+def test_picker_enter_noop_without_window(cy, tmux, ps_rows, tmp_path):
+    tmux.windows += [("@1", "alpha")]  # beta-fix runs but has no tmux window
+    cy._ps_picker_loop(tmp_path, "yolo", keys("j", "\r"))
+    assert tmux.named("select-window") == []
+
+
+def test_picker_selection_survives_refresh(cy, tmux, ps_rows, tmp_path):
+    tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
+    script = [
+        ("key", "j"),  # highlight beta-fix
+        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "1 second"])),
+        ("key", "\r"),  # must still target beta-fix, not whatever sits at index 1 now
+    ]
+
+    def wait_key(timeout):
+        if not script:
+            return "q"
+        kind, value = script.pop(0)
+        if kind == "refresh":
+            value()
+            return None
+        return value
+
+    cy._ps_picker_loop(tmp_path, "yolo", wait_key)
+    assert ["select-window", "-t", "@2"] in tmux.calls
+
+
+def test_picker_draw_highlights_and_marks_orphans(cy, tmux, ps_rows, tmp_path, capsys):
+    tmux.windows += [("@1", "alpha")]  # beta-fix has no window -> the * mark
+    cy._ps_picker_loop(tmp_path, "yolo", keys())
+    frame = capsys.readouterr().out
+    highlighted = [line for line in frame.splitlines() if line.startswith("\x1b[7m")]
+    assert highlighted and "alpha" in highlighted[0]  # first row starts selected
+    assert "beta-fix *" in frame
+    assert "* no tmux window" in frame
+
+
+def test_watch_outside_tty_or_tmux_is_passive(cy, monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(cy, "_ps_watch_passive", lambda home: called.append("passive"))
+    monkeypatch.setattr(cy, "_ps_picker", lambda home: called.append("picker"))
+    monkeypatch.delenv("TMUX", raising=False)  # pytest stdin isn't a tty either
+    cy.do_ps(tmp_path, watch=True)
+    assert called == ["passive"]
+
+
+def test_watch_interactive_in_tmux_is_picker(cy, monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(cy, "_ps_watch_passive", lambda home: called.append("passive"))
+    monkeypatch.setattr(cy, "_ps_picker", lambda home: called.append("picker"))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-501/default,12345,0")
+    monkeypatch.setattr(cy.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    cy.do_ps(tmp_path, watch=True)
+    assert called == ["picker"]

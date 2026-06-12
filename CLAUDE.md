@@ -527,7 +527,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   cross-repo counterpart to `list`), as a table (NAME/TOPIC/DIRECTORY/UP) read
   from the `yolo.*` labels (`docker ps --filter label=yolo.cwd`); needs no git
   repo. `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's the dashboard
-  tmux mode seeds (see below), but it's an ordinary verb usable anywhere.
+  tmux mode seeds (see below), but it's an ordinary verb usable anywhere. Run
+  interactively *inside tmux* (stdin a TTY + `$TMUX` set), `--watch` is a
+  **picker**: j/k/arrows move, Enter `select-window`s to the chosen container's
+  window, q/ESC quits; otherwise it falls back to the passive redraw loop.
 
 Implementation shape:
 
@@ -628,6 +631,23 @@ Details that matter:
 - All tmux commands go through the `_tmux()` wrapper — the test seam
   (`tests/test_tmux.py` fakes the server there and asserts on exact argv
   sequences).
+- **The dashboard picker** (`_ps_picker` / `_ps_picker_loop` / `_draw_picker`):
+  interactive `ps --watch` puts the terminal in cbreak mode (ISIG stays on, so
+  Ctrl-C works; cursor hidden; everything restored in a `finally` — without it
+  the dashboard window's shell is wrecked) and `select()`s on stdin with the
+  refresh deadline as timeout, so keys are immediate while the 2s redraw
+  cadence continues. Keys are read via `os.read` on the raw fd, NOT
+  `sys.stdin` — Python's buffered reader can slurp the tail of an arrow-key
+  escape sequence where `select()` can't see it (`_read_key`, which also
+  distinguishes bare ESC by short timeout). The selection is tracked by
+  container *name*, not row index, so a refresh can't silently move the
+  highlight to a different session. Enter maps name → window via
+  `_all_tmux_windows()` (all sessions, so it works from a personal tmux
+  session too; cross-session adds `switch-client`) and the picker keeps
+  running — selection IS `select-window`; the dashboard persists. Containers
+  without a window (started outside tmux mode) render with a `*` and Enter
+  no-ops. The loop takes an injectable `wait_key` and is tested with scripted
+  keys; only the terminal plumbing in `_ps_picker` is untested.
 
 ## The worktree mechanics (`setup_worktree`)
 
@@ -770,5 +790,8 @@ expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux
 server patched in at the `_tmux` seam (session creation + dashboard seeding,
 window command quoting, inside-vs-outside `$TMUX` focusing, window reuse, the
-config keys) and the `ps` verb's table from canned `docker ps` output.
+config keys), the `ps` verb's table from canned `docker ps` output, and the
+`--watch` picker loop via scripted `wait_key` events (selection movement and
+clamping, Enter→select-window, cross-session switch-client, selection
+surviving a refresh, orphan marking, the picker-vs-passive dispatch).
 Keep them green when changing flags or mounts.

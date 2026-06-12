@@ -185,8 +185,12 @@ What `--tmux` does on each launch:
 - Makes sure the shared tmux session exists, creating it detached if not. A
   fresh session gets a **dashboard** as window 0: `yolo ps --watch`, a live
   table of every running yolo container (NAME / TOPIC / DIRECTORY / UP) across
-  all repos. (`ps` is an ordinary verb — useful on its own, with or without
-  tmux mode.)
+  all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
+  the highlight, Enter switches to that session's window, `q` quits. A
+  container with no tmux window to switch to (started outside tmux mode) is
+  marked with `*`. (`ps` is an ordinary verb — useful on its own; run
+  interactively inside tmux it's the picker, anywhere else `--watch` is just a
+  self-refreshing table.)
 - Opens a new window named after the container, running the same `docker run`
   the default mode would have exec'd. The window closes when Claude exits; a
   window whose command *fails* sticks around showing the error until you press
