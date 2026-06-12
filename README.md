@@ -82,6 +82,16 @@ leaving `--ssh-agent` off unless a project actually needs Claude to push.
   guarantees a Python ≥3.10 (it's still stdlib-only — uv just picks the
   interpreter, since macOS's system `python3` is often too old).
 
+## Limitations
+
+Although `yolo` is designed to run on a Mac, the containers it launches are
+Linux (Ubuntu). So despite running on a Mac, it's not much good for *Mac*
+development: inside the container Claude has no access to Xcode, Swift
+toolchains, macOS frameworks, Apple's simulators, or any other Mac-specific
+tooling — it can edit the source files in the mounted directory, but it can't
+build or run anything that needs macOS. It's best suited to projects whose
+toolchain runs on Linux: web apps, servers, CLI tools, libraries, and the like.
+
 ## Installation
 
 The preferred way to install `yolo` is with `uv tool install` which builds it
