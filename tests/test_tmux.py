@@ -282,8 +282,9 @@ def test_ps_renders_cross_repo_table(cy, monkeypatch, capsys, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     out = (
-        f"myrepo-fix\tfix\t{home}/.claude-yolo/worktrees/-x-myrepo/fix\t2 hours\n"
-        f"work\t\t{home}/hacks/work\t5 minutes\n"
+        f"myrepo-fix\tfix\t{home}/.claude-yolo/worktrees/-x-myrepo/fix"
+        "\t127.0.0.1:55001->8000/tcp\t2 hours\n"
+        f"work\t\t{home}/hacks/work\t\t5 minutes\n"
     )
     calls = fake_docker_ps(monkeypatch, cy, out)
     cy.do_ps(home, watch=False)
@@ -294,10 +295,17 @@ def test_ps_renders_cross_repo_table(cy, monkeypatch, capsys, tmp_path):
     assert "label=yolo.cwd" in ps_call  # the filter that finds yolo's containers
 
     lines = printed.splitlines()
-    assert lines[0].split() == ["NAME", "TOPIC", "DIRECTORY", "UP"]
-    assert "myrepo-fix" in lines[1] and "fix" in lines[1]
-    # cwd-mode row: "-" for no topic, home shortened to ~
+    assert lines[0].split() == ["NAME", "TOPIC", "DIRECTORY", "PORTS", "UP"]
+    # docker's PORTS blob is condensed to the bare host->container pair
+    assert "myrepo-fix" in lines[1] and "fix" in lines[1] and "55001->8000" in lines[1]
+    # cwd-mode row: "-" for no topic and no ports, home shortened to ~
     assert "work" in lines[2] and " - " in lines[2] and "~/hacks/work" in lines[2]
+
+
+def test_condense_ports_drops_noise_and_ipv6_twin(cy):
+    raw = "127.0.0.1:55001->8000/tcp, 0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp"
+    assert cy._condense_ports(raw) == "55001->8000,3000->3000"
+    assert cy._condense_ports("") == ""
 
 
 def test_ps_with_nothing_running(cy, monkeypatch, capsys, tmp_path):
@@ -319,8 +327,8 @@ def test_watch_only_applies_to_ps(cy, run_cli, dirs):
 def ps_rows(cy, monkeypatch):
     """Canned _ps_rows, returned as a mutable list so tests can vary refreshes."""
     rows = [
-        ["alpha", "-", "~/hacks/alpha", "2 hours"],
-        ["beta-fix", "fix", "~/wt/fix", "5 minutes"],
+        ["alpha", "-", "~/hacks/alpha", "-", "2 hours"],
+        ["beta-fix", "fix", "~/wt/fix", "55001->8000", "5 minutes"],
     ]
     monkeypatch.setattr(cy, "_ps_rows", lambda home: [tuple(r) for r in rows])
     return rows
@@ -369,7 +377,7 @@ def test_picker_selection_survives_refresh(cy, tmux, ps_rows, tmp_path):
     tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
     script = [
         ("key", "j"),  # highlight beta-fix
-        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "1 second"])),
+        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "-", "1 second"])),
         ("key", "\r"),  # must still target beta-fix, not whatever sits at index 1 now
     ]
 

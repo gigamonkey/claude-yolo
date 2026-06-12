@@ -219,6 +219,48 @@ There are also three token-management verbs — `setup-token`, `tokens`, and
 `forget-token` — described under [Authentication modes](#authentication-modes),
 and a `config` verb described under [Configuration](#configuration).
 
+### Port forwarding and `yolo browse`
+
+If the project runs a server you want to reach from a host browser, configure
+which container port(s) it uses and let `yolo` handle the host side:
+
+```bash
+yolo config --add-port 8000       # this project's dev server listens on 8000
+yolo start                        # ...every launch now forwards it
+yolo browse                       # open the browser at this session's server
+yolo browse fix-auth              # ...or at a worktree session's server
+```
+
+For each configured port, `yolo` publishes it with a **docker-assigned host
+port**, bound to `127.0.0.1` (never the LAN). Letting docker pick the host port
+is what makes parallel sessions work: `yolo start fix-auth` and `yolo start
+refactor-db` can both run the dev server on container port 8000 without
+fighting over host port 8000. The cost is that the host port differs per
+session — which is exactly what `browse` absorbs: it looks up the running
+session's container (by worktree name, or the current directory), asks docker
+which host port was assigned, prints the URL, and opens it. `yolo ps` also
+shows every session's port mappings, so the dashboard doubles as the "which
+session is on which port" map.
+
+Details:
+
+- A session with several forwarded ports opens the first-configured one;
+  `yolo browse --port 3000` picks another. `--print`/`-n` prints the URL
+  without opening a browser.
+- If you run only one session at a time and want a stable, bookmarkable port,
+  pin the host side: `--port 8000:8000` (`HOST:CONTAINER`). A second
+  concurrent session then fails at launch with address-in-use, as it must.
+- The server inside the container has to listen on **`0.0.0.0`**, not
+  `127.0.0.1` — docker's forward can't reach a loopback-bound server. Many dev
+  servers default to loopback; `yolo` tells Claude this in the system prompt
+  whenever ports are forwarded, so servers it starts should just work.
+- Port mappings are fixed at container launch (docker can't add one to a
+  running container), so after configuring a port, exit the session and
+  `yolo resume`.
+
+See the [`ports` config key](#ports---port-hostcontainer-repeatable) for the
+config details.
+
 ### tmux mode
 
 By default every `yolo` session takes over the terminal you launched it from,
@@ -241,8 +283,8 @@ What `--tmux` does on each launch:
 
 - Makes sure the shared tmux session exists, creating it detached if not. A
   fresh session gets a **dashboard** as window 0: `yolo ps --watch`, a live
-  table of every running yolo container (NAME / TOPIC / DIRECTORY / UP) across
-  all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
+  table of every running yolo container (NAME / TOPIC / DIRECTORY / PORTS / UP)
+  across all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
   the highlight, Enter switches to that session's window, `q` quits. A
   container with no tmux window to switch to (started outside tmux mode) is
   marked with `*`. (`ps` is an ordinary verb — useful on its own; run
@@ -462,8 +504,8 @@ to highest precedence:
 
 3. **CLI flags** — always win over both files.
 
-Per key, a higher layer overrides a lower one, except `prompts` and
-`mounts`, whose lists *accumulate* across all the layers. A JSON `null`
+Per key, a higher layer overrides a lower one, except `prompts`, `mounts`, and
+`ports`, whose lists *accumulate* across all the layers. A JSON `null`
 leaves a key at its built-in default.
 
 Both files live **outside directories a session in a container can write**, and
@@ -530,6 +572,19 @@ Claude as `--add-dir`, so it shows up as a working directory Claude knows
 about. In config, a string or list of `PATH[:ro|:rw]` specs; the lists
 concatenate across the layers and the CLI (on a same-path ro/rw conflict the
 higher layer wins).
+
+### `ports` (`--port [HOST:]CONTAINER`, repeatable)
+
+Container ports the project's server listens on, forwarded to the host — see
+[Port forwarding and `yolo browse`](#port-forwarding-and-yolo-browse). A bare
+container port (`"8000"`, the normal form) gets a docker-assigned host port per
+session, so parallel sessions never collide; `HOST:CONTAINER` (`"8000:8000"`)
+pins a stable host port for single-session use. Forwards are always bound to
+`127.0.0.1` — a host *address* is deliberately not expressible here, so a config
+file can't put the skip-permissions container's server on your LAN (the raw
+`-- -p` passthrough is the escape hatch if you truly want that). In config, a
+string or list of specs; like `mounts`, the lists concatenate across the layers
+and the CLI (on a same-container-port conflict the higher layer wins).
 
 ### `base` (`--base REF`, default `HEAD`)
 
@@ -634,6 +689,10 @@ A few editing flags go beyond whole-key sets:
   require the directory to exist — so a stale mount can always be removed.
 - **`--add-prompt PROMPT` / `--remove-prompt PROMPT`** (repeatable) do the same
   for the `prompts` list (removal is by exact string match).
+- **`--add-port [HOST:]CONTAINER` / `--remove-port CONTAINER`** (repeatable)
+  likewise for the `ports` list. `--add-port` replaces an existing entry for
+  the same container port (so a `HOST:` pin can be added or dropped);
+  `--remove-port` matches by container port, ignoring any pin.
 
 Contradictory instructions in one call — setting and `--unset`ting the same
 key, or `--mount` alongside `--add-mount`/`--remove-mount` — are errors.

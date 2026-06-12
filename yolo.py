@@ -655,6 +655,7 @@ YOLO_KEYS = {
     "base": ("base", "str"),
     "prompts": ("prompts", "list"),
     "mounts": ("mounts", "list"),
+    "ports": ("ports", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
     "tmux": ("tmux", "bool"),
     "tmux_session": ("tmux_session", "str"),
@@ -662,7 +663,7 @@ YOLO_KEYS = {
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("prompts", "mounts")
+_CONCAT_DESTS = ("prompts", "mounts", "ports")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -864,6 +865,49 @@ def _resolve_mounts(specs: list[str]) -> list[tuple[pathlib.Path, str]]:
     return list(out.items())
 
 
+def _parse_port_spec(spec: str) -> tuple[int | None, int]:
+    """One --port / `ports` value, `[HOST:]CONTAINER` -> (host or None, container).
+
+    A bare container port is the normal form: the host side stays 0 so docker
+    assigns a free ephemeral port, which is what lets parallel sessions of the
+    same project coexist (`yolo browse` finds the assigned port). An explicit
+    HOST: pins a stable, bookmarkable host port instead — single-session use; a
+    second concurrent session fails at `docker run` with address-in-use. A host
+    *address* is deliberately not expressible: forwards are always loopback-bound
+    so the skip-permissions container's server never lands on the LAN (the raw
+    `-- -p` passthrough remains the escape hatch).
+    """
+    host_part, sep, container_part = spec.rpartition(":")
+    parts = [host_part, container_part] if sep else [container_part]
+    if not all(p.isdigit() and 0 < int(p) < 65536 for p in parts):
+        sys.exit(f"port: must be CONTAINER or HOST:CONTAINER (ports 1-65535): {spec!r}")
+    return (int(host_part) if sep else None, int(container_part))
+
+
+def _resolve_ports(specs: list[str]) -> list[tuple[int | None, int]]:
+    """Parse + dedupe the merged port specs into (host, container) pairs.
+
+    Keyed by container port, lowest-precedence first (like _resolve_mounts), so
+    when two layers forward the same container port the later spec — the higher
+    layer — wins (e.g. a project's `9000:8000` pin over a global `8000`).
+    Insertion order is kept: the first-configured port is `browse`'s default.
+    """
+    out: dict[int, int | None] = {}
+    for spec in specs:
+        host, cport = _parse_port_spec(spec)
+        out[cport] = host
+    return [(host, cport) for cport, host in out.items()]
+
+
+def _port_container(spec: str) -> str:
+    """The container-port part of a `[HOST:]CONTAINER` port spec.
+
+    Lenient on purpose (no validation), like _spec_path: it's used to *match*
+    stored specs for --remove-port, whose point may be deleting a malformed one.
+    """
+    return spec.rpartition(":")[2]
+
+
 def _project_key(cwd: pathlib.Path) -> str:
     """The projects.json key for this invocation.
 
@@ -951,6 +995,11 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
             "--prompt/-p replaces the whole list; "
             "don't combine it with --add-prompt/--remove-prompt."
         )
+    if "ports" in explicit and (parsed.add_ports or parsed.remove_ports):
+        sys.exit(
+            "--port replaces the whole `ports` list; "
+            "don't combine it with --add-port/--remove-port."
+        )
     unsets = [u.replace("_", "-") for u in parsed.unsets]
     for u in unsets:
         if u in explicit:
@@ -959,9 +1008,13 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
         sys.exit("can't combine --unset mounts with --add-mount/--remove-mount.")
     if "prompts" in unsets and (parsed.add_prompts or parsed.remove_prompts):
         sys.exit("can't combine --unset prompts with --add-prompt/--remove-prompt.")
+    if "ports" in unsets and (parsed.add_ports or parsed.remove_ports):
+        sys.exit("can't combine --unset ports with --add-port/--remove-port.")
 
     for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
+    for spec in [*explicit.get("ports", []), *parsed.add_ports]:
+        _parse_port_spec(spec)  # likewise: a malformed port spec can't be pinned
 
     entry = dict(current)
     for k, v in explicit.items():
@@ -1006,6 +1059,21 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
         if prompts:
             entry["prompts"] = prompts
 
+    if parsed.add_ports or parsed.remove_ports:
+        ports = _take_list_key(entry, "ports", where)
+        for rm in parsed.remove_ports:
+            kept = [s for s in ports if _port_container(s) != _port_container(rm)]
+            if len(kept) == len(ports):
+                sys.exit(f"--remove-port {rm}: no such port in {where}.")
+            ports = kept
+        for add in parsed.add_ports:
+            # Same container port already listed -> replace it (so a HOST: pin
+            # can be added or dropped without a remove+add).
+            ports = [s for s in ports if _port_container(s) != _port_container(add)]
+            ports.append(add)
+        if ports:
+            entry["ports"] = ports
+
     return entry
 
 
@@ -1037,6 +1105,8 @@ def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, par
         or parsed.remove_mounts
         or parsed.add_prompts
         or parsed.remove_prompts
+        or parsed.add_ports
+        or parsed.remove_ports
         or parsed.unsets
     )
 
@@ -1162,6 +1232,7 @@ PARSER.add_argument(
         "start",
         "resume",
         "shell",
+        "browse",
         "finish",
         "list",
         "ps",
@@ -1169,10 +1240,12 @@ PARSER.add_argument(
         "tokens",
         "forget-token",
     ],
-    help="Optional subcommand. start/resume/shell take an *optional* TOPIC: with a "
-    "TOPIC they act on a git worktree of that name (start creates it, resume/shell "
-    "require it); with no TOPIC they act on the current directory (start a fresh "
-    "session, resume the most recent one, or open a shell). 'finish' removes a "
+    help="Optional subcommand. start/resume/shell/browse take an *optional* TOPIC: "
+    "with a TOPIC they act on a git worktree of that name (start creates it, the "
+    "others require it); with no TOPIC they act on the current directory (start a "
+    "fresh session, resume the most recent one, or open a shell). 'browse' opens "
+    "the host browser at the running session's forwarded port (see --port/`ports` "
+    "config). 'finish' removes a "
     "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'ps' shows "
     "all running yolo containers across repos (see --watch); 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
@@ -1245,6 +1318,26 @@ PARSER.add_argument(
     help="For `config`: remove PATH's entry from the stored `mounts` list (any "
     ":ro/:rw suffix is ignored; the directory needn't exist, so a stale mount "
     "can be removed). Errors if the path isn't listed. Repeatable.",
+)
+PARSER.add_argument(
+    "--add-port",
+    dest="add_ports",
+    action="append",
+    default=[],
+    metavar="[HOST:]CONTAINER",
+    help="For `config`: add one port to the stored `ports` list (or update its "
+    "HOST: pin if the container port is already listed), leaving the rest of "
+    "the list alone — unlike --port, which replaces the whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-port",
+    dest="remove_ports",
+    action="append",
+    default=[],
+    metavar="CONTAINER",
+    help="For `config`: remove a container port's entry from the stored `ports` "
+    "list (any HOST: prefix is ignored). Errors if the port isn't listed. "
+    "Repeatable.",
 )
 PARSER.add_argument(
     "--add-prompt",
@@ -1370,6 +1463,26 @@ PARSER.add_argument(
     "a working directory.",
 )
 PARSER.add_argument(
+    "--port",
+    dest="ports",
+    action="append",
+    default=[],
+    metavar="[HOST:]CONTAINER",
+    help="Forward a container port to the host, bound to 127.0.0.1. With a bare "
+    "CONTAINER port docker picks a free host port per session — so parallel "
+    "sessions never collide — discoverable with `yolo browse`; HOST: pins a "
+    "stable host port instead. Repeatable; also settable as `ports` in config, "
+    "where the lists concatenate across the layers and the CLI. With the "
+    "`browse` verb: which forwarded container port to open.",
+)
+PARSER.add_argument(
+    "--print",
+    "-n",
+    dest="print_url",
+    action="store_true",
+    help="For `browse`: print the session's URL without opening a browser.",
+)
+PARSER.add_argument(
     "--require-project-entry",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -1456,13 +1569,18 @@ def build_claude_args(
     resume=None,
     name: str | None = None,
     add_dirs=(),
+    forwarded_ports=(),
 ) -> list[str]:
     """The args passed to `claude` inside the container (everything after the image).
 
     Always includes the container-only sandbox override and the built-in
     "you're in a container" system prompt (plus any -p additions). Extra mounts
-    are forwarded as --add-dir so they're first-class working directories.
-    Optionally adds --continue / --resume [ID] and a session --name.
+    are forwarded as --add-dir so they're first-class working directories;
+    forwarded container ports get a prompt line telling Claude servers must bind
+    0.0.0.0 — the single most common reason a forwarded port "doesn't work" is a
+    dev server defaulting to loopback inside the container, where docker's
+    forward can't reach it. Optionally adds --continue / --resume [ID] and a
+    session --name.
     """
     extra_system_prompt = [
         "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
@@ -1471,6 +1589,16 @@ def build_claude_args(
                 "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."
             ]
             if not ssh_agent
+            else []
+        ),
+        *(
+            [
+                f"Container port(s) {', '.join(str(p) for p in forwarded_ports)} are "
+                "forwarded to the host. A server must listen on 0.0.0.0 (not "
+                "127.0.0.1) to be reachable from the host browser; the user opens "
+                "it with `yolo browse`."
+            ]
+            if forwarded_ports
             else []
         ),
         *prompts,
@@ -1735,6 +1863,7 @@ def launch_container(
     entrypoint: str | None = None,
     docker_args=(),
     mounts=(),
+    ports=(),
 ) -> None:
     """Assemble the `docker run` argv from the credential/config flags and exec it.
 
@@ -1743,7 +1872,8 @@ def launch_container(
     suffixes; yolo.repo / yolo.worktree labels are stamped so the verbs can find
     the container later. `command` is the args after the image; `entrypoint`
     overrides the image ENTRYPOINT (used to drop into bash for `shell`); `mounts`
-    is the resolved (dir, mode) list from --mount / the `mounts` config key.
+    is the resolved (dir, mode) list from --mount / the `mounts` config key;
+    `ports` the resolved (host-or-None, container) pairs from --port / `ports`.
     """
     container = container_base
     args = [
@@ -1764,6 +1894,13 @@ def launch_container(
     # identical host paths, like the cwd, so paths match host<->container.
     for path, mode in mounts:
         args += ["-v", f"{path}:{path}:{mode}"]
+
+    # Port forwards (--port / `ports` config): loopback-bound, never the LAN.
+    # Host port 0 = docker assigns a free ephemeral port, so parallel sessions
+    # of the same project can't collide; `docker port` (via `yolo browse`) is
+    # the registry of what was assigned — yolo keeps no port state of its own.
+    for host_port, container_port in ports:
+        args += ["-p", f"127.0.0.1:{host_port or 0}:{container_port}"]
 
     if parsed.ssh_agent:
         # Forward the host ssh-agent via the Docker engine's magic socket. We canNOT bind-mount
@@ -1847,6 +1984,12 @@ def launch_container(
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
     args += ["--label", f"yolo.cwd={cwd}"]
+    if ports:
+        # The container ports forwarded at launch, in config order (first =
+        # `browse`'s default). The label — not config — is what browse/ps read:
+        # it describes the *actual* container, which can't change after launch,
+        # while config describes the next one.
+        args += ["--label", "yolo.ports=" + ",".join(str(c) for _, c in ports)]
 
     build_docker_image(no_cache=parsed.rebuild_image)
 
@@ -2015,14 +2158,42 @@ def do_list(home: pathlib.Path, base: str) -> None:
 PS_WATCH_INTERVAL = 2  # seconds between `ps --watch` refreshes
 
 
-def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str]]:
-    """(name, topic, directory, up) for every running yolo container, any repo.
+# One docker-ps port mapping, e.g. `127.0.0.1:55001->8000/tcp`; group 1 is the
+# host port, group 2 the container port.
+_PORT_MAP_RE = re.compile(r"(?:[\d.]+:)?(\d+)->(\d+)/")
+
+
+def _condense_ports(raw: str) -> str:
+    """docker ps's PORTS blob as compact `host->container` pairs.
+
+    `127.0.0.1:55001->8000/tcp, [::]:8000->8000/tcp` -> `55001->8000` — drops
+    the address and protocol noise and dedupes the IPv6 twin docker lists for
+    a 0.0.0.0 binding (possible via the raw `-- -p` passthrough).
+    """
+    pairs = []
+    for part in raw.split(","):
+        m = _PORT_MAP_RE.search(part)
+        if m and (pair := f"{m.group(1)}->{m.group(2)}") not in pairs:
+            pairs.append(pair)
+    return ",".join(pairs)
+
+
+def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
+    """(name, topic, directory, ports, up) for every running yolo container.
 
     Read from the yolo.* labels every launch stamps; the yolo.cwd filter is what
-    distinguishes yolo's containers from everything else `docker ps` knows.
+    distinguishes yolo's containers from everything else `docker ps` knows. The
+    port mappings come straight from docker ps's own PORTS column — free, unlike
+    a per-container `docker port` call, which matters at the 2s --watch cadence.
     """
     fmt = "\t".join(
-        ("{{.Names}}", '{{.Label "yolo.worktree"}}', '{{.Label "yolo.cwd"}}', "{{.RunningFor}}")
+        (
+            "{{.Names}}",
+            '{{.Label "yolo.worktree"}}',
+            '{{.Label "yolo.cwd"}}',
+            "{{.Ports}}",
+            "{{.RunningFor}}",
+        )
     )
     try:
         out = subprocess.run(
@@ -2034,14 +2205,14 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str]]:
         sys.exit("docker not found; is it installed and on PATH?")
     rows = []
     for line in out.splitlines():
-        name, topic, cwd, up = (line.split("\t") + [""] * 4)[:4]
+        name, topic, cwd, ports, up = (line.split("\t") + [""] * 5)[:5]
         if cwd.startswith(f"{home}/"):
             cwd = "~" + cwd[len(str(home)) :]
-        rows.append((name, topic or "-", cwd, up))
+        rows.append((name, topic or "-", cwd, _condense_ports(ports) or "-", up))
     return rows
 
 
-PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "UP")
+PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "PORTS", "UP")
 
 
 def do_ps(home: pathlib.Path, *, watch: bool) -> None:
@@ -2207,10 +2378,10 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
     orphans = False
     if rows:
         display = []
-        for name, topic, cwd, up in rows:
+        for name, topic, cwd, ports, up in rows:
             mark = "" if name in windows else " *"
             orphans = orphans or bool(mark)
-            display.append((name + mark, topic, cwd, up))
+            display.append((name + mark, topic, cwd, ports, up))
         lines = _format_table(PS_HEADERS, display)
         print(lines[0])
         for row, line in zip(rows, lines[1:], strict=True):
@@ -2221,6 +2392,85 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
     print(f"\nupdated {now} — j/k/arrows move, Enter switches, q quits")
     if orphans:
         print("* no tmux window (started outside tmux mode)")
+
+
+def _container_label(cid: str, key: str) -> str:
+    """The value of one docker label on a container, or '' if unset/unreadable."""
+    res = subprocess.run(
+        ["docker", "inspect", "-f", f'{{{{index .Config.Labels "{key}"}}}}', cid],
+        capture_output=True,
+        text=True,
+    )
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def _docker_port(cid: str, container_port: int) -> int:
+    """The host port docker mapped `container_port` to, via `docker port`.
+
+    Docker is the registry of assigned ports (yolo keeps no port state); this
+    asks it directly. The output can list an IPv6 line too — take the first
+    plain host:port one.
+    """
+    res = subprocess.run(
+        ["docker", "port", cid, str(container_port)],
+        capture_output=True,
+        text=True,
+    )
+    for line in res.stdout.splitlines():
+        host, sep, port = line.strip().rpartition(":")
+        if sep and port.isdigit() and not host.startswith("["):
+            return int(port)
+    sys.exit(f"docker reports no host mapping for container port {container_port}.")
+
+
+def _open_url(url: str) -> None:
+    """Open a URL in the host browser (the macOS `open`). A seam for tests."""
+    subprocess.run(["open", url], check=False)
+
+
+def do_browse(
+    topic: str | None,
+    home: pathlib.Path,
+    cwd: pathlib.Path,
+    *,
+    select: int | None = None,
+    print_only: bool = False,
+) -> None:
+    """`browse` verb: open the host browser at a running session's forwarded port.
+
+    The discoverability counterpart to the docker-assigned host ports: finds the
+    session's container by the same label query `shell` uses (yolo.worktree for a
+    TOPIC, yolo.cwd otherwise), reads the yolo.ports label for which container
+    ports were forwarded at launch (first = default; --port N selects another),
+    resolves the assigned host port with `docker port`, prints the URL — always,
+    so it's copy-pasteable — and opens it. No poll for the server actually
+    listening: browse may legitimately run before Claude has started the server,
+    and a not-yet-listening tab is self-explanatory and refreshable.
+    """
+    if topic:
+        worktree, _, slug = _worktree_dir(topic, home)
+        cid = running_container_for(slug, topic)
+        where = f"'{topic}'"
+    else:
+        cid = running_container_for(_repo_slug_or_none(), cwd=cwd)
+        where = "this directory"
+    if not cid:
+        sys.exit(f"no yolo session running for {where}; start one with `yolo start`.")
+    label = _container_label(cid, "yolo.ports")
+    if not label:
+        sys.exit(
+            f"the session for {where} was launched without any forwarded ports, and "
+            "docker can't add a port mapping to a running container. Configure one "
+            "(e.g. `yolo config --add-port 8000`), exit the session, and `yolo resume`."
+        )
+    forwarded = [int(p) for p in label.split(",")]
+    port = select if select is not None else forwarded[0]
+    if port not in forwarded:
+        sys.exit(f"container port {port} isn't forwarded for this session (forwarded: {label}).")
+    url = f"http://127.0.0.1:{_docker_port(cid, port)}/"
+    print(url)
+    if not print_only:
+        _open_url(url)
 
 
 def do_tokens() -> None:
@@ -2332,12 +2582,17 @@ def main():
     # its sentinel re-parse needs the pristine parser defaults.
     parsed = PARSER.parse_args(script_argv)
     verb, topic = parsed.verb, parsed.topic
+    # --port values *explicitly on the CLI*: this pristine parse has no config
+    # defaults layered in yet, so parsed.ports here is exactly the CLI values.
+    # `browse` needs that distinction — its --port selects a port, and a
+    # config-supplied `ports` list must not read as a selection.
+    cli_ports = list(parsed.ports)
 
     # `finish` only makes sense against a worktree, so it still requires a TOPIC;
     # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
     if verb == "finish" and not topic:
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
-    if topic and verb not in ("start", "resume", "shell", "finish"):
+    if topic and verb not in ("start", "resume", "shell", "browse", "finish"):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
@@ -2354,6 +2609,8 @@ def main():
         sys.exit("--force only applies to `finish`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
+    if parsed.print_url and verb != "browse":
+        sys.exit("--print/-n only applies to `browse`.")
     for flag, val in (
         ("--init", parsed.init),
         ("--global", parsed.cfg_global),
@@ -2362,6 +2619,8 @@ def main():
         ("--remove-mount", parsed.remove_mounts),
         ("--add-prompt", parsed.add_prompts),
         ("--remove-prompt", parsed.remove_prompts),
+        ("--add-port", parsed.add_ports),
+        ("--remove-port", parsed.remove_ports),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
@@ -2383,6 +2642,20 @@ def main():
         return
     if verb == "ps":
         do_ps(home, watch=parsed.watch)
+        return
+    if verb == "browse":
+        # Selection comes from cli_ports (the pre-config parse), NOT parsed.ports:
+        # after the re-parse the config layers' `ports` list is mixed in, and a
+        # configured port must not masquerade as an explicit selection.
+        select = None
+        if cli_ports:
+            if len(cli_ports) > 1 or not cli_ports[0].isdigit():
+                sys.exit(
+                    "browse: pass at most one --port, as the bare *container* port "
+                    "to open (e.g. `yolo browse --port 3000`)."
+                )
+            select = int(cli_ports[0])
+        do_browse(topic, home, cwd, select=select, print_only=parsed.print_url)
         return
     if verb == "tokens":
         do_tokens()
@@ -2466,10 +2739,13 @@ def main():
             "run `yolo config` here to create one, or pass --no-require-project-entry."
         )
 
-    # Extra mounts, merged across config layers and the CLI. Resolved only on the
-    # launch paths so a stale mount path can't break `list`/`finish`/`config`.
+    # Extra mounts and port forwards, merged across config layers and the CLI.
+    # Resolved only on the launch paths so a stale mount path or malformed port
+    # spec can't break `list`/`finish`/`config`.
     mounts = _resolve_mounts(parsed.mounts)
     mount_dirs = [path for path, _ in mounts]
+    ports = _resolve_ports(parsed.ports)
+    container_ports = [c for _, c in ports]
 
     # Resolve where we run and the trailing command per verb.
     common_git = None
@@ -2511,6 +2787,7 @@ def main():
             ssh_agent=parsed.ssh_agent,
             resume=parsed.resume,
             add_dirs=mount_dirs,
+            forwarded_ports=container_ports,
         )
     elif verb == "resume" and not parsed.new:
         command = build_claude_args(
@@ -2518,6 +2795,7 @@ def main():
             ssh_agent=parsed.ssh_agent,
             continue_session=True,
             add_dirs=mount_dirs,
+            forwarded_ports=container_ports,
         )
     else:
         # start, or `resume TOPIC --new` (a fresh named session in the worktree).
@@ -2526,6 +2804,7 @@ def main():
             ssh_agent=parsed.ssh_agent,
             name=session_name,
             add_dirs=mount_dirs,
+            forwarded_ports=container_ports,
         )
 
     launch_container(
@@ -2540,6 +2819,7 @@ def main():
         entrypoint=entrypoint,
         docker_args=docker_args,
         mounts=mounts,
+        ports=ports,
     )
 
 

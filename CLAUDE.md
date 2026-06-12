@@ -24,6 +24,10 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --ssh-agent              # forward the host ssh-agent (off by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
+./yolo.py --port 8000              # forward container port 8000 (docker picks the host port)
+./yolo.py --port 8000:8000         # ...or pin host port 8000 (single-session)
+./yolo.py browse                   # open the browser at this session's forwarded port
+./yolo.py browse fix-auth          # ...or at a worktree session's
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
 ./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
 ./yolo.py forget-token             # delete this config dir's token (local only)
@@ -46,11 +50,11 @@ that tooling is never needed to *run* the script, only to develop it (see
 
 The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 (`oauth-token` [default] / `keychain` / `bedrock`). Everything else —
-`--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--tmux` — is an
-**orthogonal flag** that composes freely with the chosen auth mode and with
-each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`finish`/`list`/`ps`/`setup-token`/`tokens`/
-`forget-token`) and its `TOPIC`; see [Workflow verbs](#workflow-verbs).
+`--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
+is an **orthogonal flag** that composes freely with the chosen auth mode and
+with each other. The only positional args are an optional `verb`
+(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`setup-token`/
+`tokens`/`forget-token`) and its `TOPIC`; see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
 `~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
@@ -181,6 +185,23 @@ on top of whichever auth is chosen:
   dups deduped; on a same-path ro/rw conflict the higher layer wins). A `shell`
   exec'd into a *running* container necessarily joins it with the mounts it was
   started with — docker can't add mounts to a live container.
+- **`--port [HOST:]CONTAINER`** (repeatable; `ports` in config) → forward a
+  container port to the host, always **loopback-bound** (`-p 127.0.0.1:…`; a host
+  *address* is deliberately not expressible, so config can't put the container's
+  server on the LAN — the raw `-- -p` passthrough is the escape hatch). A bare
+  container port publishes with **host port 0**: docker assigns a free ephemeral
+  port per session, so parallel sessions of one project never collide, and
+  `docker port` (via `yolo browse`) is the registry of what was assigned — yolo
+  keeps no port state. `HOST:` pins a stable host port (single-session;
+  a concurrent second session fails at `docker run` with address-in-use). Port
+  lists concatenate across layers/CLI like `mounts` (same-container-port
+  conflict → higher layer wins; first-configured port is `browse`'s default).
+  Each launch with ports stamps a **`yolo.ports`** label (container ports,
+  config order) — what `browse`/`ps` read, describing the *actual* container —
+  and adds a system-prompt line telling Claude servers must bind **0.0.0.0**
+  (loopback-bound servers are unreachable through docker's forward) and that
+  the user opens them with `yolo browse`. Like mounts, mappings are fixed at
+  `docker run` time and resolved only on launch paths.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -379,9 +400,9 @@ draws a **warning on every run** (never an error — the file is inert) naming t
 migration path; `~/.yolo.json` itself is exempt from the walk.
 
 Precedence overall: `~/.yolo.json` < `projects.json` entry < CLI flags. Per key
-the higher layer **overrides**, except `prompts` and `mounts`
+the higher layer **overrides**, except `prompts`, `mounts`, and `ports`
 (`_CONCAT_DESTS`), which **concatenate** across the layers and then the CLI
-values (prompts and mounts accumulate; everything else replaces).
+values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `auth` (one of `keychain`/`oauth-token`/`bedrock` — validated against
@@ -389,8 +410,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
 `ssh-agent`, `base`, `prompts` (string or list of strings; the pre-0.7 name
 `append-system-prompt` draws a pointed rename error),
-`mounts` (string or list, `PATH[:ro|:rw]`), `require-project-entry`, `tmux`,
-`tmux-session`.
+`mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
+`[HOST:]CONTAINER`), `require-project-entry`, `tmux`, `tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
 (CLI-only by design); any of them in a config file is a hard error (not in
@@ -450,8 +471,14 @@ when inside a git repo (so subdirectory runs and worktree sessions share it;
   emptied list drops the key (for a concat key, `[]` ≡ absent).
   **`--add-prompt` / `--remove-prompt`** do the same for `prompts`
   (exact-string match; duplicate add is a no-op, absent remove errors).
+  **`--add-port [HOST:]CONTAINER` / `--remove-port CONTAINER`** likewise for
+  `ports`: add validates via `_parse_port_spec` and replaces a
+  same-container-port element (so a `HOST:` pin can be added/dropped); remove
+  matches by container port (`_port_container`: `HOST:` stripped, deliberately
+  unvalidated so a malformed spec is removable).
   Contradictory instructions in one call (set + `--unset` of the same key,
-  `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`)
+  `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`,
+  `--port` with `--add/--remove-port`)
   are errors, not silently ordered; sets apply first, then unsets, then list
   edits.
 - **`yolo config --global`** targets the flat `~/.yolo.json` instead of the
@@ -524,13 +551,29 @@ gracefully outside one — there's just no repo slug to label/find by).
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
   to the main checkout, not the worktree's own branch.
 - **`ps`** — every **running** yolo container, across **all** repos (the
-  cross-repo counterpart to `list`), as a table (NAME/TOPIC/DIRECTORY/UP) read
-  from the `yolo.*` labels (`docker ps --filter label=yolo.cwd`); needs no git
-  repo. `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's the dashboard
-  tmux mode seeds (see below), but it's an ordinary verb usable anywhere. Run
-  interactively *inside tmux* (stdin a TTY + `$TMUX` set), `--watch` is a
-  **picker**: j/k/arrows move, Enter `select-window`s to the chosen container's
-  window, q/ESC quits; otherwise it falls back to the passive redraw loop.
+  cross-repo counterpart to `list`), as a table (NAME/TOPIC/DIRECTORY/PORTS/UP)
+  read from the `yolo.*` labels (`docker ps --filter label=yolo.cwd`); needs no
+  git repo. PORTS comes straight from docker ps's own column (free — no
+  per-container `docker port` calls at the 2s cadence), condensed by
+  `_condense_ports` to `host->container` pairs (address/proto noise and the
+  IPv6 twin dropped). `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's
+  the dashboard tmux mode seeds (see below), but it's an ordinary verb usable
+  anywhere. Run interactively *inside tmux* (stdin a TTY + `$TMUX` set),
+  `--watch` is a **picker**: j/k/arrows move, Enter `select-window`s to the
+  chosen container's window, q/ESC quits; otherwise it falls back to the
+  passive redraw loop.
+- **`browse [TOPIC]`** — open the host browser at a running session's forwarded
+  port (`do_browse`): find the container by the same label query `shell` uses
+  (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
+  label for what was forwarded *at launch* (first = default; `--port N` selects
+  another — read from the **first** parse's CLI-only values, so a config
+  `ports` list can't masquerade as a selection), resolve the assigned host port
+  via `docker port` (`_docker_port`), print `http://127.0.0.1:PORT/` (always —
+  copy-pasteable), and `open` it (`_open_url`, the test seam; `--print`/`-n`
+  skips it). No listening-poll on purpose: browse may legitimately run before
+  the server starts. Pointed errors for no running container and for a
+  container launched without ports (mappings can't be added live — exit and
+  `resume`).
 
 Implementation shape:
 
@@ -545,9 +588,9 @@ Implementation shape:
   config-dir-must-exist check (forgetting a token for a deleted config dir must
   work). Launch verbs (`start`, `resume`, `shell`-fresh, and a
   bare `yolo`) pass the guardrails (home refusal, `require-project-entry` — see
-  the orthogonal-flags section), then call `launch_container`; extra mounts are
-  resolved only on these paths, so a stale mount path can't break
-  `list`/`finish`/`config`.
+  the orthogonal-flags section), then call `launch_container`; extra mounts and
+  port specs are resolved only on these paths, so a stale mount path or
+  malformed port spec can't break `list`/`finish`/`config`.
 - **`launch_container`** is the single assembly path shared by every launch
   (extracted from the old inline `main`): mounts (cwd + the extra `--mount`
   dirs), ssh-agent block, the credential/config blocks, labels, `--entrypoint`
@@ -571,11 +614,13 @@ Implementation shape:
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
   `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
-  `--resume`/`-r` (resume), `--watch` (ps), and the `config` family — `--init`,
-  `--global`, `--unset`, `--add-mount`/`--remove-mount`,
-  `--add-prompt`/`--remove-prompt`.
+  `--resume`/`-r` (resume), `--watch` (ps), `--print`/`-n` (browse), and the
+  `config` family — `--init`, `--global`, `--unset`,
+  `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
+  `--add-port`/`--remove-port`.
   Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
-  `--new` without a `TOPIC`, or `--new` with `-r` all error).
+  `--new` without a `TOPIC`, or `--new` with `-r` all error). (`--port` is the
+  exception: a launch flag that doubles as `browse`'s selection.)
 
 ## tmux mode (`--tmux`) and the `ps` verb
 
@@ -801,4 +846,9 @@ already-attached-client no-mirror guard, window reuse, the config keys), the `ps
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch).
+`test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
+assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
+concatenation, the `config` port edits) and the `browse` verb (the docker
+queries stubbed at `running_container_for`/`_container_label`/`_docker_port`
+and the `_open_url` seam).
 Keep them green when changing flags or mounts.
