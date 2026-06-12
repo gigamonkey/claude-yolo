@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.8.1 — 2026-06-12
+
+- **`--tmux` no longer mirrors the session into a second terminal**: launching a
+  `--tmux` session from a terminal while another terminal is already attached to
+  the same tmux session used to attach a *second* client, so both terminals
+  mirrored the one session (tmux clamps every client to the smallest one's size
+  and shows the same window). Now yolo detects the already-attached client
+  (`tmux list-clients`) and instead just switches *that* terminal to the new
+  window, leaving the invoking terminal a normal shell — so the new session
+  shows up where your tmux session already lives.
+
 ## v0.8.0 — 2026-06-12
 
 - **`--tmux` mode**: instead of exec'ing the session in your terminal, each

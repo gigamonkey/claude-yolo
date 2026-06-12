@@ -1590,6 +1590,12 @@ def _find_tmux_window(session: str, name: str) -> str | None:
     return None
 
 
+def _session_has_client(session: str) -> bool:
+    """Whether a tmux client is already attached to `session` (in some terminal)."""
+    res = _tmux("list-clients", "-t", f"={session}", "-F", "#{client_name}")
+    return res.returncode == 0 and bool(res.stdout.strip())
+
+
 def _ensure_tmux_session(session: str) -> None:
     """Make sure the shared tmux session exists, creating it detached if not.
 
@@ -1615,7 +1621,10 @@ def _launch_in_tmux(
     Focusing depends on where yolo was invoked: inside tmux (this session or
     another) the current client is switched over; outside, the invoking terminal
     execs into `tmux attach`, mirroring the default mode's
-    this-terminal-becomes-the-session feel. With reuse_existing (the caller
+    this-terminal-becomes-the-session feel — *unless* the session already has a
+    client attached in another terminal, in which case we don't attach a second
+    (mirroring) client but just switch that terminal to the new window and leave
+    this one a normal shell. With reuse_existing (the caller
     found the matching container already running), an existing same-named window
     is focused instead of spawning a duplicate `docker run` that would only die
     on the container-name conflict; if no window matches (the container was
@@ -1654,11 +1663,25 @@ def _launch_in_tmux(
         _tmux("select-window", "-t", window_id)
         _tmux("switch-client", "-t", f"={session}")
         print(f"Spawned '{window_name}' in tmux session '{session}'.")
+    elif _session_has_client(session):
+        # Another terminal is already attached to this session. Attaching a
+        # second client here would make both terminals *mirror* the one session
+        # (tmux clamps every attached client to the smallest one's size and
+        # shows them the same window) — the duplicate-session-in-two-terminals
+        # surprise. Instead just point the already-attached client at the new
+        # window; the session shows up over there, and this terminal stays a
+        # normal shell.
+        _tmux("select-window", "-t", window_id)
+        print(
+            f"Spawned '{window_name}' in tmux session '{session}', which is "
+            "already attached in another terminal — switched that terminal to "
+            "the new window."
+        )
     else:
-        # Become the tmux client, focused on the new window. select-window runs
-        # first (it works detached — it just moves the session's current-window
-        # pointer); the ";" argument is tmux's command separator, not shell
-        # syntax — there's no shell here, this is an exec.
+        # No client yet: become the tmux client, focused on the new window.
+        # select-window runs first (it works detached — it just moves the
+        # session's current-window pointer); the ";" argument is tmux's command
+        # separator, not shell syntax — there's no shell here, this is an exec.
         os.execvp(
             "tmux",
             [

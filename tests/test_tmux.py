@@ -33,6 +33,7 @@ class FakeTmux:
         self.has_session = False
         self.session_name = "yolo"
         self.windows = []  # (window_id, window_name[, session_name])
+        self.attached = False  # a client is attached to the session
         self._next = 10
 
     def __call__(self, *args):
@@ -55,6 +56,8 @@ class FakeTmux:
             else:
                 lines = (f"{w[0]}\t{w[1]}\n" for w in self.windows)
             return cp(0, out="".join(lines))
+        if verb == "list-clients":
+            return cp(0, out="/dev/ttys001\n" if self.attached else "")
         if verb == "display-message":
             return cp(0, out=self.session_name + "\n")
         return cp(0)  # select-window / switch-client
@@ -135,6 +138,20 @@ def test_tmux_outside_creates_session_and_attaches(cy, run_cli, tmux, dirs):
 
     # outside tmux, the invoking terminal becomes the client, on the new window
     assert argv == ["tmux", "select-window", "-t", "@10", ";", "attach-session", "-t", "=yolo"]
+
+
+def test_tmux_outside_with_client_attached_does_not_mirror(cy, run_cli, tmux, dirs):
+    home, work = dirs
+    tmux.has_session = True
+    tmux.attached = True  # another terminal is already attached to the session
+    argv = run_cli(["--tmux"], home=home, cwd=work)
+
+    # no second client attached (no exec into attach-session) — that would mirror
+    assert argv is None
+    assert tmux.named("attach-session") == []
+    # instead the already-attached terminal is switched to the new window
+    (new_window,) = tmux.named("new-window")
+    assert ["select-window", "-t", "@10"] in tmux.calls
 
 
 def test_tmux_inside_switches_client(cy, run_cli, tmux, dirs, monkeypatch):

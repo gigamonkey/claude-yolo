@@ -604,7 +604,14 @@ The mechanics, all funneled through two functions:
   the window (`new-window -n <container-name> -P -F '#{window_id}'`), then
   focuses it — inside tmux (`$TMUX` set) by `select-window` + `switch-client`
   on the current client; outside by exec'ing into `tmux select-window \;
-  attach-session`, so the invoking terminal becomes the tmux client.
+  attach-session`, so the invoking terminal becomes the tmux client. The
+  outside case has one guard: if the session **already has a client attached**
+  in another terminal (`_session_has_client`, via `tmux list-clients`),
+  attaching a second client would make both terminals *mirror* the one session
+  (tmux clamps every client to the smallest one's size and shows them the same
+  window). So instead of attaching, it just `select-window`s — the new session
+  appears in the already-attached terminal and the invoking one stays a normal
+  shell.
 
 Details that matter:
 
@@ -789,8 +796,8 @@ expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the `security`-wrapping helpers stubbed).
 `test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux
 server patched in at the `_tmux` seam (session creation + dashboard seeding,
-window command quoting, inside-vs-outside `$TMUX` focusing, window reuse, the
-config keys), the `ps` verb's table from canned `docker ps` output, and the
+window command quoting, inside-vs-outside `$TMUX` focusing, the
+already-attached-client no-mirror guard, window reuse, the config keys), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch).
