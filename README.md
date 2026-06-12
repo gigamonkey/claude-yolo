@@ -15,6 +15,53 @@ The script is a self-contained Python script with no runtime dependencies beyond
 the standard library. You can install it with `uv` (see below) or just run the
 file directly.
 
+## What the container does and doesn't protect
+
+Note that running in a container only protects against _certain_ bad outcomes,
+thus “relatively safe” above.
+
+**What it's for:** the container keeps Claude from touching files on your host
+outside the directories that are explicitly mounted into it. Claude can trash
+its own container — install packages, edit anything, `rm -rf` the wrong thing —
+and when the container exits, all of that evaporates except for changes to the
+mounted directories. It also keeps Claude from inadvertantly reading data that
+don’t want it to see and thus put into its chat history and send to Anthropic.
+
+**Container escape is theoretically possible.** A Docker container is not a hard
+security boundary the way a VM is—containers share the host kernel (or, on
+macOS, the Docker/OrbStack Linux VM's kernel), and kernel or runtime
+vulnerabilities that allow escapes do surface from time to time. Since Claude in
+yolo mode runs arbitrary code by design, a sufficiently motivated (or
+sufficiently confused) agent could in principle write or run code that exploits
+one. This tool makes no attempt to harden against that beyond Docker's defaults;
+it raises the bar from “any shell command touches your host” to “you need a
+container escape”, which is a big practical improvement but not a guarantee.
+
+**The container does nothing to constrain credentials you give Claude.** This is
+the more important limitation in practice. If you hand Claude a credential that
+gives it access to an external resource, running in a container doesn’t limit
+what Claude can do with that credential any more than your laptop does. That
+applies to:
+
+- **`--ssh-agent`** — the agent will sign challenges for anything Claude asks,
+  so Claude can authenticate to *any* host your keys can reach, not just
+  GitHub. (This is why it's off by default.)
+
+- **Mounted directories containing credentials** — mounting `~/.aws` (as
+  `--auth bedrock` does), a directory with a `.env` file, service-account
+  keys, kubeconfigs, etc. gives Claude full use of whatever those credentials
+  can do.
+
+- **Credentials pasted into a session** — an API key or password you paste
+  into the conversation is one Claude can use, container or no container.
+- And of course the Anthropic credentials that every mode forwards, which
+  Claude needs to run at all.
+
+The container has network access (it has to, to talk to the Anthropic API), so
+“can use the credential” means “can use it against the real service.” Scope what
+you hand over accordingly: prefer read-only mounts, narrowly-scoped tokens, and
+leaving `--ssh-agent` off unless a project actually needs Claude to push.
+
 ## Requirements
 
 - **macOS.** Credential extraction reads from the macOS keychain via the
