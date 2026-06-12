@@ -3,6 +3,34 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.9.0 — 2026-06-12
+
+- **Port forwarding via the `ports` config key / `--port [HOST:]CONTAINER`**:
+  forward the project's server port(s) into the host, always bound to
+  `127.0.0.1`. With a bare container port (`--port 8000`, the normal form)
+  docker assigns a free host port per session, so parallel worktree sessions
+  can each run their server on the same container port without colliding;
+  `HOST:CONTAINER` pins a stable host port for single-session use. Lists
+  concatenate across the config layers and the CLI, like `mounts`. When ports
+  are forwarded, Claude is told in the system prompt to bind servers to
+  `0.0.0.0` (a loopback-bound server is unreachable through docker's forward).
+
+- **`yolo browse [TOPIC]`**: open the host browser at a running session's
+  forwarded port — the discoverability counterpart to the docker-assigned
+  host ports. Finds the session's container (worktree by `TOPIC`, else the
+  current directory), asks docker which host port was assigned, prints the
+  URL, and opens it. `--port N` selects among several forwarded ports;
+  `--print`/`-n` prints the URL without opening a browser.
+
+- **`yolo config --add-port` / `--remove-port`**: element-wise edits of the
+  stored `ports` list, mirroring `--add-mount`/`--remove-mount` (`--add-port`
+  replaces a same-container-port entry, so a host pin can be flipped;
+  `--remove-port` matches by container port, ignoring any `HOST:` prefix).
+
+- **`yolo ps` (and the tmux dashboard/picker) grew a PORTS column** showing
+  each session's `host->container` mappings, so the dashboard doubles as the
+  which-session-is-on-which-port map.
+
 ## v0.8.3 — 2026-06-12
 
 - **README: new Limitations section.** The containers are Linux (Ubuntu), so
