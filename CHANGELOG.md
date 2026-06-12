@@ -3,6 +3,13 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.8.3 — 2026-06-12
+
+- **README: new Limitations section.** The containers are Linux (Ubuntu), so
+  despite yolo running on a Mac it's not much good for *Mac* development —
+  inside the container Claude has no access to Xcode, Swift toolchains, macOS
+  frameworks, simulators, or other Mac-specific tooling.
+
 ## v0.8.2 — 2026-06-12
 
 - **README: documented the limits of containerization.** New "What the
