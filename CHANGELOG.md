@@ -3,6 +3,26 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.10.0 — 2026-06-13
+
+- **`yolo ps` shows session activity (new STATE column)**: each running session
+  reads `working` while Claude is busy, or `waiting <age>` (e.g. `waiting 5m`)
+  once Claude has finished responding and is sitting at the prompt — so the
+  cross-repo listing and the tmux dashboard tell you at a glance which sessions
+  need your attention. It's driven by Claude Code **hooks** that yolo injects
+  into every session (a `Stop` hook records when Claude finishes, a
+  `UserPromptSubmit` hook records when you reply), each writing a small
+  timestamp file under `<config-dir>/.yolo-status/` that `ps` reads back — no
+  extra docker calls, so it's cheap even at the 2s `--watch` cadence. A session
+  that hasn't interacted yet (or one started by an older yolo) shows `-`.
+
+  yolo injects these via the same container-only `--settings` overlay it
+  already uses to disable the in-process sandbox. Since `--settings` replaces
+  the whole `hooks` key rather than merging it, yolo reads the `hooks` from your
+  mounted `settings.json`/`settings.local.json` and folds its own onto them, so
+  your own hooks still fire inside the container (hooks from other settings
+  sources, e.g. enterprise-managed, are not carried over).
+
 ## v0.9.0 — 2026-06-12
 
 - **Port forwarding via the `ports` config key / `--port [HOST:]CONTAINER`**:
