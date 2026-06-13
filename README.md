@@ -283,8 +283,8 @@ What `--tmux` does on each launch:
 
 - Makes sure the shared tmux session exists, creating it detached if not. A
   fresh session gets a **dashboard** as window 0: `yolo ps --watch`, a live
-  table of every running yolo container (NAME / TOPIC / DIRECTORY / PORTS / UP)
-  across all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
+  table of every running yolo container (NAME / TOPIC / DIRECTORY / PORTS / UP /
+  STATE) across all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
   the highlight, Enter switches to that session's window, `q` quits. A
   container with no tmux window to switch to (started outside tmux mode) is
   marked with `*`. (`ps` is an ordinary verb — useful on its own; run
@@ -301,6 +301,16 @@ What `--tmux` does on each launch:
 If the matching container is already running — say you `yolo resume foo` twice
 — yolo switches to its existing window instead of spawning a `docker run` that
 would only die on the container-name conflict.
+
+The **STATE** column tells you which sessions need you: `working` while Claude
+is busy, or `waiting 5m` once it has finished responding and is sitting at the
+prompt (with the time since). This is driven by Claude Code **hooks** that yolo
+injects into each session — a `Stop` hook records when Claude finishes, a
+`UserPromptSubmit` hook records when you reply — so it reflects the real
+conversation state, not container CPU. A session that hasn't interacted yet (or
+one started by an older yolo) shows `-`. Injecting these hooks has one
+implication for your own hooks — see **Session-state hooks** under [Notes and
+gotchas](#notes-and-gotchas).
 
 Everything that *isn't* a session launch (`list`, `ps`, `config`, `finish`, the
 token verbs, and interactive credential prompts) stays in the terminal you ran
@@ -873,6 +883,20 @@ launch, so you can see exactly what's happening.
   help anyway: a default Docker container can't create unprivileged user
   namespaces, and granting that capability would weaken the very isolation this
   tool provides. (A `/doctor` sandbox note may still appear; that's expected.)
+
+- **Session-state hooks (the `ps` STATE column).** To know whether a session is
+  working or `waiting 5m`, claude-yolo injects two Claude Code hooks into every
+  session via that same `--settings` overlay: a `Stop` hook that records when
+  Claude finishes responding and a `UserPromptSubmit` hook that records when you
+  reply. Each writes a tiny timestamp file under `<config-dir>/.yolo-status/`,
+  which `ps` reads back. Because `--settings` *replaces* the whole `hooks` key
+  rather than merging it (only `permissions` merges across settings sources),
+  claude-yolo reads the `hooks` from the mounted `settings.json` /
+  `settings.local.json` and folds yolo's onto them so your own hooks still fire;
+  hooks from *other* sources (enterprise-managed settings, or a project
+  `.claude/settings.json` that isn't your config dir) are **not** carried over.
+  The hook commands are plain shell and run unattended, independent of
+  `--dangerously-skip-permissions`.
 
 - **Don't switch to `npm install -g`.** The npm global install lands at
   `/usr/local/bin/claude`, which `/doctor` flags as a broken install and which

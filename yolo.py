@@ -602,6 +602,25 @@ def _repo_slug_or_none() -> str | None:
     return None if root is None else re.sub(r"[^a-zA-Z0-9]", "-", str(root))
 
 
+# Per-session activity state (see _read_session_state / build_claude_args hooks):
+# a session's Stop/UserPromptSubmit hooks write waiting/working + a timestamp to
+# <config-dir>/.yolo-status/<cwd-slug>.state, which `ps` reads back. The dir lives
+# under the config dir because that's the one host-writable bind mount available
+# from inside the container (the project tree would pollute the repo, and
+# ~/.claude-yolo is deliberately never mounted).
+_STATUS_DIR_NAME = ".yolo-status"
+
+
+def _cwd_slug(cwd) -> str:
+    """A working dir path slugified the way Claude names ~/.claude/projects buckets.
+
+    Keys the per-session status file. cwd is unique per running container (one per
+    directory in cwd mode; distinct worktree paths otherwise), so launch and `ps`
+    agree on the file by both slugging the same cwd.
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
+
+
 def _branch_exists(name: str) -> bool:
     return (
         subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]).returncode
@@ -1561,6 +1580,34 @@ def running_container_for(
     return out.splitlines()[0] if out else None
 
 
+def _read_settings_hooks(config_dir: str | None, home: pathlib.Path) -> dict:
+    """The `hooks` from the mounted settings files, to re-add under `--settings`.
+
+    yolo injects its session-state hooks via `claude --settings`, which *replaces*
+    the whole `hooks` key from the mounted settings rather than merging it (only
+    `permissions` merges across Claude Code's setting scopes — everything else,
+    like the `sandbox` override, is per-key replace). So to keep a user's own
+    hooks working inside the container we read them here and concatenate yolo's
+    onto them (see build_claude_args). Best-effort: a missing or malformed file
+    contributes nothing. Covers the config dir's settings.json + settings.local.json,
+    not enterprise-managed settings (rare, and managed settings outrank --settings).
+    """
+    base = pathlib.Path(config_dir) if config_dir else home / ".claude"
+    merged: dict = {}
+    for fname in ("settings.json", "settings.local.json"):
+        try:
+            data = json.loads((base / fname).read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        hooks = data.get("hooks") if isinstance(data, dict) else None
+        if not isinstance(hooks, dict):
+            continue
+        for event, groups in hooks.items():
+            if isinstance(groups, list):
+                merged.setdefault(event, []).extend(groups)
+    return merged
+
+
 def build_claude_args(
     prompts: list,
     *,
@@ -1570,6 +1617,8 @@ def build_claude_args(
     name: str | None = None,
     add_dirs=(),
     forwarded_ports=(),
+    status_state_path: str | None = None,
+    extra_hooks: dict | None = None,
 ) -> list[str]:
     """The args passed to `claude` inside the container (everything after the image).
 
@@ -1603,14 +1652,49 @@ def build_claude_args(
         ),
         *prompts,
     ]
+    # The container is the sandbox, so disable Claude's in-process OS sandbox.
+    # Otherwise it warns at startup that bubblewrap/socat are missing (they're
+    # deliberately not installed — they can't create namespaces in a container
+    # anyway). This is a container-only --settings overlay; the host's settings
+    # files are untouched. --settings *replaces* each key it sets (only
+    # `permissions` merges across scopes), so sandbox.enabled and the whole
+    # `hooks` key below override the mounted settings — which is why we fold the
+    # user's own hooks back in via extra_hooks.
+    settings: dict = {"sandbox": {"enabled": False}}
+    if status_state_path:
+        # Session-activity hooks: Stop = "now waiting for input", UserPromptSubmit
+        # = "working again". Each writes "<state> <epoch>" to the status file `ps`
+        # reads. The absolute container path is baked in (not via an env var) so
+        # nothing depends on docker -e reaching the hook subprocess; the path has
+        # no shell-special chars but quote defensively.
+        target = shlex.quote(status_state_path)
+        hooks: dict = {}
+        for event, groups in (extra_hooks or {}).items():
+            hooks.setdefault(event, []).extend(groups)
+        hooks.setdefault("Stop", []).append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"printf 'waiting %s' \"$(date +%s)\" > {target}",
+                    }
+                ]
+            }
+        )
+        hooks.setdefault("UserPromptSubmit", []).append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"printf 'working %s' \"$(date +%s)\" > {target}",
+                    }
+                ]
+            }
+        )
+        settings["hooks"] = hooks
     args = [
-        # The container is the sandbox, so disable Claude's in-process OS sandbox.
-        # Otherwise it warns at startup that bubblewrap/socat are missing (they're
-        # deliberately not installed — they can't create namespaces in a container
-        # anyway). This overrides sandbox.enabled from the mounted settings.json for
-        # this container only; the host's settings are untouched.
         "--settings",
-        '{"sandbox":{"enabled":false}}',
+        json.dumps(settings, separators=(",", ":")),
         "--append-system-prompt",
         "... ".join(extra_system_prompt),
     ]
@@ -1940,8 +2024,10 @@ def launch_container(
         configpath = pathlib.Path(config_dir).resolve()
         container = f"{container}-{configpath.name}"
         args += ["-v", f"{config_dir}:/home/claude/.claude"]
+        host_claude_dir = config_dir
     else:
         args += ["-v", f"{home}/.claude:/home/claude/.claude"]
+        host_claude_dir = f"{home}/.claude"
 
     # (b) ~/.claude.json (global config: MCP servers, project history/trust). Always at
     # $HOME/.claude.json on the host (it ignores CLAUDE_CONFIG_DIR). Opt out with
@@ -1984,12 +2070,26 @@ def launch_container(
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
     args += ["--label", f"yolo.cwd={cwd}"]
+    # yolo.config-dir tells the cross-repo `ps` where to find this session's
+    # activity status file (under <config-dir>/.yolo-status/), since containers
+    # from different repos may use different config dirs.
+    args += ["--label", f"yolo.config-dir={host_claude_dir}"]
     if ports:
         # The container ports forwarded at launch, in config order (first =
         # `browse`'s default). The label — not config — is what browse/ps read:
         # it describes the *actual* container, which can't change after launch,
         # while config describes the next one.
         args += ["--label", "yolo.ports=" + ",".join(str(c) for _, c in ports)]
+
+    # Reset the session's activity status file (claude launches only — the
+    # `shell` bash entrypoint has no hooks). The Stop/UserPromptSubmit hooks
+    # write into <config-dir>/.yolo-status/ (visible in-container via the config
+    # mount); clearing the stale file means a fresh session doesn't briefly show
+    # a prior one's "waiting" time before the first hook fires.
+    if entrypoint is None:
+        status_dir = pathlib.Path(host_claude_dir) / _STATUS_DIR_NAME
+        status_dir.mkdir(parents=True, exist_ok=True)
+        (status_dir / f"{_cwd_slug(cwd)}.state").unlink(missing_ok=True)
 
     build_docker_image(no_cache=parsed.rebuild_image)
 
@@ -2178,13 +2278,51 @@ def _condense_ports(raw: str) -> str:
     return ",".join(pairs)
 
 
-def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
-    """(name, topic, directory, ports, up) for every running yolo container.
+def _humanize_secs(s: int) -> str:
+    """A whole-number duration as the largest single unit: `45s`/`3m`/`2h`/`4d`."""
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _read_session_state(path: pathlib.Path, now: float) -> str:
+    """A session's activity state for the `ps` STATE column, from its status file.
+
+    The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>".
+    `waiting` renders with the elapsed time since the main agent last finished
+    (`waiting 5m`); `working` renders bare; anything missing or unparseable is `-`.
+    """
+    try:
+        parts = path.read_text().split()
+    except OSError:
+        return "-"
+    if len(parts) != 2:
+        return "-"
+    state, ts = parts
+    try:
+        age = max(0, int(now - int(ts)))
+    except ValueError:
+        return "-"
+    if state == "waiting":
+        return f"waiting {_humanize_secs(age)}"
+    if state == "working":
+        return "working"
+    return "-"
+
+
+def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str, str]]:
+    """(name, topic, directory, ports, up, state) for every running yolo container.
 
     Read from the yolo.* labels every launch stamps; the yolo.cwd filter is what
     distinguishes yolo's containers from everything else `docker ps` knows. The
     port mappings come straight from docker ps's own PORTS column — free, unlike
     a per-container `docker port` call, which matters at the 2s --watch cadence.
+    STATE comes from the session's status file under its (labelled) config dir,
+    so it too needs no extra docker calls.
     """
     fmt = "\t".join(
         (
@@ -2193,6 +2331,7 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
             '{{.Label "yolo.cwd"}}',
             "{{.Ports}}",
             "{{.RunningFor}}",
+            '{{.Label "yolo.config-dir"}}',
         )
     )
     try:
@@ -2203,16 +2342,19 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
         ).stdout
     except FileNotFoundError:
         sys.exit("docker not found; is it installed and on PATH?")
+    now = time.time()
     rows = []
     for line in out.splitlines():
-        name, topic, cwd, ports, up = (line.split("\t") + [""] * 5)[:5]
-        if cwd.startswith(f"{home}/"):
-            cwd = "~" + cwd[len(str(home)) :]
-        rows.append((name, topic or "-", cwd, _condense_ports(ports) or "-", up))
+        name, topic, rawcwd, ports, up, cfgdir = (line.split("\t") + [""] * 6)[:6]
+        cwd = "~" + rawcwd[len(str(home)) :] if rawcwd.startswith(f"{home}/") else rawcwd
+        base = cfgdir or str(home / ".claude")
+        state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state"
+        state = _read_session_state(state_file, now)
+        rows.append((name, topic or "-", cwd, _condense_ports(ports) or "-", up, state))
     return rows
 
 
-PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "PORTS", "UP")
+PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "PORTS", "UP", "STATE")
 
 
 def do_ps(home: pathlib.Path, *, watch: bool) -> None:
@@ -2378,10 +2520,10 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
     orphans = False
     if rows:
         display = []
-        for name, topic, cwd, ports, up in rows:
+        for name, topic, cwd, ports, up, state in rows:
             mark = "" if name in windows else " *"
             orphans = orphans or bool(mark)
-            display.append((name + mark, topic, cwd, ports, up))
+            display.append((name + mark, topic, cwd, ports, up, state))
         lines = _format_table(PS_HEADERS, display)
         print(lines[0])
         for row, line in zip(rows, lines[1:], strict=True):
@@ -2777,6 +2919,14 @@ def main():
         container_base = cwd.name
         session_name = None  # a plain cwd session is unnamed
 
+    # Session-activity hooks (Stop/UserPromptSubmit) write to this file, which
+    # `ps` reads for the STATE column. Path is the container-side mount location
+    # (always /home/claude/.claude); the slug keys it to this cwd, matching what
+    # launch_container resets and what `ps` recomputes. The user's own hooks from
+    # the mounted settings are folded back in (--settings replaces the hooks key).
+    session_status_path = f"/home/claude/.claude/{_STATUS_DIR_NAME}/{_cwd_slug(cwd)}.state"
+    session_hooks = _read_settings_hooks(parsed.config_dir, home)
+
     # Build the trailing command for the verb.
     if verb == "shell":
         command = []
@@ -2788,6 +2938,8 @@ def main():
             resume=parsed.resume,
             add_dirs=mount_dirs,
             forwarded_ports=container_ports,
+            status_state_path=session_status_path,
+            extra_hooks=session_hooks,
         )
     elif verb == "resume" and not parsed.new:
         command = build_claude_args(
@@ -2796,6 +2948,8 @@ def main():
             continue_session=True,
             add_dirs=mount_dirs,
             forwarded_ports=container_ports,
+            status_state_path=session_status_path,
+            extra_hooks=session_hooks,
         )
     else:
         # start, or `resume TOPIC --new` (a fresh named session in the worktree).
@@ -2805,6 +2959,8 @@ def main():
             name=session_name,
             add_dirs=mount_dirs,
             forwarded_ports=container_ports,
+            status_state_path=session_status_path,
+            extra_hooks=session_hooks,
         )
 
     launch_container(

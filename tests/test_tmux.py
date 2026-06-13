@@ -133,7 +133,8 @@ def test_tmux_outside_creates_session_and_attaches(cy, run_cli, tmux, dirs):
     assert "; ec=$?" in cmd
     run_cmd = unwrapped(cmd)
     assert run_cmd[:2] == ["docker", "run"]
-    assert '{"sandbox":{"enabled":false}}' in run_cmd
+    settings = run_cmd[run_cmd.index("--settings") + 1]
+    assert '"sandbox":{"enabled":false}' in settings  # survived the shlex round trip
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in run_cmd
 
     # outside tmux, the invoking terminal becomes the client, on the new window
@@ -281,10 +282,11 @@ def fake_docker_ps(monkeypatch, cy, out):
 def test_ps_renders_cross_repo_table(cy, monkeypatch, capsys, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
+    # last field per line is the yolo.config-dir label (no status files exist here)
     out = (
         f"myrepo-fix\tfix\t{home}/.claude-yolo/worktrees/-x-myrepo/fix"
-        "\t127.0.0.1:55001->8000/tcp\t2 hours\n"
-        f"work\t\t{home}/hacks/work\t\t5 minutes\n"
+        f"\t127.0.0.1:55001->8000/tcp\t2 hours\t{home}/.claude\n"
+        f"work\t\t{home}/hacks/work\t\t5 minutes\t{home}/.claude\n"
     )
     calls = fake_docker_ps(monkeypatch, cy, out)
     cy.do_ps(home, watch=False)
@@ -295,11 +297,25 @@ def test_ps_renders_cross_repo_table(cy, monkeypatch, capsys, tmp_path):
     assert "label=yolo.cwd" in ps_call  # the filter that finds yolo's containers
 
     lines = printed.splitlines()
-    assert lines[0].split() == ["NAME", "TOPIC", "DIRECTORY", "PORTS", "UP"]
+    assert lines[0].split() == ["NAME", "TOPIC", "DIRECTORY", "PORTS", "UP", "STATE"]
     # docker's PORTS blob is condensed to the bare host->container pair
     assert "myrepo-fix" in lines[1] and "fix" in lines[1] and "55001->8000" in lines[1]
     # cwd-mode row: "-" for no topic and no ports, home shortened to ~
     assert "work" in lines[2] and " - " in lines[2] and "~/hacks/work" in lines[2]
+
+
+def test_ps_shows_waiting_time_from_status_file(cy, monkeypatch, capsys, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    status_dir = home / ".claude" / cy._STATUS_DIR_NAME
+    status_dir.mkdir(parents=True)
+    cwd = f"{home}/hacks/work"
+    # written 120s ago, state "waiting" -> "waiting 2m"
+    (status_dir / f"{cy._cwd_slug(cwd)}.state").write_text(f"waiting {int(cy.time.time()) - 120}")
+    out = f"work\t\t{cwd}\t\t5 minutes\t{home}/.claude\n"
+    fake_docker_ps(monkeypatch, cy, out)
+    cy.do_ps(home, watch=False)
+    assert "waiting 2m" in capsys.readouterr().out
 
 
 def test_condense_ports_drops_noise_and_ipv6_twin(cy):
@@ -327,8 +343,8 @@ def test_watch_only_applies_to_ps(cy, run_cli, dirs):
 def ps_rows(cy, monkeypatch):
     """Canned _ps_rows, returned as a mutable list so tests can vary refreshes."""
     rows = [
-        ["alpha", "-", "~/hacks/alpha", "-", "2 hours"],
-        ["beta-fix", "fix", "~/wt/fix", "55001->8000", "5 minutes"],
+        ["alpha", "-", "~/hacks/alpha", "-", "2 hours", "working"],
+        ["beta-fix", "fix", "~/wt/fix", "55001->8000", "5 minutes", "waiting 3m"],
     ]
     monkeypatch.setattr(cy, "_ps_rows", lambda home: [tuple(r) for r in rows])
     return rows
@@ -377,7 +393,7 @@ def test_picker_selection_survives_refresh(cy, tmux, ps_rows, tmp_path):
     tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
     script = [
         ("key", "j"),  # highlight beta-fix
-        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "-", "1 second"])),
+        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "-", "1 second", "working"])),
         ("key", "\r"),  # must still target beta-fix, not whatever sits at index 1 now
     ]
 

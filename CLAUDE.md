@@ -551,12 +551,17 @@ gracefully outside one — there's just no repo slug to label/find by).
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
   to the main checkout, not the worktree's own branch.
 - **`ps`** — every **running** yolo container, across **all** repos (the
-  cross-repo counterpart to `list`), as a table (NAME/TOPIC/DIRECTORY/PORTS/UP)
-  read from the `yolo.*` labels (`docker ps --filter label=yolo.cwd`); needs no
-  git repo. PORTS comes straight from docker ps's own column (free — no
-  per-container `docker port` calls at the 2s cadence), condensed by
-  `_condense_ports` to `host->container` pairs (address/proto noise and the
-  IPv6 twin dropped). `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's
+  cross-repo counterpart to `list`), as a table
+  (NAME/TOPIC/DIRECTORY/PORTS/UP/STATE) read from the `yolo.*` labels
+  (`docker ps --filter label=yolo.cwd`); needs no git repo. PORTS comes straight
+  from docker ps's own column (free — no per-container `docker port` calls at the
+  2s cadence), condensed by `_condense_ports` to `host->container` pairs
+  (address/proto noise and the IPv6 twin dropped). STATE is read from each
+  session's `<config-dir>/.yolo-status/<cwd-slug>.state` file
+  (`_read_session_state`): `working`, `waiting <humanized age>` (since the `Stop`
+  hook fired), or `-` (no file / older container). The config dir comes from the
+  `yolo.config-dir` label (falls back to `~/.claude`); no extra docker calls.
+  `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's
   the dashboard tmux mode seeds (see below), but it's an ordinary verb usable
   anywhere. Run interactively *inside tmux* (stdin a TTY + `$TMUX` set),
   `--watch` is a **picker**: j/k/arrows move, Enter `select-window`s to the
@@ -597,10 +602,30 @@ Implementation shape:
   override, then hands the finished argv to `_dispatch_launch` (the run-it-here
   vs run-it-in-tmux seam — see the tmux section). It takes `container_base`,
   `command` (args after the image), optional `entrypoint`, and the resolved
-  `mounts`. `build_claude_args` builds the `claude` command (settings, built-in
+  `mounts`/`ports`. For claude sessions (`entrypoint is None`) it also creates
+  `<config-dir>/.yolo-status/` and **deletes the stale `<cwd-slug>.state` file**
+  so a fresh session doesn't briefly show a prior one's wait time.
+  `build_claude_args` builds the `claude` command (settings, built-in
   prompt, `--add-dir` per extra mount, `--continue`/`--resume`, `--name`).
+- **Session-activity hooks** (`build_claude_args` + `_read_session_state`). The
+  `--settings` overlay (which already disables the sandbox) also injects a
+  `Stop` hook (writes `waiting <epoch>` to `/home/claude/.claude/.yolo-status/
+  <cwd-slug>.state`) and a `UserPromptSubmit` hook (writes `working <epoch>`).
+  The absolute container path is baked into the hook command (no reliance on a
+  `docker run -e` var reaching the hook subprocess). `--settings` *replaces* the
+  whole `hooks` key (only `permissions` merges across scopes), so
+  `_read_settings_hooks(config_dir, home)` reads the mounted
+  `settings.json`/`settings.local.json` hooks and `build_claude_args`
+  concatenates yolo's groups onto them (preserving the user's; enterprise-managed
+  settings aren't covered). `ps` reads the state file (see below); the schema is
+  the matcher-group-wrapped `{"hooks":{"Stop":[{"hooks":[{"type":"command",...}]}]}}`
+  (matcher omitted — ignored for these events). The status file lives under the
+  config dir because that's the only host-writable bind mount reachable from
+  inside the container (`~/.claude-yolo` is deliberately never mounted).
 - **Containers are found by docker label, not name.** Every launch is stamped
-  `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`, and (for worktrees)
+  `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`,
+  `--label yolo.config-dir=<host config dir>` (so the cross-repo `ps` can locate
+  each session's `.yolo-status` file), and (for worktrees)
   `--label yolo.worktree=<topic>`. `running_container_for(slug, topic=None, *,
   cwd=None)` queries `docker ps --filter label=…`: by `yolo.worktree` for a worktree
   `shell`/`finish`/`list`, by `yolo.cwd` for a plain cwd `shell`. The cwd filter is
@@ -765,15 +790,19 @@ worktree session and so omits the resume flags.
   Linux container, which is the other reason plain HTTPS push can't work here. Host
   config is untouched (we never mount `~/.gitconfig`); remotes can stay HTTPS.
 - **In-process sandbox is disabled deliberately — the *container* is the
-  sandbox.** We append `--settings '{"sandbox":{"enabled":false}}'` to the claude
-  args so that, when the mounted `~/.claude/settings.json` has
-  `sandbox.enabled: true`, Claude doesn't warn at startup that `bubblewrap`/`socat`
+  sandbox.** The container-only `--settings` overlay sets `sandbox.enabled:false`
+  so that, when the mounted `~/.claude/settings.json` has `sandbox.enabled: true`,
+  Claude doesn't warn at startup that `bubblewrap`/`socat`
   are missing and run unsandboxed. `--settings` is a container-only overlay (host
   settings untouched). Do NOT instead install `bubblewrap` to "fix" it — a default
   Docker container can't create unprivileged user namespaces (`bwrap: No
   permissions to create new namespace`), and granting that capability would weaken
   the very isolation this tool exists to provide. (A `/doctor` sandbox note may
-  still appear; that's expected.)
+  still appear; that's expected.) The **same overlay carries the session-activity
+  hooks** (see `build_claude_args` under Workflow verbs) — and because `--settings`
+  replaces each top-level key wholesale, the `hooks` key it sets must re-include
+  the user's own mounted hooks (`_read_settings_hooks`), exactly as the `sandbox`
+  key overrides the mounted `sandbox` setting.
 - **Argument splitting:** `main` splits `sys.argv` on `--` *before* argparse
   sees it. Everything after `--` is appended to `docker run` last, so
   user-supplied flags win (last-one-wins).
@@ -851,4 +880,10 @@ assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker
 queries stubbed at `running_container_for`/`_container_label`/`_docker_port`
 and the `_open_url` seam).
+`test_status.py` covers the session-activity feature: the injected
+`Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
+status path), the `yolo.config-dir` label, the stale-status-file reset (and that
+`shell` does neither), the user-hook merge (`_read_settings_hooks` +
+concatenation), and the `_humanize_secs`/`_read_session_state` rendering; the
+`ps` STATE column itself is exercised in `test_tmux.py`.
 Keep them green when changing flags or mounts.
