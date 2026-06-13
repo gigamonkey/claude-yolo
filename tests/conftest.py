@@ -15,6 +15,11 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "yolo.py"
 
+# The throwaway creds file oauth-token/bedrock modes overlay at .credentials.json.
+# Stubbed to a fixed path so tests can distinguish it from the keychain snapshot
+# (creds_path, default /tmp/creds.json).
+MASK_CREDFILE = "/tmp/mask-creds.json"
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("yolo", SCRIPT)
@@ -45,6 +50,7 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "build_docker_image", lambda *, no_cache=False: None)
         monkeypatch.setattr(cy, "ensure_logged_in", lambda c: None)
         monkeypatch.setattr(cy, "extract_credentials", lambda c: creds_path)
+        monkeypatch.setattr(cy, "_masking_credfile", lambda: MASK_CREDFILE)
         monkeypatch.setattr(cy, "ensure_oauth_token", lambda c: "sk-ant-oat-TESTTOKEN")
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
         monkeypatch.setattr(cy.sys, "argv", ["yolo", *argv])

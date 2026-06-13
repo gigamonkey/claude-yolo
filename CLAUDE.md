@@ -223,8 +223,10 @@ on top of whichever auth is chosen:
 The three `--auth` values (the (c) block in `launch_container`):
 
 - **`oauth-token`** (default) → authenticate with a long-lived
-  `CLAUDE_CODE_OAUTH_TOKEN` env var; **skips keychain extraction, the login check,
-  and the `.credentials.json` mount**, just adding `-e CLAUDE_CODE_OAUTH_TOKEN=…`.
+  `CLAUDE_CODE_OAUTH_TOKEN` env var; **skips keychain extraction and the login
+  check**, adding `-e CLAUDE_CODE_OAUTH_TOKEN=…` and overlaying a throwaway `{}`
+  `.credentials.json` (`_masking_credfile`) so a stale host creds file can't
+  shadow the env token under Claude Code 2.1.x (see the precedence caveat below).
   It's the default because it has no refresh boundary, so it's safe regardless
   of session timing or concurrency. See
   [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token-the-default) below.
@@ -235,7 +237,9 @@ The three `--auth` values (the (c) block in `launch_container`):
   without `setup-token` (Claude Console accounts) and as an explicit opt-in.
 - **`bedrock`** (+ optional `--aws-profile`, `--aws-region` [default `us-east-1`],
   `--bedrock-model`) → sets `CLAUDE_CODE_USE_BEDROCK=1`, mounts `~/.aws` read-only,
-  **skips keychain extraction and the login check**. Container name gets a
+  **skips keychain extraction and the login check** (and overlays the same
+  throwaway `.credentials.json` as oauth-token, so a container can't pollute the
+  host `~/.claude`). Container name gets a
   `-{profile-or-bedrock}` suffix. The three AWS sub-flags only apply under
   `--auth bedrock` (a `main` warning fires if they're set otherwise);
   `--aws-profile` is optional (SDK default creds used if omitted).
@@ -271,12 +275,26 @@ family** for containers: `claude setup-token` mints a **one-year token that is
 never rotated and never written back**. Because nothing ever rewrites it, any
 number of concurrent containers — and the host on its own keychain creds — can use
 it simultaneously with no interference. It's delivered purely as the
-`CLAUDE_CODE_OAUTH_TOKEN` env var, which in Claude Code's auth precedence
-out-ranks the file/keychain `/login` creds, so even a stale mounted
-`.credentials.json` can't shadow it. This is why it became the default in 0.6.0:
+`CLAUDE_CODE_OAUTH_TOKEN` env var. This is why it became the default in 0.6.0:
 keychain mode was an attractive nuisance — fine in a quick test, with breakage
 governed by an invisible refresh boundary rather than anything the user can see
 or control.
+
+**Precedence caveat (the env var does *not* reliably out-rank a file).** It was
+once true (probed 2026-06-09) that the env token out-ranked any
+`.credentials.json`, so a stale mounted file couldn't shadow it. **Claude Code
+2.1.x reversed this** (confirmed 2026-06-13): a present
+`~/.claude/.credentials.json` is *preferred* over the env var, so a stale file
+shadows the token, fails to refresh, and forces a `/login`. And such a file does
+appear: inside the Linux container Claude Code has no Keychain and falls back to
+the file store, so — through the read-write `~/.claude` mount — a container
+*writes one back onto the host*, which the next launch then mounts in. So
+oauth-token (and bedrock) now **overlay a throwaway `{}` `.credentials.json`**
+(`_masking_credfile`) at that path, exactly as keychain mode overlays the real
+extracted creds: this both masks any stale host file and captures the
+container's own writes in a temp file that never persists. `launch_container`
+also **warns** if a `~/.claude/.credentials.json` exists on the host at all
+(it never should on macOS — the Keychain is the store).
 
 Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 

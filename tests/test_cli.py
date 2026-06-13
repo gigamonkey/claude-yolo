@@ -7,6 +7,17 @@ and assert on the argv that would have been exec'd into `docker run`.
 import json
 
 import pytest
+from conftest import MASK_CREDFILE
+
+
+def cred_overlays(mounts):
+    """Source paths bind-mounted at the container's .credentials.json.
+
+    Lets a test tell the throwaway oauth-token/bedrock mask (MASK_CREDFILE) apart
+    from the keychain snapshot (creds_path) — both land at the same container path.
+    """
+    suffix = ":/home/claude/.claude/.credentials.json"
+    return [m[: -len(suffix)] for m in mounts if m.endswith(suffix)]
 
 
 @pytest.fixture
@@ -43,7 +54,9 @@ def test_default_run_assembles_expected_mounts(cy, run_cli, flag_values, dirs):
     # the default auth mode is oauth-token: a forwarded env token, no mounted
     # keychain-credentials snapshot (that mode is unsafe for concurrent sessions)
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
-    assert not any(".credentials.json" in m for m in mounts)
+    # the only .credentials.json overlay is the throwaway mask, never the keychain
+    # snapshot — so a stale host creds file can't shadow the env token
+    assert cred_overlays(mounts) == [MASK_CREDFILE]
     # ssh-agent is off by default: no socket forwarded into the container
     assert "SSH_AUTH_SOCK=/run/ssh-agent" not in envs
     assert not any("ssh-auth.sock" in m for m in mounts)
@@ -113,7 +126,7 @@ def test_bedrock_sets_env_and_skips_keychain(cy, run_cli, flag_values, dirs):
     assert "AWS_PROFILE=prod" in envs
     assert "AWS_REGION=us-east-1" in envs  # default region
     assert f"{home}/.aws:/home/claude/.aws:ro" in mounts
-    assert not any(".credentials.json" in m for m in mounts)  # no keychain creds
+    assert cred_overlays(mounts) == [MASK_CREDFILE]  # throwaway mask, no keychain creds
     assert container_name(argv) == "work-prod"
 
 
@@ -148,11 +161,42 @@ def test_oauth_token_forwards_env_and_skips_keychain(cy, run_cli, flag_values, d
     mounts = flag_values(argv, "-v")
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
-    # no rotating keychain creds mounted in this mode
-    assert not any(".credentials.json" in m for m in mounts)
+    # no rotating keychain creds mounted in this mode — just the throwaway mask
+    assert cred_overlays(mounts) == [MASK_CREDFILE]
     # the config dir / claude.json are still mounted (auth is orthogonal to them)
     assert f"{home}/.claude:/home/claude/.claude" in mounts
     assert f"{home}/.claude.json:/home/claude/.claude.json" in mounts
+
+
+def test_mask_overlays_at_real_config_dir_path(cy, run_cli, flag_values, tmp_path):
+    # the mask must land at the *mounted* config dir's .credentials.json, so it
+    # shadows a stale host file under an alternate --config-dir too
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    cfg = tmp_path / "cfg"
+    for d in (home, work, cfg):
+        d.mkdir()
+    argv = run_cli(["--config-dir", str(cfg)], home=home, cwd=work)
+    mounts = flag_values(argv, "-v")
+    assert f"{MASK_CREDFILE}:/home/claude/.claude/.credentials.json" in mounts
+
+
+def test_stale_host_credentials_file_warns(cy, run_cli, flag_values, dirs, capsys):
+    # a .credentials.json on the host should never exist on macOS; warn (and still
+    # mask it so the run works) so the user knows to delete it
+    home, work = dirs
+    (home / ".claude").mkdir()
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    argv = run_cli([], home=home, cwd=work)
+    err = capsys.readouterr().err
+    assert ".credentials.json exists on the host" in err
+    assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
+
+
+def test_no_warning_without_stale_host_credentials(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    run_cli([], home=home, cwd=work)
+    assert ".credentials.json exists on the host" not in capsys.readouterr().err
 
 
 def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path):
@@ -166,7 +210,7 @@ def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path
     envs = flag_values(argv, "-e")
     assert f"{cfg}:/home/claude/.claude" in mounts
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
-    assert not any(".credentials.json" in m for m in mounts)
+    assert cred_overlays(mounts) == [MASK_CREDFILE]
 
 
 def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
@@ -174,7 +218,7 @@ def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
     (home / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
     argv = run_cli([], home=home, cwd=work)
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
-    assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
 
 
 def test_invalid_auth_choice_rejected(cy, run_cli, dirs):
@@ -293,7 +337,8 @@ def test_cli_auth_overrides_yolo(cy, run_cli, flag_values, dirs):
     argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
     envs = flag_values(argv, "-e")
     assert "CLAUDE_CODE_USE_BEDROCK=1" not in envs
-    assert any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    # keychain mounts the real extracted creds at .credentials.json, not the mask
+    assert cred_overlays(flag_values(argv, "-v")) == ["/tmp/creds.json"]
 
 
 def test_project_entry_provides_defaults(cy, run_cli, flag_values, dirs):
@@ -310,7 +355,7 @@ def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsy
     # the in-directory file no longer configures anything: still a default
     # oauth-token run, not the keychain run the file asks for
     assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
-    assert not any(".credentials.json" in m for m in flag_values(argv, "-v"))
+    assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
     assert "no longer read" in capsys.readouterr().err
 
 

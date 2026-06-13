@@ -126,6 +126,34 @@ def extract_credentials(config_dir: str | None) -> str:
     return tmp.name
 
 
+def _masking_credfile() -> str:
+    """Create a throwaway `.credentials.json` to overlay in non-keychain auth modes.
+
+    On macOS the host's Claude Code keeps its OAuth credentials in the Keychain, so
+    `~/.claude/.credentials.json` should never exist on the host. But inside the Linux
+    container Claude Code has no Keychain and falls back to that *file* store — and
+    because yolo bind-mounts the host `~/.claude` read-write, a container's credential
+    write would otherwise land in the real host dir. Worse, under Claude Code 2.1.x a
+    present `.credentials.json` is preferred over the CLAUDE_CODE_OAUTH_TOKEN env var,
+    so a stale file shadows the token and forces a /login (confirmed 2026-06-13).
+
+    Overlaying this throwaway (containing `{}` — valid JSON, no stored creds) at that
+    path in the oauth-token/bedrock modes both masks any pre-existing stale host file
+    and captures the container's own credential writes in a temp file that never
+    persists back to ~/.claude. It mirrors what keychain mode already does at the same
+    path, where the overlay is the freshly-extracted creds. Returns the temp file
+    path, chmod 600, ready to bind-mount.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="claude-credentials-mask-", suffix=".json", delete=False
+    )
+    tmp.write(b"{}")
+    tmp.close()
+    credpath = pathlib.Path(tmp.name)
+    credpath.chmod(0o600)
+    return tmp.name
+
+
 def _is_logged_in(env: dict) -> bool:
     """Return True if `claude auth status` reports an active login.
 
@@ -2038,19 +2066,39 @@ def launch_container(
     if parsed.claude_json:
         args += ["-v", f"{home}/.claude.json:/home/claude/.claude.json"]
 
+    # On macOS the host stores Claude Code's creds in the Keychain, so a
+    # `.credentials.json` in the host config dir should never exist. One almost always
+    # means a past container wrote it back through the rw mount (Linux Claude Code has
+    # no Keychain and falls back to the file store). Such a file is stale and, under
+    # Claude Code 2.1.x, shadows the OAuth-token env var → /login. The auth block below
+    # overlays that path for this run (keychain with real creds; oauth-token/bedrock
+    # with a throwaway), so it's masked here regardless; warn so the user can delete it.
+    if (pathlib.Path(host_claude_dir) / ".credentials.json").exists():
+        print(
+            f"warning: {host_claude_dir}/.credentials.json exists on the host. On macOS\n"
+            "  Claude Code uses the Keychain, so this file shouldn't exist — it was likely\n"
+            "  written back by a past yolo container and can shadow the OAuth token. This\n"
+            "  run masks it; consider deleting it.",
+            file=sys.stderr,
+        )
+
     # (c) Auth mechanism (--auth), one of three mutually-exclusive paths:
-    #   - oauth-token (default): forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env
-    #     var. No keychain extraction, no login check, no .credentials.json mount —
-    #     the token is stable (never rotated/written back), so concurrent containers
-    #     and the host can all use it at once. The env var also out-ranks any file
-    #     creds, so a stale mounted .credentials.json can't shadow it.
-    #   - bedrock: AWS creds + env (mounts ~/.aws), no keychain/login.
+    #   - oauth-token (default): forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env var.
+    #     No keychain extraction, no login check. The token is stable (never
+    #     rotated/written back), so concurrent containers and the host can all use it
+    #     at once. We *do* overlay a throwaway .credentials.json (_masking_credfile):
+    #     under Claude Code 2.1.x a stale mounted creds file is preferred over the env
+    #     token and shadows it, and the overlay also stops the container persisting
+    #     creds back to the host ~/.claude.
+    #   - bedrock: AWS creds + env (mounts ~/.aws), no keychain/login; same throwaway
+    #     creds overlay so a container can't pollute the host ~/.claude.
     #   - keychain: extract the rotating keychain creds into a mounted file. All
     #     snapshots (and the host keychain) share one refresh boundary — the access
     #     token's expiry — and whoever refreshes first there breaks every other
     #     holder, host login included.
     if parsed.auth == "oauth-token":
         args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
+        args += ["-v", f"{_masking_credfile()}:/home/claude/.claude/.credentials.json"]
     elif parsed.auth == "bedrock":
         container = f"{container}-{parsed.aws_profile or 'bedrock'}"
         args += ["-v", f"{home}/.aws:/home/claude/.aws:ro"]
@@ -2060,6 +2108,7 @@ def launch_container(
         args += ["-e", f"AWS_REGION={parsed.aws_region or 'us-east-1'}"]
         if parsed.bedrock_model:
             args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
+        args += ["-v", f"{_masking_credfile()}:/home/claude/.claude/.credentials.json"]
     else:  # keychain
         ensure_logged_in(config_dir)
         credfile = extract_credentials(config_dir)
