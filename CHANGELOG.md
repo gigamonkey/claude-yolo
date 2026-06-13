@@ -22,7 +22,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   a shared tag.
 
 - **`yolo dockerfile`**: print the built-in default Dockerfile — a starting
-  point for a custom one, or just to inspect what gets built.
+  point for a custom one, or just to inspect what gets built. With `--custom`
+  it instead prints a ready-to-edit template that layers on the default via
+  `FROM ${YOLO_BASE}`, with a marked block for your own steps and the trailing
+  `USER claude` yolo requires — so `yolo dockerfile --custom > Dockerfile.yolo`
+  gives you a correct custom Dockerfile to fill in.
 
 - **`--version` self-identifies live checkouts**: a version run from a git
   checkout that diverges from a published release now appends a suffix —

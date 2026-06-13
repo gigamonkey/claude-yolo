@@ -753,3 +753,21 @@ def test_dockerfile_verb_rejects_a_topic(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit):
         run_cli(["dockerfile", "extra"], home=home, cwd=work)
+
+
+def test_dockerfile_verb_custom_prints_template(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    argv = run_cli(["dockerfile", "--custom"], home=home, cwd=work)
+    assert argv is None  # terminal verb: no container launched
+    out = capsys.readouterr().out
+    assert out == cy.CUSTOM_DOCKERFILE
+    # The template must layer on the default (FROM ${YOLO_BASE}) and end as `claude`,
+    # the two invariants _build_image / _verify_image_user enforce.
+    assert "FROM ${YOLO_BASE}" in out
+    assert out.rstrip().endswith("USER claude")
+
+
+def test_custom_flag_rejected_outside_dockerfile(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["--custom"], home=home, cwd=work)

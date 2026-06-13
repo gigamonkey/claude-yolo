@@ -86,6 +86,43 @@ ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
 
 
+# Printed by `yolo dockerfile --custom`: a ready-to-edit Dockerfile that *layers on*
+# the default rather than replacing it. Referencing YOLO_BASE is what triggers
+# _build_image to build the default first and pass its tag in (see _build_image and
+# the README), so this template inherits the claude user, sudo, the native Claude
+# install, the GitHub HTTPS->SSH rewrite, PATH, and the ENTRYPOINT — the user only
+# fills in the marked block.
+CUSTOM_DOCKERFILE = """\
+# Custom yolo Dockerfile — layers your own steps on top of yolo's built-in image.
+#
+# Use it with:
+#   yolo --dockerfile ./Dockerfile.yolo          # one run
+#   yolo config --dockerfile ./Dockerfile.yolo   # persist it for this project
+#
+# Because this file references YOLO_BASE, yolo builds its default image first and
+# passes the tag in as the YOLO_BASE build arg, so you inherit the `claude` user
+# (with passwordless sudo), the native Claude install, the GitHub HTTPS->SSH
+# rewrite, PATH, and the ENTRYPOINT. Keep the two lines just below.
+
+ARG YOLO_BASE
+FROM ${YOLO_BASE}
+
+# The base leaves you as the `claude` user, which has passwordless sudo. Bake in
+# cross-cutting tools you want in every session here; project-specific or heavy
+# ones are better installed on demand inside the container. For example:
+#
+#   RUN sudo apt-get update && sudo apt-get install -y postgresql-client
+
+# --- your customizations go here ---
+
+
+# Keep this last. yolo passes no -u, so the image's final USER is the runtime
+# user, and it refuses to launch an image that doesn't run as `claude` (a root
+# image would write your bind-mounted files as root).
+USER claude
+"""
+
+
 def _image_tag(dockerfile_text: str, uid: int) -> str:
     """Content-addressed image tag for a Dockerfile + host UID.
 
@@ -1468,7 +1505,8 @@ PARSER.add_argument(
     "with --global), or — given config flags — persists exactly those flags into "
     "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
     "--remove-prompt); 'dockerfile' prints the built-in default Dockerfile (a "
-    "starting point for --dockerfile); 'setup-token' mints/caches a "
+    "starting point for --dockerfile; --custom prints a layer-on-top template "
+    "instead); 'setup-token' mints/caches a "
     "long-lived OAuth token (for --auth oauth-token); 'tokens' lists the tokens "
     "yolo has minted; 'forget-token' deletes the active config dir's token from "
     "the keychain (local only — see `tokens` output for revocation). A bare "
@@ -1708,6 +1746,13 @@ PARSER.add_argument(
     dest="print_url",
     action="store_true",
     help="For `browse`: print the session's URL without opening a browser.",
+)
+PARSER.add_argument(
+    "--custom",
+    action="store_true",
+    help="For `dockerfile`: print a ready-to-edit custom Dockerfile that layers on "
+    "the default via `FROM ${YOLO_BASE}` (with a marked block for your steps), "
+    "instead of dumping the default itself.",
 )
 PARSER.add_argument(
     "--require-project-entry",
@@ -2842,16 +2887,22 @@ def do_browse(
         _open_url(url)
 
 
-def do_dockerfile() -> None:
-    """`dockerfile` verb: print the built-in default Dockerfile to stdout.
+def do_dockerfile(custom: bool = False) -> None:
+    """`dockerfile` verb: print a Dockerfile to stdout.
 
-    A starting point for a custom `--dockerfile`. The recommended way to customize
-    is to *layer on* this image rather than fork it wholesale — start a Dockerfile
-    with `ARG YOLO_BASE` / `FROM ${YOLO_BASE}` and add your steps (yolo injects the
-    base tag at build time; see _build_image and the README). Dumping the default
-    is for inspection, or for the rare case where you want to start over entirely.
+    Default: the built-in DEFAULT_DOCKERFILE — for inspection, or for the rare case
+    where you want to start over and replace it wholesale.
+
+    With `--custom`: a ready-to-edit CUSTOM_DOCKERFILE that *layers on* the default
+    rather than forking it — it already has the `ARG YOLO_BASE` / `FROM ${YOLO_BASE}`
+    lines (yolo injects the base tag at build time; see _build_image and the README),
+    a marked block for your own steps, and the trailing `USER claude` yolo requires.
+    This is the recommended way to customize:
+
+        yolo dockerfile --custom > Dockerfile.yolo
+        yolo config --dockerfile ./Dockerfile.yolo
     """
-    sys.stdout.write(DEFAULT_DOCKERFILE)
+    sys.stdout.write(CUSTOM_DOCKERFILE if custom else DEFAULT_DOCKERFILE)
 
 
 def do_tokens() -> None:
@@ -2992,6 +3043,8 @@ def main():
         sys.exit("--watch only applies to `ps`.")
     if parsed.print_url and verb != "browse":
         sys.exit("--print/-n only applies to `browse`.")
+    if parsed.custom and verb != "dockerfile":
+        sys.exit("--custom only applies to `dockerfile`.")
     for flag, val in (
         ("--init", parsed.init),
         ("--global", parsed.cfg_global),
@@ -3010,9 +3063,9 @@ def main():
         do_config(script_argv, home, cwd, parsed)
         return
 
-    # `dockerfile` just prints the built-in default — no config, no container.
+    # `dockerfile` just prints a Dockerfile — no config, no container.
     if verb == "dockerfile":
-        do_dockerfile()
+        do_dockerfile(parsed.custom)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags
