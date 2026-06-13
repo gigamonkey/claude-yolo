@@ -24,6 +24,21 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   your own hooks still fire inside the container (hooks from other settings
   sources, e.g. enterprise-managed, are not carried over).
 
+- **Fix: oauth-token sessions no longer break with `/login`.** Claude Code 2.1.x
+  changed its auth precedence so that a `~/.claude/.credentials.json` file is
+  preferred over the `CLAUDE_CODE_OAUTH_TOKEN` env var. Because yolo bind-mounts
+  `~/.claude` read-write and a container's Claude Code writes its file-store creds
+  there, a prior session could leave a stale `.credentials.json` on the host that
+  the next launch mounted back in — whose dead token then shadowed the valid env
+  token and forced a `/login`. oauth-token (and bedrock) sessions now overlay a
+  throwaway `.credentials.json` at that path, so the env token always wins and the
+  container can't write creds back to your host `~/.claude`. yolo also warns at
+  launch if a `~/.claude/.credentials.json` exists on the host, since on macOS it
+  never should (the Keychain is the store).
+
+- **Image: Node 24 instead of Ubuntu's Node 18.** The baked image now installs
+  Node 24 from NodeSource rather than Ubuntu 24.04's `nodejs` apt package.
+
 ## v0.9.0 — 2026-06-12
 
 - **Port forwarding via the `ports` config key / `--port [HOST:]CONTAINER`**:
