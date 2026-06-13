@@ -120,6 +120,15 @@ def build_docker_image(dockerfile_text: str, tag: str, uid: int, *, no_cache: bo
     with tempfile.TemporaryDirectory(prefix="claude-yolo-build-") as build_dir:
         dockerfile = pathlib.Path(build_dir) / "Dockerfile"
         dockerfile.write_text(dockerfile_text)
+        # Safety invariant: the build context must contain *only* the Dockerfile.
+        # COPY/ADD in a (possibly user-supplied) Dockerfile can read any file in the
+        # build context, so an empty context is exactly what stops a custom Dockerfile
+        # from pulling host files into the image. We control this dir (we only wrote the
+        # Dockerfile), so this is a guard against a future change quietly adding files
+        # to the context — not against anything a Dockerfile itself can do.
+        extra = sorted(p.name for p in pathlib.Path(build_dir).iterdir() if p.name != "Dockerfile")
+        if extra:
+            sys.exit(f"refusing to build: unexpected files in Docker build context: {extra}")
         cmd = ["docker", "build", "-t", tag, "--build-arg", f"HOST_UID={uid}"]
         if no_cache:
             cmd.append("--no-cache")

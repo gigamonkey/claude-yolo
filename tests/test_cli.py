@@ -612,3 +612,20 @@ def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
     assert cmd[:3] == ["docker", "build", "-t"]
     assert "claude-yolo:abc12345" in cmd
     assert "--build-arg" in cmd and "HOST_UID=4242" in cmd
+
+
+def test_build_context_contains_only_the_dockerfile(cy, monkeypatch):
+    # The empty build context is what stops a custom Dockerfile's COPY/ADD from
+    # reaching host files — capture the context dir (last build arg) and assert it
+    # holds nothing but the Dockerfile.
+    import pathlib
+
+    seen = {}
+
+    def fake_run(cmd, **k):
+        build_dir = pathlib.Path(cmd[-1])
+        seen["contents"] = sorted(p.name for p in build_dir.iterdir())
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
+    assert seen["contents"] == ["Dockerfile"]

@@ -62,6 +62,13 @@ The container has network access (it has to, to talk to the Anthropic API), so
 you hand over accordingly: prefer read-only mounts, narrowly-scoped tokens, and
 leaving `--ssh-agent` off unless a project actually needs Claude to push.
 
+**Custom Dockerfiles don't widen any of this.** If you point yolo at your own
+Dockerfile with `--dockerfile` — even one sitting in the project directory where
+Claude could edit it — the worst it can do is change *what's inside the
+container*, not *what the container can reach on your host*: a Dockerfile can't
+add host mounts and can't copy host files into the image. See
+[`dockerfile`](#dockerfile---dockerfile-path) for the full reasoning.
+
 ## Requirements
 
 - **macOS.** Credential extraction reads from the macOS keychain via the
@@ -596,6 +603,53 @@ file can't put the skip-permissions container's server on your LAN (the raw
 string or list of specs; like `mounts`, the lists concatenate across the layers
 and the CLI (on a same-container-port conflict the higher layer wins).
 
+### `dockerfile` (`--dockerfile PATH`)
+
+Build the container image from your own Dockerfile instead of the built-in
+default — handy when a project needs a different base image or tools that don't
+belong in everyone's image. The default Dockerfile stays inline in `yolo.py` (so
+the script remains a single self-contained file); `--dockerfile` just swaps in
+different build instructions. Your Dockerfile is handed the host UID as the
+`HOST_UID` build arg, so include `ARG HOST_UID` and create your user with it (as
+the default does) to keep files Claude writes in the mounted working directory
+owned by you.
+
+Each distinct Dockerfile gets its own content-addressed image tag
+(`claude-yolo:<hash>`), so projects with different images — and parallel sessions
+— never clobber each other's build.
+
+**Is a custom Dockerfile safe?** Mostly yes, and it's worth understanding why,
+since the file usually lives in your project directory, where Claude could edit
+it between runs. The short version is that a Dockerfile changes *what's in the
+container*, not *what the container can reach on your host*:
+
+- **A Dockerfile can't add host mounts.** Bind mounts are decided by `yolo` on
+  the host side when it launches the container; there is no Dockerfile
+  instruction that mounts a host path (`VOLUME` only makes anonymous volumes). So
+  editing the Dockerfile can't grant the next session access to any host
+  directory yolo didn't already mount.
+
+- **A Dockerfile can't copy host files into the image either.** `COPY`/`ADD` can
+  only read from the *build context*, and yolo's build context is a temporary
+  directory containing nothing but the Dockerfile itself — there are no host
+  files there to copy. (yolo also double-checks the context holds nothing else
+  before building.)
+
+- **What a Dockerfile *can* do** is run arbitrary commands at build time and bake
+  whatever it likes into the image. But build-time commands run in Docker's build
+  sandbox with no access to your host filesystem and no credentials present (yolo
+  passes none to the build — no `--secret`, no `--ssh`), and anything baked into
+  the image only runs later *inside the container*, where Claude already runs
+  arbitrary code with the same mounts and the same forwarded Anthropic token. So
+  a malicious image gains nothing the running container doesn't already have. The
+  practical risks are just the ordinary ones of building any untrusted Dockerfile
+  (it has network at build time) plus the fact that a baked-in backdoor is
+  stealthier and persists until the next rebuild.
+
+In other words, treat a Dockerfile you didn't write with the same caution as any
+third-party Dockerfile, but it doesn't widen yolo's blast radius beyond the
+mounts and credentials you already chose to hand over.
+
 ### `base` (`--base REF`, default `HEAD`)
 
 The git ref worktree branches are created from (`yolo start TOPIC`) and judged
@@ -739,12 +793,20 @@ When you run the script, it does five things:
 
 ### 1. Builds the Docker image
 
-It writes an inline Dockerfile to a temp directory and builds it. The image is
+It writes the built-in Dockerfile to a temp directory and builds it. The image is
 Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
 amenities used across most projects — `ripgrep`, `fd` (the `fd-find` package,
 symlinked to `fd`), `build-essential`, and `uv`/`uvx` — plus Claude Code installed
 via the **native installer** (`curl https://claude.ai/install.sh | bash`, landing
-at `~/.local/bin/claude`).
+at `~/.local/bin/claude`). You can build from your own Dockerfile instead with
+`--dockerfile` (see [`dockerfile`](#dockerfile---dockerfile-path)).
+
+The temp directory is the entire **build context**, and it holds nothing but the
+Dockerfile — that's what keeps a custom Dockerfile's `COPY`/`ADD` from reaching
+host files (yolo asserts the context is otherwise empty before building). The
+image tag is content-addressed (`claude-yolo:<hash>` over the Dockerfile text and
+your UID), so the default and any custom Dockerfile get separate images and
+parallel sessions never race on a shared tag.
 
 The image is rebuilt on every run, but Docker's layer cache makes that nearly
 instant after the first time — so baked-in tools cost almost nothing per launch
@@ -754,8 +816,10 @@ container than added here.
 
 ### 2. Matches your host user ID
 
-The Dockerfile creates a `claude` user whose UID is substituted at build time to
-match your host UID (`os.getuid()`). This keeps file ownership straight across
+The Dockerfile creates a `claude` user whose UID matches your host UID
+(`os.getuid()`), passed in at build time as the `HOST_UID` build arg (`docker
+build --build-arg HOST_UID=…`, which the Dockerfile's `ARG HOST_UID` feeds to
+`useradd`). This keeps file ownership straight across
 the bind mounts: anything Claude writes in the working directory lands on the
 host owned by *you*, and the container can in turn read host-owned files —
 including the `chmod 600` credentials file and your mounted `~/.claude` config.

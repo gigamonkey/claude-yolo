@@ -131,7 +131,14 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    parallel: a single fixed tag would let two concurrent builds (default vs.
    custom) race and one `docker run` pick up the other's image. The default
    Dockerfile stays inline (not a shipped file) to preserve the single-file
-   property — `--dockerfile` is an *override*, not a relocation.
+   property — `--dockerfile` is an *override*, not a relocation. The **build
+   context is the temp dir and contains only the Dockerfile** — that empty
+   context is what stops a custom Dockerfile's `COPY`/`ADD` from reaching host
+   files (a Dockerfile also can't add host bind-mounts — those are yolo's
+   host-side `docker run` args). `build_docker_image` asserts the context holds
+   nothing but the Dockerfile before building, guarding the invariant against
+   future regressions; yolo passes no `--secret`/`--ssh` to `docker build`, so
+   `RUN --mount=type=secret/ssh` can't reach host material either.
 2. **Passes the host UID as the `HOST_UID` build ARG** (`--build-arg
    HOST_UID=os.getuid()`), which the Dockerfile's `ARG HOST_UID` feeds to
    `useradd`, so the in-container `claude` user matches `os.getuid()` (no Python
@@ -912,8 +919,9 @@ captured `docker run` argv. `test_config.py` covers config parsing/merging
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 and the `config` verb; `test_cli.py` covers verb dispatch and arg
 assembly across the credential/config axes, extra mounts, the guardrails, and the
-`--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, and the
-missing-path error). The tests locate the built image in the assembled argv by its
+`--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
+missing-path error, and that the build context contains only the Dockerfile). The
+tests locate the built image in the assembled argv by its
 `claude-yolo:` repo prefix (the tag is now content-addressed, not a fixed constant).
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
