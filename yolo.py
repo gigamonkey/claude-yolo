@@ -2292,9 +2292,10 @@ def _humanize_secs(s: int) -> str:
 def _read_session_state(path: pathlib.Path, now: float) -> str:
     """A session's activity state for the `ps` STATE column, from its status file.
 
-    The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>".
-    `waiting` renders with the elapsed time since the main agent last finished
-    (`waiting 5m`); `working` renders bare; anything missing or unparseable is `-`.
+    The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>",
+    rendered with the elapsed time since that transition: `waiting 5m` (since the
+    main agent last finished) or `working 12s` (since the last user prompt).
+    Anything missing or unparseable is `-`.
     """
     try:
         parts = path.read_text().split()
@@ -2307,10 +2308,8 @@ def _read_session_state(path: pathlib.Path, now: float) -> str:
         age = max(0, int(now - int(ts)))
     except ValueError:
         return "-"
-    if state == "waiting":
-        return f"waiting {_humanize_secs(age)}"
-    if state == "working":
-        return "working"
+    if state in ("waiting", "working"):
+        return f"{state} {_humanize_secs(age)}"
     return "-"
 
 

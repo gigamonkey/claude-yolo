@@ -161,7 +161,7 @@ def test_read_session_state_waiting(cy, tmp_path):
 def test_read_session_state_working(cy, tmp_path):
     f = tmp_path / "s.state"
     f.write_text("working 1000")
-    assert cy._read_session_state(f, 1000 + 5) == "working"
+    assert cy._read_session_state(f, 1000 + 5) == "working 5s"
 
 
 def test_read_session_state_clamps_future_timestamp(cy, tmp_path):

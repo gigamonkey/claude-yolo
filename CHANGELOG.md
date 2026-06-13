@@ -6,8 +6,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 ## v0.10.0 — 2026-06-13
 
 - **`yolo ps` shows session activity (new STATE column)**: each running session
-  reads `working` while Claude is busy, or `waiting <age>` (e.g. `waiting 5m`)
-  once Claude has finished responding and is sitting at the prompt — so the
+  reads `working <age>` while Claude is busy (time since your last prompt), or
+  `waiting <age>` (e.g. `waiting 5m`) once Claude has finished responding and is
+  sitting at the prompt (time since it stopped) — so the
   cross-repo listing and the tmux dashboard tell you at a glance which sessions
   need your attention. It's driven by Claude Code **hooks** that yolo injects
   into every session (a `Stop` hook records when Claude finishes, a

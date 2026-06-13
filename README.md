@@ -302,9 +302,9 @@ If the matching container is already running — say you `yolo resume foo` twice
 — yolo switches to its existing window instead of spawning a `docker run` that
 would only die on the container-name conflict.
 
-The **STATE** column tells you which sessions need you: `working` while Claude
-is busy, or `waiting 5m` once it has finished responding and is sitting at the
-prompt (with the time since). This is driven by Claude Code **hooks** that yolo
+The **STATE** column tells you which sessions need you: `working 12s` while
+Claude is busy (time since your last prompt), or `waiting 5m` once it has
+finished responding and is sitting at the prompt (time since it stopped). This is driven by Claude Code **hooks** that yolo
 injects into each session — a `Stop` hook records when Claude finishes, a
 `UserPromptSubmit` hook records when you reply — so it reflects the real
 conversation state, not container CPU. A session that hasn't interacted yet (or
@@ -885,7 +885,7 @@ launch, so you can see exactly what's happening.
   tool provides. (A `/doctor` sandbox note may still appear; that's expected.)
 
 - **Session-state hooks (the `ps` STATE column).** To know whether a session is
-  working or `waiting 5m`, claude-yolo injects two Claude Code hooks into every
+  `working 12s` or `waiting 5m`, claude-yolo injects two Claude Code hooks into every
   session via that same `--settings` overlay: a `Stop` hook that records when
   Claude finishes responding and a `UserPromptSubmit` hook that records when you
   reply. Each writes a tiny timestamp file under `<config-dir>/.yolo-status/`,

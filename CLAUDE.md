@@ -558,8 +558,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   2s cadence), condensed by `_condense_ports` to `host->container` pairs
   (address/proto noise and the IPv6 twin dropped). STATE is read from each
   session's `<config-dir>/.yolo-status/<cwd-slug>.state` file
-  (`_read_session_state`): `working`, `waiting <humanized age>` (since the `Stop`
-  hook fired), or `-` (no file / older container). The config dir comes from the
+  (`_read_session_state`): `working <age>` (since the last `UserPromptSubmit`),
+  `waiting <age>` (since the `Stop` hook fired), or `-` (no file / older
+  container). Both render via `_humanize_secs`. The config dir comes from the
   `yolo.config-dir` label (falls back to `~/.claude`); no extra docker calls.
   `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's
   the dashboard tmux mode seeds (see below), but it's an ordinary verb usable
