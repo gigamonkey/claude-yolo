@@ -1448,14 +1448,18 @@ def _git(*args: str) -> str | None:
 
 
 def _git_suffix(base: str) -> str:
-    """A local-version suffix flagging that the running yolo.py diverges from the
-    published release `base` — i.e. it's live code, not a wheel of a tagged
-    release. Empty when not in a git repo (released wheel) or when HEAD is exactly
-    the clean `v{base}` tag.
+    """A local-version suffix flagging that the running yolo.py is live code (a
+    checkout — editable install or the standalone script), not a wheel of a tagged
+    release. Empty *only* when not in a git repo, which means a released wheel
+    (a wheel ships just yolo.py into site-packages, so `git` finds no repo there).
 
-    Appends `+g{sha}` when HEAD isn't the commit tagged `v{base}` (committed work
-    past the release, or the tag isn't fetched locally), and `.dirty` (or a bare
-    `+dirty`) when the working tree has uncommitted changes."""
+    Reaching past that check means `__file__` is inside a checkout, so the version
+    is never left bare — it always carries a marker saying which live state it's in:
+    `+g{sha}` when HEAD isn't the commit tagged `v{base}` (committed work past the
+    release, or the tag isn't fetched locally); `+editable` when HEAD *is* that
+    commit with a clean tree (otherwise indistinguishable from a wheel of the tag);
+    plus `.dirty` (or a bare `+dirty`) when the working tree has uncommitted
+    changes."""
     head = _git("rev-parse", "--short=7", "HEAD")
     if head is None:
         return ""  # not a git repo → released wheel, leave base clean
@@ -1464,13 +1468,16 @@ def _git_suffix(base: str) -> str:
     full_head = _git("rev-parse", "HEAD")
     on_release = tagged is not None and tagged == full_head
     if on_release:
-        return "+dirty" if dirty else ""  # clean release tag → bare version
+        # On the release commit, but it's a live checkout (a wheel returned above),
+        # so still mark it rather than report a bare version a real wheel would.
+        return "+dirty" if dirty else "+editable"
     return f"+g{head}.dirty" if dirty else f"+g{head}"
 
 
 def _version() -> str:
-    """Package version for `--version`, with a `+g{sha}[.dirty]` suffix when
-    running live code that diverges from the published release (see _git_suffix)."""
+    """Package version for `--version`, with a local-version suffix
+    (`+editable` / `+g{sha}` / `[.]dirty`) when running live code from a checkout
+    rather than an installed wheel (see _git_suffix)."""
     base = _base_version()
     if base == "unknown":
         return base

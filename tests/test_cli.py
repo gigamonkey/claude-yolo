@@ -580,6 +580,55 @@ def test_base_version_unknown_with_neither(cy, monkeypatch):
     assert cy._base_version() == "unknown"
 
 
+def _fake_git(cy, monkeypatch, *, head, dirty, tag_commit):
+    """Stub cy._git so _git_suffix runs against a scripted repo state.
+
+    head=None models "not a git repo" (a wheel). Otherwise HEAD is `head`; the
+    v{base} tag resolves to `tag_commit` (None = tag absent); `dirty` toggles the
+    working-tree state.
+    """
+
+    def fake(*args):
+        if head is None:
+            return None
+        if args[:2] == ("rev-parse", "--short=7"):
+            return head
+        if args[0] == "status":
+            return " M yolo.py" if dirty else ""
+        if "--verify" in args:  # the v{base}^{commit} tag lookup
+            return tag_commit
+        if args == ("rev-parse", "HEAD"):
+            return head
+        return None
+
+    monkeypatch.setattr(cy, "_git", fake)
+
+
+def test_git_suffix_wheel_is_bare(cy, monkeypatch):
+    _fake_git(cy, monkeypatch, head=None, dirty=False, tag_commit=None)
+    assert cy._git_suffix("0.11.0") == ""
+
+
+def test_git_suffix_editable_on_clean_release(cy, monkeypatch):
+    # HEAD == the v0.11.0 tag, clean tree, but it's a live checkout (a wheel would
+    # have returned bare above) -> +editable, not bare.
+    _fake_git(cy, monkeypatch, head="abc1234", dirty=False, tag_commit="abc1234")
+    assert cy._git_suffix("0.11.0") == "+editable"
+
+
+def test_git_suffix_dirty_on_release(cy, monkeypatch):
+    _fake_git(cy, monkeypatch, head="abc1234", dirty=True, tag_commit="abc1234")
+    assert cy._git_suffix("0.11.0") == "+dirty"
+
+
+def test_git_suffix_past_release_uses_sha(cy, monkeypatch):
+    # HEAD diverges from the v0.11.0 tag (commit past the release / tag absent).
+    _fake_git(cy, monkeypatch, head="def5678", dirty=False, tag_commit="abc1234")
+    assert cy._git_suffix("0.11.0") == "+gdef5678"
+    _fake_git(cy, monkeypatch, head="def5678", dirty=True, tag_commit=None)
+    assert cy._git_suffix("0.11.0") == "+gdef5678.dirty"
+
+
 # --- worktree mounts (start TOPIC) ------------------------------------------
 
 
