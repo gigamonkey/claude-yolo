@@ -297,11 +297,11 @@ def test_ps_renders_cross_repo_table(cy, monkeypatch, capsys, tmp_path):
     assert "label=yolo.cwd" in ps_call  # the filter that finds yolo's containers
 
     lines = printed.splitlines()
-    assert lines[0].split() == ["NAME", "TOPIC", "DIRECTORY", "PORTS", "UP", "STATE"]
+    assert lines[0].split() == ["NAME", "TOPIC", "PORTS", "CREATED", "STATE"]
     # docker's PORTS blob is condensed to the bare host->container pair
     assert "myrepo-fix" in lines[1] and "fix" in lines[1] and "55001->8000" in lines[1]
-    # cwd-mode row: "-" for no topic and no ports, home shortened to ~
-    assert "work" in lines[2] and " - " in lines[2] and "~/hacks/work" in lines[2]
+    # cwd-mode row: "-" for no topic and no ports
+    assert "work" in lines[2] and " - " in lines[2]
 
 
 def test_ps_shows_waiting_time_from_status_file(cy, monkeypatch, capsys, tmp_path):
@@ -343,8 +343,8 @@ def test_watch_only_applies_to_ps(cy, run_cli, dirs):
 def ps_rows(cy, monkeypatch):
     """Canned _ps_rows, returned as a mutable list so tests can vary refreshes."""
     rows = [
-        ["alpha", "-", "~/hacks/alpha", "-", "2 hours", "working 12s"],
-        ["beta-fix", "fix", "~/wt/fix", "55001->8000", "5 minutes", "waiting 3m"],
+        ["alpha", "-", "-", "2 hours", "working 12s"],
+        ["beta-fix", "fix", "55001->8000", "5 minutes", "waiting 3m"],
     ]
     monkeypatch.setattr(cy, "_ps_rows", lambda home: [tuple(r) for r in rows])
     return rows
@@ -393,7 +393,7 @@ def test_picker_selection_survives_refresh(cy, tmux, ps_rows, tmp_path):
     tmux.windows += [("@1", "alpha"), ("@2", "beta-fix")]
     script = [
         ("key", "j"),  # highlight beta-fix
-        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "~/z", "-", "1 second", "working 1s"])),
+        ("refresh", lambda: ps_rows.insert(0, ["zeta", "-", "-", "1 second", "working 1s"])),
         ("key", "\r"),  # must still target beta-fix, not whatever sits at index 1 now
     ]
 

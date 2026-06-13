@@ -570,8 +570,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   to the main checkout, not the worktree's own branch.
 - **`ps`** — every **running** yolo container, across **all** repos (the
   cross-repo counterpart to `list`), as a table
-  (NAME/TOPIC/DIRECTORY/PORTS/UP/STATE) read from the `yolo.*` labels
-  (`docker ps --filter label=yolo.cwd`); needs no git repo. PORTS comes straight
+  (NAME/TOPIC/PORTS/CREATED/STATE) read from the `yolo.*` labels
+  (`docker ps --filter label=yolo.cwd`); needs no git repo. CREATED is docker's
+  own `{{.RunningFor}}` (how long ago the container was created). PORTS comes straight
   from docker ps's own column (free — no per-container `docker port` calls at the
   2s cadence), condensed by `_condense_ports` to `host->container` pairs
   (address/proto noise and the IPv6 twin dropped). STATE is read from each

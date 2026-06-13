@@ -2365,8 +2365,8 @@ def _read_session_state(path: pathlib.Path, now: float) -> str:
     return "-"
 
 
-def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str, str]]:
-    """(name, topic, directory, ports, up, state) for every running yolo container.
+def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
+    """(name, topic, ports, created, state) for every running yolo container.
 
     Read from the yolo.* labels every launch stamps; the yolo.cwd filter is what
     distinguishes yolo's containers from everything else `docker ps` knows. The
@@ -2397,15 +2397,14 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str, str]]:
     rows = []
     for line in out.splitlines():
         name, topic, rawcwd, ports, up, cfgdir = (line.split("\t") + [""] * 6)[:6]
-        cwd = "~" + rawcwd[len(str(home)) :] if rawcwd.startswith(f"{home}/") else rawcwd
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state"
         state = _read_session_state(state_file, now)
-        rows.append((name, topic or "-", cwd, _condense_ports(ports) or "-", up, state))
+        rows.append((name, topic or "-", _condense_ports(ports) or "-", up, state))
     return rows
 
 
-PS_HEADERS = ("NAME", "TOPIC", "DIRECTORY", "PORTS", "UP", "STATE")
+PS_HEADERS = ("NAME", "TOPIC", "PORTS", "CREATED", "STATE")
 
 
 def do_ps(home: pathlib.Path, *, watch: bool) -> None:
@@ -2571,10 +2570,10 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
     orphans = False
     if rows:
         display = []
-        for name, topic, cwd, ports, up, state in rows:
+        for name, topic, ports, up, state in rows:
             mark = "" if name in windows else " *"
             orphans = orphans or bool(mark)
-            display.append((name + mark, topic, cwd, ports, up, state))
+            display.append((name + mark, topic, ports, up, state))
         lines = _format_table(PS_HEADERS, display)
         print(lines[0])
         for row, line in zip(rows, lines[1:], strict=True):
