@@ -1511,6 +1511,7 @@ PARSER.add_argument(
         "finish",
         "list",
         "ps",
+        "dir",
         "dockerfile",
         "setup-token",
         "tokens",
@@ -1523,7 +1524,9 @@ PARSER.add_argument(
     "the host browser at the running session's forwarded port (see --port/`ports` "
     "config). 'finish' removes a "
     "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'ps' shows "
-    "all running yolo containers across repos (see --watch); 'config' "
+    "all running yolo containers across repos (see --watch); 'dir' prints a "
+    "session's directory (a worktree's root with a TOPIC, else the current "
+    "directory) for `cd $(yolo dir TOPIC)`; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
     "with --global), or — given config flags — persists exactly those flags into "
     "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
@@ -2508,6 +2511,23 @@ def _print_table(headers: tuple, rows: list) -> None:
         print(line)
 
 
+def do_dir(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
+    """`dir` verb: print a session's working directory (only the path, on stdout).
+
+    With a TOPIC, the worktree's root dir — erroring if it doesn't exist, so
+    `cd $(yolo dir TOPIC)` fails loudly instead of cd-ing somewhere wrong. With no
+    TOPIC, the current directory (the main checkout). Nothing else is written to
+    stdout, so it composes cleanly in command substitution.
+    """
+    if topic:
+        worktree, _, _ = _worktree_dir(topic, home)
+        if not worktree.is_dir():
+            sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+        print(worktree)
+    else:
+        print(cwd)
+
+
 def do_list(home: pathlib.Path, base: str) -> None:
     """`list` verb: show this repo's worktrees, their branch, status, and directory.
 
@@ -3047,7 +3067,7 @@ def main():
     # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
     if verb == "finish" and not topic:
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
-    if topic and verb not in ("start", "resume", "shell", "browse", "finish"):
+    if topic and verb not in ("start", "resume", "shell", "browse", "finish", "dir"):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
@@ -3089,6 +3109,13 @@ def main():
     # `dockerfile` just prints a Dockerfile — no config, no container.
     if verb == "dockerfile":
         do_dockerfile(parsed.custom)
+        return
+
+    # `dir` just prints a path — no config, no container. Dispatched before the
+    # config load so its stdout is *only* the path (the provenance note goes to
+    # stderr, but keeping it out entirely is cleaner for `cd $(yolo dir TOPIC)`).
+    if verb == "dir":
+        do_dir(topic, home, cwd)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

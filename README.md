@@ -193,6 +193,7 @@ yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
 yolo finish something                   # remove the worktree, keep the branch
 yolo list                               # show this repo's worktrees
+yolo dir something                      # print its directory: cd "$(yolo dir something)"
 ```
 
 Verb details:
@@ -213,6 +214,10 @@ Verb details:
   `merged`/`unmerged` depending on whether the branch is already contained in
   the base branch (`git branch --merged` semantics, so `merged` means it's
   ready to `finish`; a squash-merge reads as `unmerged`).
+
+- **`dir [TOPIC]`** prints a session's directory — the worktree's root with a
+  `TOPIC` (it errors if that worktree doesn't exist), or the current directory
+  without one — and nothing else, so it composes in `cd "$(yolo dir TOPIC)"`.
 
 Because the worktree directory **and** the repo's shared `.git` are both
 mounted, **nothing is lost when the container exits**: commits land in the

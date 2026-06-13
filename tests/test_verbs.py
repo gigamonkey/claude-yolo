@@ -405,3 +405,31 @@ def test_resume_flag_only_with_resume_verb(cy, run_cli, repo):
     r, home = repo
     with pytest.raises(SystemExit):
         run_cli(["-r", "SID"], home=home, cwd=r)
+
+
+# --- dir --------------------------------------------------------------------
+
+
+def test_dir_prints_worktree_root(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("alpha"))
+    capsys.readouterr()  # clear
+    argv = run_cli(["dir", "alpha"], home=home, cwd=r)
+    assert argv is None  # terminal verb: no container launched
+    out = capsys.readouterr()
+    assert out.out.strip() == str(wt)  # only the path, on stdout
+
+
+def test_dir_no_topic_prints_cwd(cy, run_cli, repo, capsys):
+    r, home = repo
+    capsys.readouterr()
+    argv = run_cli(["dir"], home=home, cwd=r)
+    assert argv is None
+    assert capsys.readouterr().out.strip() == str(r)
+
+
+def test_dir_unknown_topic_errors(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["dir", "nope"], home=home, cwd=r)

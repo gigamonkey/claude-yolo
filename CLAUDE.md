@@ -44,6 +44,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
 ./yolo.py finish fix-auth          # remove the worktree, keep the branch
 ./yolo.py list                     # this repo's worktrees
+./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
 ./yolo.py ps --watch               # ...refreshing every 2s (the tmux dashboard)
 ./yolo.py --tmux                   # spawn the session as a tmux window instead
@@ -55,8 +56,8 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`dockerfile`/
-`setup-token`/`tokens`/`forget-token`) and its `TOPIC`; see [Workflow
+(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`dir`/
+`dockerfile`/`setup-token`/`tokens`/`forget-token`) and its `TOPIC`; see [Workflow
 verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
@@ -652,6 +653,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   the server starts. Pointed errors for no running container and for a
   container launched without ports (mappings can't be added live — exit and
   `resume`).
+- **`dir [TOPIC]`** — print a session's working directory and exit (`do_dir`),
+  for `cd "$(yolo dir TOPIC)"`. *With `TOPIC`:* the worktree's root dir
+  (`_worktree_dir`), erroring if that worktree doesn't exist so the `cd` fails
+  loudly rather than landing somewhere wrong. *No `TOPIC`:* the current
+  directory. Only the path is written to **stdout** (errors go to stderr); it's
+  dispatched *before* `load_yolo_config` specifically so the config provenance
+  note doesn't pollute the command-substitution output. A terminal verb — no
+  container.
 
 Implementation shape:
 
@@ -659,8 +668,10 @@ Implementation shape:
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first
-  (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, is dispatched right after
-  `config` — before that re-parse — since it needs no config at all). The other
+  (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, and `dir`, which prints a
+  path, are dispatched right after `config` — before that re-parse — since they
+  need no config at all; `dir` in particular keeps its stdout free of the config
+  provenance note). The other
   terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the

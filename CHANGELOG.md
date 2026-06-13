@@ -3,6 +3,13 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## UNRELEASED
+
+- **`yolo dir [TOPIC]`**: print a session's working directory and exit — the
+  worktree's root with a `TOPIC` (erroring if that worktree doesn't exist), or
+  the current directory without one. Only the path is written to stdout, so it
+  composes in command substitution, e.g. `cd "$(yolo dir my-topic)"`.
+
 ## v0.11.0 — 2026-06-13
 
 - **Custom container images via `--dockerfile PATH` / the `dockerfile` config
