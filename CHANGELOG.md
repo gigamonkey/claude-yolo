@@ -3,6 +3,38 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.11.0 — 2026-06-13
+
+- **Custom container images via `--dockerfile PATH` / the `dockerfile` config
+  key**: build the session image from your own Dockerfile instead of the inline
+  default. The recommended shape *layers on* the default rather than replacing
+  it: a Dockerfile that references `YOLO_BASE` (`ARG YOLO_BASE` / `FROM
+  ${YOLO_BASE}`) gets the built-in default built first and passed in as the
+  `YOLO_BASE` build arg, so your image inherits the `claude` user, sudo,
+  the native Claude install, the GitHub HTTPS→SSH rewrite, and the entrypoint,
+  and only adds your own steps. A Dockerfile that doesn't reference `YOLO_BASE`
+  is built as-is (the full-replacement escape hatch) and must itself create the
+  `claude` user via `ARG HOST_UID`. Either way the image must end on `USER
+  claude` — yolo refuses to launch an image that would run as root (it passes no
+  `-u`, so a root image would write host files with the wrong owner). Image tags
+  are now content-addressed (`claude-yolo:<hash8>` over the Dockerfile text +
+  host UID), so concurrent sessions building different Dockerfiles can't race on
+  a shared tag.
+
+- **`yolo dockerfile`**: print the built-in default Dockerfile — a starting
+  point for a custom one, or just to inspect what gets built.
+
+- **`--version` self-identifies live checkouts**: a version run from a git
+  checkout that diverges from a published release now appends a suffix —
+  `+dirty` when the release tag is checked out with local changes, or
+  `+g<sha>[.dirty]` for commits past the release — so an editable / symlinked
+  dev install is distinguishable from a wheel of a tagged release. A regular
+  wheel install (outside any git repo) still reports the bare version.
+
+- **`yolo ps`: dropped the DIRECTORY column; renamed UP → CREATED.** The
+  directory column ate a lot of width; CREATED is what the underlying
+  `{{.RunningFor}}` actually reports.
+
 ## v0.10.0 — 2026-06-13
 
 - **`yolo ps` shows session activity (new STATE column)**: each running session
