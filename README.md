@@ -606,13 +606,45 @@ and the CLI (on a same-container-port conflict the higher layer wins).
 ### `dockerfile` (`--dockerfile PATH`)
 
 Build the container image from your own Dockerfile instead of the built-in
-default — handy when a project needs a different base image or tools that don't
-belong in everyone's image. The default Dockerfile stays inline in `yolo.py` (so
-the script remains a single self-contained file); `--dockerfile` just swaps in
-different build instructions. Your Dockerfile is handed the host UID as the
-`HOST_UID` build arg, so include `ARG HOST_UID` and create your user with it (as
-the default does) to keep files Claude writes in the mounted working directory
-owned by you.
+default — handy when a project needs heavier or project-specific tools baked in
+so Claude doesn't reinstall them in every ephemeral container. The default
+Dockerfile stays inline in `yolo.py` (so the script remains a single
+self-contained file); `--dockerfile` just points at different build
+instructions.
+
+**The recommended way: layer on yolo's default with `FROM ${YOLO_BASE}`.** The
+default image already sets up a lot of load-bearing detail — the `claude` user
+with your host UID, passwordless sudo, the native Claude install, the GitHub
+HTTPS→SSH rewrite, the prompt, the `PATH`, and the `claude
+--dangerously-skip-permissions` entrypoint. Rather than reproduce all of that,
+build *on top of* it. yolo builds its default as a base image and passes its tag
+in as the `YOLO_BASE` build arg, so a custom Dockerfile can be as short as:
+
+```dockerfile
+ARG YOLO_BASE
+FROM ${YOLO_BASE}
+RUN sudo apt-get update && sudo apt-get install -y postgresql-client
+```
+
+Everything else — the entrypoint, `PATH`, the installed `claude`, the user — is
+**inherited from the base** via `FROM`; you don't repeat any of it, and you
+automatically pick up improvements when yolo's default changes. The `claude` user
+has passwordless sudo, so `RUN sudo …` installs as root without leaving the user.
+The one rule: the container's runtime user must end up as `claude` (yolo passes
+no `-u` to `docker run`, so the image's final `USER` *is* the runtime user). If
+you switch to `USER root` to do work, end with `USER claude` — otherwise the
+container would run as root and your edits would land on the host owned by root.
+yolo checks the built image's user and refuses to launch with a clear message if
+it isn't `claude`, so you can't get this subtly wrong.
+
+Run `yolo dockerfile` to print the built-in default — a handy starting point, and
+the thing to read if you want to know exactly what the base provides.
+
+A Dockerfile that does **not** reference `YOLO_BASE` is treated as a full
+replacement and built as-is (the escape hatch for "I want to start over
+entirely"). In that case you own all the boilerplate above — at minimum `ARG
+HOST_UID` and a `claude` user created with it — and you don't inherit future
+default changes. Prefer layering unless you genuinely need a different base.
 
 Each distinct Dockerfile gets its own content-addressed image tag
 (`claude-yolo:<hash>`), so projects with different images — and parallel sessions

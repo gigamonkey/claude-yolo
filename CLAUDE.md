@@ -25,6 +25,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
 ./yolo.py --dockerfile ./Dockerfile.yolo  # build the image from a custom Dockerfile
+./yolo.py dockerfile               # print the built-in default Dockerfile (a starting point)
 ./yolo.py --port 8000              # forward container port 8000 (docker picks the host port)
 ./yolo.py --port 8000:8000         # ...or pin host port 8000 (single-session)
 ./yolo.py browse                   # open the browser at this session's forwarded port
@@ -54,8 +55,9 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`setup-token`/
-`tokens`/`forget-token`) and its `TOPIC`; see [Workflow verbs](#workflow-verbs).
+(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`dockerfile`/
+`setup-token`/`tokens`/`forget-token`) and its `TOPIC`; see [Workflow
+verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
 `~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
@@ -131,7 +133,10 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    parallel: a single fixed tag would let two concurrent builds (default vs.
    custom) race and one `docker run` pick up the other's image. The default
    Dockerfile stays inline (not a shipped file) to preserve the single-file
-   property — `--dockerfile` is an *override*, not a relocation. The **build
+   property — `--dockerfile` is an *override*, not a relocation, though a custom
+   file is meant to *layer on* the default via `FROM ${YOLO_BASE}` rather than
+   replace it wholesale (see the `--dockerfile` flag in the orthogonal-flags
+   section). The **build
    context is the temp dir and contains only the Dockerfile** — that empty
    context is what stops a custom Dockerfile's `COPY`/`ADD` from reaching host
    files (a Dockerfile also can't add host bind-mounts — those are yolo's
@@ -230,11 +235,23 @@ on top of whichever auth is chosen:
   container image from this Dockerfile instead of the inline `DEFAULT_DOCKERFILE`.
   Override semantics (a single path, not a concat key); the path must exist and
   be a readable file (validated on the launch paths, like `--config-dir`, so a
-  stale config path can't break `list`/`finish`/`config`). The custom Dockerfile
-  receives the host UID via the `HOST_UID` build ARG, so it should `ARG HOST_UID`
-  and use it for its non-root user to keep bind-mount ownership correct. Resolved
-  by `_resolve_dockerfile`, which also derives the content-addressed image tag
-  (see "How it works" #1). **Caveat:** a `dockerfile` pointing at a file *inside*
+  stale config path can't break `list`/`finish`/`config`). Handled by
+  `_build_image` (which replaced `_resolve_dockerfile`): it reads the file, builds
+  it, and derives the content-addressed image tag (see "How it works" #1). The
+  **recommended** custom-Dockerfile shape *layers on* the default rather than
+  replacing it: a file that mentions `YOLO_BASE` (i.e. `ARG YOLO_BASE` / `FROM
+  ${YOLO_BASE}`) triggers `_build_image` to first build `DEFAULT_DOCKERFILE` as a
+  base image and pass its tag in as the `YOLO_BASE` build arg (via
+  `build_docker_image`'s `build_args`), so the custom image inherits the default's
+  user/sudo/entrypoint/etc.; its final tag folds in the base tag so a base change
+  yields a distinct image. A file that does *not* mention `YOLO_BASE` is built
+  as-is (the full-replacement escape hatch) and must itself `ARG HOST_UID` and
+  create the `claude` user. Either way, a custom image is checked by
+  `_verify_image_user` (`docker image inspect {{.Config.User}}`), which `sys.exit`s
+  unless the image runs as `claude` — yolo passes no `-u`, so the image's final
+  `USER` is the runtime user, and an image left on `USER root` would write
+  host files as root. `yolo dockerfile` (`do_dockerfile`) prints the default as a
+  starting point. **Caveat:** a `dockerfile` pointing at a file *inside*
   the bind-mounted working tree (e.g. `./Dockerfile.yolo`) is editable by Claude
   between runs, so Claude could alter the next image build. The *key* still lives
   in host-side `projects.json` (Claude can't add it), only the referenced file is
@@ -641,7 +658,9 @@ Implementation shape:
 - **Dispatch is two-tier** (`main`). `config` runs off the *first* `parse_args`,
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
-  Everything else re-parses with the config defaults layered in first. The other
+  Everything else re-parses with the config defaults layered in first
+  (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, is dispatched right after
+  `config` — before that re-parse — since it needs no config at all). The other
   terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
@@ -918,9 +937,12 @@ captured `docker run` argv. `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 and the `config` verb; `test_cli.py` covers verb dispatch and arg
-assembly across the credential/config axes, extra mounts, the guardrails, and the
+assembly across the credential/config axes, extra mounts, the guardrails, the
 `--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
-missing-path error, and that the build context contains only the Dockerfile). The
+missing-path error, and that the build context contains only the Dockerfile), the
+`FROM ${YOLO_BASE}` layering (`_build_image` builds the base then the custom image
+and folds the base tag into the final tag; `_verify_image_user` rejects a non-
+`claude` image), and the `dockerfile` dump verb. The
 tests locate the built image in the assembled argv by its
 `claude-yolo:` repo prefix (the tag is now content-addressed, not a fixed constant).
 `test_verbs.py` covers the worktree verbs against a

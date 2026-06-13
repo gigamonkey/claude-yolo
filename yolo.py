@@ -98,24 +98,25 @@ def _image_tag(dockerfile_text: str, uid: int) -> str:
     return f"{DOCKER_IMAGE_REPO}:{hash8}"
 
 
-def _resolve_dockerfile(parsed) -> tuple[str, str]:
-    """Resolve (dockerfile_text, image_tag) for this launch.
-
-    Uses the file named by --dockerfile / the `dockerfile` config key when set
-    (its existence is validated on the launch paths in main), else the inline
-    DEFAULT_DOCKERFILE. The tag is derived from whichever text wins.
-    """
-    dockerfile = getattr(parsed, "dockerfile", None)
-    text = pathlib.Path(dockerfile).read_text() if dockerfile else DEFAULT_DOCKERFILE
-    return text, _image_tag(text, os.getuid())
+# Build ARG name a custom Dockerfile uses to layer on yolo's default image:
+# `ARG YOLO_BASE` / `FROM ${YOLO_BASE}` (see _build_image and the README).
+YOLO_BASE_ARG = "YOLO_BASE"
 
 
-def build_docker_image(dockerfile_text: str, tag: str, uid: int, *, no_cache: bool = False) -> None:
+def build_docker_image(
+    dockerfile_text: str,
+    tag: str,
+    uid: int,
+    *,
+    build_args: dict | None = None,
+    no_cache: bool = False,
+) -> None:
     """Write the Dockerfile to a temporary directory and build the Docker image.
 
     The host UID is passed as the HOST_UID build ARG so the in-container `claude`
     user matches it (keeping bind-mount ownership correct); `tag` is the
-    content-addressed tag from _image_tag.
+    content-addressed tag from _image_tag; `build_args` carries any extra
+    `--build-arg`s (e.g. YOLO_BASE for the layering path).
     """
     with tempfile.TemporaryDirectory(prefix="claude-yolo-build-") as build_dir:
         dockerfile = pathlib.Path(build_dir) / "Dockerfile"
@@ -130,9 +131,72 @@ def build_docker_image(dockerfile_text: str, tag: str, uid: int, *, no_cache: bo
         if extra:
             sys.exit(f"refusing to build: unexpected files in Docker build context: {extra}")
         cmd = ["docker", "build", "-t", tag, "--build-arg", f"HOST_UID={uid}"]
+        for k, v in (build_args or {}).items():
+            cmd += ["--build-arg", f"{k}={v}"]
         if no_cache:
             cmd.append("--no-cache")
         subprocess.run(cmd + [build_dir], check=True)
+
+
+def _verify_image_user(tag: str) -> None:
+    """Ensure a (custom) image runs as the `claude` user.
+
+    yolo passes no `-u` to `docker run`, so the image's configured USER is the
+    container's runtime user. A custom Dockerfile that ends on `USER root` (e.g.
+    it switched to root to install packages and forgot to switch back) would run
+    the container as root, breaking the HOST_UID bind-mount ownership model —
+    working-dir edits would land on the host owned by root. Catch it here with a
+    clear message instead of silently producing wrong-owner files.
+    """
+    result = subprocess.run(
+        ["docker", "image", "inspect", "-f", "{{.Config.User}}", tag],
+        capture_output=True,
+        text=True,
+    )
+    user = result.stdout.strip()
+    if user != "claude":
+        sys.exit(
+            f"custom Dockerfile produced an image whose user is "
+            f"{user or 'root (USER unset)'!r}, not 'claude': the container would run as "
+            "that user and bind-mount edits would land on the host with the wrong owner. "
+            "End your Dockerfile with `USER claude` (or use `RUN sudo …` and never switch "
+            "away from the claude user)."
+        )
+
+
+def _build_image(parsed) -> str:
+    """Build the container image for this launch and return its tag.
+
+    Default path: build the inline DEFAULT_DOCKERFILE. Custom `--dockerfile` path:
+    build that file instead. If the custom file references YOLO_BASE — i.e. it does
+    `FROM ${YOLO_BASE}` to *layer on* yolo's default rather than replace it — first
+    build the default as the base image and pass its tag in as the YOLO_BASE build
+    arg, then verify the resulting image still runs as `claude` (a layering file
+    that ends on `USER root` would break bind-mount ownership). A fully-custom file
+    that doesn't reference YOLO_BASE is built as-is (the escape hatch).
+    """
+    uid = os.getuid()
+    no_cache = parsed.rebuild_image
+    dockerfile = getattr(parsed, "dockerfile", None)
+    if not dockerfile:
+        tag = _image_tag(DEFAULT_DOCKERFILE, uid)
+        build_docker_image(DEFAULT_DOCKERFILE, tag, uid, no_cache=no_cache)
+        return tag
+
+    text = pathlib.Path(dockerfile).read_text()
+    build_args = {}
+    if YOLO_BASE_ARG in text:
+        base_tag = _image_tag(DEFAULT_DOCKERFILE, uid)
+        build_docker_image(DEFAULT_DOCKERFILE, base_tag, uid, no_cache=no_cache)
+        build_args[YOLO_BASE_ARG] = base_tag
+        # Fold the base tag into the final tag so a base change (e.g. a yolo update)
+        # yields a distinct image, not a stale reuse under an unchanged tag.
+        tag = _image_tag(text + base_tag, uid)
+    else:
+        tag = _image_tag(text, uid)
+    build_docker_image(text, tag, uid, build_args=build_args, no_cache=no_cache)
+    _verify_image_user(tag)
+    return tag
 
 
 def extract_credentials(config_dir: str | None) -> str:
@@ -1387,6 +1451,7 @@ PARSER.add_argument(
         "finish",
         "list",
         "ps",
+        "dockerfile",
         "setup-token",
         "tokens",
         "forget-token",
@@ -1402,7 +1467,8 @@ PARSER.add_argument(
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
     "with --global), or — given config flags — persists exactly those flags into "
     "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
-    "--remove-prompt); 'setup-token' mints/caches a "
+    "--remove-prompt); 'dockerfile' prints the built-in default Dockerfile (a "
+    "starting point for --dockerfile); 'setup-token' mints/caches a "
     "long-lived OAuth token (for --auth oauth-token); 'tokens' lists the tokens "
     "yolo has minted; 'forget-token' deletes the active config dir's token from "
     "the keychain (local only — see `tokens` output for revocation). A bare "
@@ -2254,8 +2320,7 @@ def launch_container(
         status_dir.mkdir(parents=True, exist_ok=True)
         (status_dir / f"{_cwd_slug(cwd)}.state").unlink(missing_ok=True)
 
-    dockerfile_text, image_tag = _resolve_dockerfile(parsed)
-    build_docker_image(dockerfile_text, image_tag, os.getuid(), no_cache=parsed.rebuild_image)
+    image_tag = _build_image(parsed)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
@@ -2777,6 +2842,18 @@ def do_browse(
         _open_url(url)
 
 
+def do_dockerfile() -> None:
+    """`dockerfile` verb: print the built-in default Dockerfile to stdout.
+
+    A starting point for a custom `--dockerfile`. The recommended way to customize
+    is to *layer on* this image rather than fork it wholesale — start a Dockerfile
+    with `ARG YOLO_BASE` / `FROM ${YOLO_BASE}` and add your steps (yolo injects the
+    base tag at build time; see _build_image and the README). Dumping the default
+    is for inspection, or for the rare case where you want to start over entirely.
+    """
+    sys.stdout.write(DEFAULT_DOCKERFILE)
+
+
 def do_tokens() -> None:
     """`tokens` verb: list the tokens yolo has minted (the tokens.json registry).
 
@@ -2931,6 +3008,11 @@ def main():
 
     if verb == "config":
         do_config(script_argv, home, cwd, parsed)
+        return
+
+    # `dockerfile` just prints the built-in default — no config, no container.
+    if verb == "dockerfile":
+        do_dockerfile()
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

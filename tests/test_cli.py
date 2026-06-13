@@ -602,9 +602,9 @@ def test_missing_dockerfile_path_exits(cy, run_cli, dirs, tmp_path):
 
 
 def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
-    # _resolve_dockerfile + build_docker_image are stubbed in run_cli, so exercise
-    # the real builder directly: it must tag with the content-addressed tag and
-    # pass the host UID as the HOST_UID build ARG.
+    # build_docker_image is stubbed in run_cli, so exercise the real builder
+    # directly: it must tag with the content-addressed tag and pass the host UID
+    # as the HOST_UID build ARG.
     calls = {}
     monkeypatch.setattr(cy.subprocess, "run", lambda cmd, **k: calls.setdefault("cmd", cmd))
     cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
@@ -629,3 +629,127 @@ def test_build_context_contains_only_the_dockerfile(cy, monkeypatch):
     monkeypatch.setattr(cy.subprocess, "run", fake_run)
     cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
     assert seen["contents"] == ["Dockerfile"]
+
+
+# --- custom Dockerfile layering on the default (FROM ${YOLO_BASE}) -----------
+
+
+def _parsed(cy, dockerfile=None):
+    """A minimal namespace with the attributes _build_image reads."""
+    import types
+
+    return types.SimpleNamespace(dockerfile=dockerfile, rebuild_image=False)
+
+
+def _record_builds(cy, monkeypatch):
+    """Stub build_docker_image + _verify_image_user, returning the recorded builds."""
+    builds = []
+
+    def fake_build(text, tag, uid, *, build_args=None, no_cache=False):
+        builds.append({"text": text, "tag": tag, "uid": uid, "build_args": build_args or {}})
+
+    monkeypatch.setattr(cy, "build_docker_image", fake_build)
+    monkeypatch.setattr(cy, "_verify_image_user", lambda tag: None)
+    return builds
+
+
+def test_build_image_default_builds_once(cy, monkeypatch):
+    import os
+
+    builds = _record_builds(cy, monkeypatch)
+    tag = cy._build_image(_parsed(cy))
+    assert len(builds) == 1
+    assert builds[0]["text"] == cy.DEFAULT_DOCKERFILE
+    assert tag == cy._image_tag(cy.DEFAULT_DOCKERFILE, os.getuid())
+
+
+def test_build_image_fully_custom_builds_once_no_base(cy, monkeypatch, tmp_path):
+    import os
+
+    builds = _record_builds(cy, monkeypatch)
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM ubuntu:24.04\nARG HOST_UID\nRUN echo hi\n")
+    tag = cy._build_image(_parsed(cy, str(df)))
+    # No YOLO_BASE reference → single build, no base, no YOLO_BASE build arg.
+    assert len(builds) == 1
+    assert "YOLO_BASE" not in builds[0]["build_args"]
+    assert tag == cy._image_tag(df.read_text(), os.getuid())
+
+
+def test_build_image_layers_on_base_when_yolo_base_referenced(cy, monkeypatch, tmp_path):
+    import os
+
+    builds = _record_builds(cy, monkeypatch)
+    df = tmp_path / "Dockerfile"
+    text = "ARG YOLO_BASE\nFROM ${YOLO_BASE}\nRUN sudo apt-get install -y foo\n"
+    df.write_text(text)
+    tag = cy._build_image(_parsed(cy, str(df)))
+
+    uid = os.getuid()
+    base_tag = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
+    # Two builds: the default as the base first, then the custom image.
+    assert len(builds) == 2
+    assert builds[0]["text"] == cy.DEFAULT_DOCKERFILE and builds[0]["tag"] == base_tag
+    assert builds[1]["text"] == text
+    assert builds[1]["build_args"].get("YOLO_BASE") == base_tag
+    # Final tag folds in the base tag so a base change yields a distinct image.
+    assert tag == cy._image_tag(text + base_tag, uid)
+
+
+def test_build_image_verifies_user_for_custom(cy, monkeypatch, tmp_path):
+    # A custom build must be USER-verified; the default must not be.
+    seen = []
+    monkeypatch.setattr(cy, "build_docker_image", lambda *a, **k: None)
+    monkeypatch.setattr(cy, "_verify_image_user", lambda tag: seen.append(tag))
+
+    cy._build_image(_parsed(cy))  # default
+    assert seen == []
+
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM ubuntu:24.04\nARG HOST_UID\n")
+    cy._build_image(_parsed(cy, str(df)))  # custom
+    assert len(seen) == 1
+
+
+def test_verify_image_user_accepts_claude_rejects_root(cy, monkeypatch):
+    import subprocess
+
+    def inspect(user):
+        return lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout=user, stderr="")
+
+    monkeypatch.setattr(cy.subprocess, "run", inspect("claude\n"))
+    cy._verify_image_user("claude-yolo:tag")  # ok, no raise
+
+    monkeypatch.setattr(cy.subprocess, "run", inspect("\n"))  # USER unset → root
+    with pytest.raises(SystemExit) as exc:
+        cy._verify_image_user("claude-yolo:tag")
+    assert "USER claude" in str(exc.value)
+
+
+def test_custom_dockerfile_with_yolo_base_tag_in_launch_argv(cy, run_cli, dirs, tmp_path):
+    import os
+
+    home, work = dirs
+    df = tmp_path / "Dockerfile"
+    text = "ARG YOLO_BASE\nFROM ${YOLO_BASE}\nRUN sudo apt-get install -y foo\n"
+    df.write_text(text)
+    argv = run_cli(["--dockerfile", str(df)], home=home, cwd=work)
+    uid = os.getuid()
+    base_tag = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
+    assert image_tag(argv) == cy._image_tag(text + base_tag, uid)
+
+
+# --- `yolo dockerfile` (dump the default) -----------------------------------
+
+
+def test_dockerfile_verb_prints_default(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    argv = run_cli(["dockerfile"], home=home, cwd=work)
+    assert argv is None  # terminal verb: no container launched
+    assert capsys.readouterr().out == cy.DEFAULT_DOCKERFILE
+
+
+def test_dockerfile_verb_rejects_a_topic(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["dockerfile", "extra"], home=home, cwd=work)
