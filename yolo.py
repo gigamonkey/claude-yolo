@@ -1386,28 +1386,44 @@ def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, par
     print(json.dumps({key: entry}, indent=2))
 
 
+def _pyproject_version() -> str | None:
+    """`version` from an *adjacent* claude-yolo pyproject.toml, else None.
+
+    A pyproject sits next to the running yolo.py only when it's run standalone (the
+    PEP 723 script, possibly via a PATH symlink — hence `resolve()`) or installed
+    **editable** (`__file__` resolves into the source checkout). A regular wheel
+    ships only yolo.py (`only-include`), so there's no adjacent pyproject and this
+    returns None. The `name` guard keeps an unrelated pyproject that happens to sit
+    beside a stray copy of yolo.py from being mistaken for ours."""
+    try:
+        pyproject = (pathlib.Path(__file__).resolve().parent / "pyproject.toml").read_text()
+    except OSError:
+        return None
+    if not re.search(r'^name\s*=\s*"claude-yolo"', pyproject, re.MULTILINE):
+        return None
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+    return match.group(1) if match else None
+
+
 def _base_version() -> str:
     """Best-effort package version, tracing to pyproject.toml.
 
-    Installed as a wheel (`uv tool install`) → read the recorded package metadata.
-    Run standalone as the PEP 723 script (possibly via a PATH symlink, hence the
-    `resolve()`) → scrape `version` from the adjacent pyproject.toml. Neither (a
-    stray copy with no metadata and no pyproject) → "unknown".
+    Prefer an *adjacent* pyproject.toml when there is one: that's the live source of
+    truth, present for a standalone-script or editable install, and reading it keeps
+    `--version` correct after a bump with no reinstall (an editable install's
+    recorded metadata is a frozen install-time snapshot and would otherwise lag).
+    A regular wheel has no adjacent pyproject, so fall back to the recorded package
+    metadata. Neither (a stray copy) → "unknown".
     """
+    from_pyproject = _pyproject_version()
+    if from_pyproject is not None:
+        return from_pyproject
     try:
         from importlib.metadata import PackageNotFoundError, version
 
         return version("claude-yolo")
     except PackageNotFoundError:
-        pass
-    try:
-        pyproject = (pathlib.Path(__file__).resolve().parent / "pyproject.toml").read_text()
-        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
-        if match:
-            return match.group(1)
-    except OSError:
-        pass
-    return "unknown"
+        return "unknown"
 
 
 def _git(*args: str) -> str | None:

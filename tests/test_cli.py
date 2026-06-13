@@ -537,6 +537,49 @@ def test_version_flag_prints_and_exits(cy, run_cli, dirs, capsys):
     assert capsys.readouterr().out.split()[-1] == cy._version()
 
 
+def _pyproject_version_str(cy):
+    import pathlib
+    import re
+
+    text = (pathlib.Path(cy.__file__).resolve().parent / "pyproject.toml").read_text()
+    return re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE).group(1)
+
+
+def test_pyproject_version_reads_adjacent_file(cy):
+    # Tests load yolo.py from the checkout, so pyproject.toml is adjacent (the
+    # editable/standalone case) — this is exactly what _pyproject_version detects.
+    assert cy._pyproject_version() == _pyproject_version_str(cy)
+
+
+def test_base_version_prefers_pyproject_over_metadata(cy, monkeypatch):
+    """Editable install: a frozen metadata snapshot must not shadow live pyproject."""
+    import importlib.metadata as im
+
+    monkeypatch.setattr(im, "version", lambda name: "0.0.0-stale")
+    assert cy._base_version() == _pyproject_version_str(cy)
+
+
+def test_base_version_falls_back_to_metadata_for_a_wheel(cy, monkeypatch):
+    """Wheel install: no adjacent pyproject -> recorded package metadata."""
+    import importlib.metadata as im
+
+    monkeypatch.setattr(cy, "_pyproject_version", lambda: None)
+    monkeypatch.setattr(im, "version", lambda name: "9.9.9")
+    assert cy._base_version() == "9.9.9"
+
+
+def test_base_version_unknown_with_neither(cy, monkeypatch):
+    import importlib.metadata as im
+
+    monkeypatch.setattr(cy, "_pyproject_version", lambda: None)
+
+    def _missing(name):
+        raise im.PackageNotFoundError(name)
+
+    monkeypatch.setattr(im, "version", _missing)
+    assert cy._base_version() == "unknown"
+
+
 # --- worktree mounts (start TOPIC) ------------------------------------------
 
 

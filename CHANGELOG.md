@@ -33,7 +33,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `+dirty` when the release tag is checked out with local changes, or
   `+g<sha>[.dirty]` for commits past the release — so an editable / symlinked
   dev install is distinguishable from a wheel of a tagged release. A regular
-  wheel install (outside any git repo) still reports the bare version.
+  wheel install (outside any git repo) still reports the bare version. The base
+  version itself is read from an *adjacent* `pyproject.toml` when one is present
+  (the editable/standalone case), falling back to the recorded package metadata
+  only for a wheel — so an editable install reflects the live version after a
+  `bump` without needing a reinstall.
 
 - **`yolo ps`: dropped the DIRECTORY column; renamed UP → CREATED.** The
   directory column ate a lot of width; CREATED is what the underlying
