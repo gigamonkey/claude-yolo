@@ -1235,8 +1235,8 @@ def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, par
     print(json.dumps({key: entry}, indent=2))
 
 
-def _version() -> str:
-    """Best-effort package version for `--version`, tracing to pyproject.toml.
+def _base_version() -> str:
+    """Best-effort package version, tracing to pyproject.toml.
 
     Installed as a wheel (`uv tool install`) → read the recorded package metadata.
     Run standalone as the PEP 723 script (possibly via a PATH symlink, hence the
@@ -1257,6 +1257,57 @@ def _version() -> str:
     except OSError:
         pass
     return "unknown"
+
+
+def _git(*args: str) -> str | None:
+    """Run a git command in the running yolo.py's own directory; None on any
+    failure. The repo is the source checkout when yolo.py is run standalone or
+    installed editable (`__file__` resolves into the checkout); a regular wheel
+    install lands in an isolated site-packages dir that isn't a repo, so every
+    call here fails and the version stays clean."""
+    repo = pathlib.Path(__file__).resolve().parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _git_suffix(base: str) -> str:
+    """A local-version suffix flagging that the running yolo.py diverges from the
+    published release `base` — i.e. it's live code, not a wheel of a tagged
+    release. Empty when not in a git repo (released wheel) or when HEAD is exactly
+    the clean `v{base}` tag.
+
+    Appends `+g{sha}` when HEAD isn't the commit tagged `v{base}` (committed work
+    past the release, or the tag isn't fetched locally), and `.dirty` (or a bare
+    `+dirty`) when the working tree has uncommitted changes."""
+    head = _git("rev-parse", "--short=7", "HEAD")
+    if head is None:
+        return ""  # not a git repo → released wheel, leave base clean
+    dirty = _git("status", "--porcelain") not in ("", None)
+    tagged = _git("rev-parse", "--verify", "--quiet", f"v{base}^{{commit}}")
+    full_head = _git("rev-parse", "HEAD")
+    on_release = tagged is not None and tagged == full_head
+    if on_release:
+        return "+dirty" if dirty else ""  # clean release tag → bare version
+    return f"+g{head}.dirty" if dirty else f"+g{head}"
+
+
+def _version() -> str:
+    """Package version for `--version`, with a `+g{sha}[.dirty]` suffix when
+    running live code that diverges from the published release (see _git_suffix)."""
+    base = _base_version()
+    if base == "unknown":
+        return base
+    return base + _git_suffix(base)
 
 
 PARSER = argparse.ArgumentParser(
