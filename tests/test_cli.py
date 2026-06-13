@@ -36,7 +36,8 @@ def container_name(argv):
 
 def claude_args(cy, argv):
     """The args after the image name — i.e. what's passed to `claude`."""
-    return argv[argv.index(cy.DOCKER_IMAGE) + 1 :]
+    i = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    return argv[i + 1 :]
 
 
 # --- default run ------------------------------------------------------------
@@ -476,7 +477,7 @@ def test_docker_passthrough_after_double_dash(cy, run_cli, dirs):
     home, work = dirs
     argv = run_cli(["--", "--network", "host"], home=home, cwd=work)
     # passthrough args land before the image, after the assembled docker args
-    img = argv.index(cy.DOCKER_IMAGE)
+    img = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
     assert argv[img - 2 : img] == ["--network", "host"]
 
 
@@ -561,3 +562,53 @@ def test_start_worktree_mounts_shared_git_and_names_session(
     assert container_name(argv) == "repo-feat"
     cargs = claude_args(cy, argv)
     assert cargs[:2] == ["--name", "feat"]  # session named
+
+
+# --- custom Dockerfile (--dockerfile) + content-addressed tag ----------------
+
+
+def image_tag(argv):
+    """The claude-yolo:<hash8> tag in a docker-run argv."""
+    return next(a for a in argv if a.startswith("claude-yolo:"))
+
+
+def test_default_run_uses_default_dockerfile_tag(cy, run_cli, dirs):
+    import os
+
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    assert image_tag(argv) == cy._image_tag(cy.DEFAULT_DOCKERFILE, os.getuid())
+
+
+def test_custom_dockerfile_changes_the_image_tag(cy, run_cli, dirs, tmp_path):
+    import os
+
+    home, work = dirs
+    df = tmp_path / "Dockerfile.custom"
+    df.write_text("FROM ubuntu:24.04\nARG HOST_UID\nRUN echo marker\n")
+    argv = run_cli(["--dockerfile", str(df)], home=home, cwd=work)
+    tag = image_tag(argv)
+    assert tag == cy._image_tag(df.read_text(), os.getuid())
+    # ...and it is distinct from the built-in default's tag.
+    assert tag != cy._image_tag(cy.DEFAULT_DOCKERFILE, os.getuid())
+
+
+def test_missing_dockerfile_path_exits(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    missing = tmp_path / "nope" / "Dockerfile"
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["--dockerfile", str(missing)], home=home, cwd=work)
+    assert "dockerfile" in str(exc.value)
+
+
+def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
+    # _resolve_dockerfile + build_docker_image are stubbed in run_cli, so exercise
+    # the real builder directly: it must tag with the content-addressed tag and
+    # pass the host UID as the HOST_UID build ARG.
+    calls = {}
+    monkeypatch.setattr(cy.subprocess, "run", lambda cmd, **k: calls.setdefault("cmd", cmd))
+    cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
+    cmd = calls["cmd"]
+    assert cmd[:3] == ["docker", "build", "-t"]
+    assert "claude-yolo:abc12345" in cmd
+    assert "--build-arg" in cmd and "HOST_UID=4242" in cmd

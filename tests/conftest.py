@@ -47,7 +47,7 @@ def run_cli(cy, monkeypatch):
     def _run(argv, *, home, cwd, creds_path="/tmp/creds.json"):
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.chdir(cwd)
-        monkeypatch.setattr(cy, "build_docker_image", lambda *, no_cache=False: None)
+        monkeypatch.setattr(cy, "build_docker_image", lambda *a, **k: None)
         monkeypatch.setattr(cy, "ensure_logged_in", lambda c: None)
         monkeypatch.setattr(cy, "extract_credentials", lambda c: creds_path)
         monkeypatch.setattr(cy, "_masking_credfile", lambda: MASK_CREDFILE)

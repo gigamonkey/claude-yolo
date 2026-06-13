@@ -46,7 +46,8 @@ def worktree_label(argv):
 
 
 def claude_command(cy, argv):
-    return argv[argv.index(cy.DOCKER_IMAGE) + 1 :]
+    i = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    return argv[i + 1 :]
 
 
 # --- start ------------------------------------------------------------------

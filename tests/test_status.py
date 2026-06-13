@@ -21,7 +21,8 @@ def dirs(tmp_path):
 
 
 def claude_args(cy, argv):
-    return argv[argv.index(cy.DOCKER_IMAGE) + 1 :]
+    i = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    return argv[i + 1 :]
 
 
 def settings_obj(cy, argv):
@@ -84,7 +85,8 @@ def test_shell_does_not_inject_hooks_or_reset(cy, run_cli, dirs):
     stale = status_dir / f"{cy._cwd_slug(work)}.state"
     stale.write_text("waiting 100")
     argv = run_cli(["shell"], home=home, cwd=work)
-    assert cy.DOCKER_IMAGE in argv and "--settings" not in claude_args(cy, argv)
+    assert any(a.startswith(cy.DOCKER_IMAGE_REPO + ":") for a in argv)
+    assert "--settings" not in claude_args(cy, argv)
     assert stale.exists()  # untouched
 
 

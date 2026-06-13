@@ -52,6 +52,13 @@ def test_parse_expands_user_in_path_keys(cy, tmp_path, monkeypatch):
     assert cy._parse_yolo_file(p) == {"config_dir": "/home/someone/cfg"}
 
 
+def test_parse_dockerfile_key_expands_user(cy, tmp_path, monkeypatch):
+    # `dockerfile` is a path key: ~ is expanded at parse time, existence checked later.
+    monkeypatch.setenv("HOME", "/home/someone")
+    p = write(tmp_path / ".yolo.json", {"dockerfile": "~/Dockerfile.yolo"})
+    assert cy._parse_yolo_file(p) == {"dockerfile": "/home/someone/Dockerfile.yolo"}
+
+
 def test_parse_null_leaves_key_unset(cy, tmp_path):
     p = write(tmp_path / ".yolo.json", {"config-dir": None, "auth": None})
     assert cy._parse_yolo_file(p) == {}
@@ -358,6 +365,21 @@ def test_config_verb_validates_mount_paths(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit):
         run_cli(["config", "--mount", str(work / "nope")], home=home, cwd=work)
+    assert not (home / ".claude-yolo" / "projects.json").exists()  # typo not pinned
+
+
+def test_config_verb_persists_dockerfile(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    df = tmp_path / "Dockerfile.yolo"
+    df.write_text("FROM ubuntu:24.04\n")
+    run_cli(["config", "--dockerfile", str(df)], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"dockerfile": str(df)}}
+
+
+def test_config_verb_validates_dockerfile_path(cy, run_cli, dirs, tmp_path):
+    home, work = dirs
+    with pytest.raises(SystemExit):
+        run_cli(["config", "--dockerfile", str(tmp_path / "nope")], home=home, cwd=work)
     assert not (home / ".claude-yolo" / "projects.json").exists()  # typo not pinned
 
 

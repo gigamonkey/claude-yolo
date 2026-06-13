@@ -24,6 +24,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --ssh-agent              # forward the host ssh-agent (off by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
+./yolo.py --dockerfile ./Dockerfile.yolo  # build the image from a custom Dockerfile
 ./yolo.py --port 8000              # forward container port 8000 (docker picks the host port)
 ./yolo.py --port 8000:8000         # ...or pin host port 8000 (single-session)
 ./yolo.py browse                   # open the browser at this session's forwarded port
@@ -109,8 +110,10 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
 
 ## How it works
 
-1. **Builds the image** (`build_docker_image`) from an inline
-   `DOCKERFILE_TEMPLATE` written to a temp dir. Ubuntu 24.04 + nodejs/npm + a few
+1. **Builds the image** (`build_docker_image`) from the inline
+   `DEFAULT_DOCKERFILE` (a plain literal Dockerfile, no templating) written to a
+   temp dir — or, when `--dockerfile`/the `dockerfile` config key is set, from
+   **that** file instead. Ubuntu 24.04 + nodejs/npm + a few
    baked-in amenities used across most projects (`ripgrep`, `fd-find` symlinked to
    `fd`, `build-essential`, `vim`, and `uv`/`uvx` copied from `ghcr.io/astral-sh/uv`) +
    Claude Code installed via the **native installer**
@@ -121,13 +124,24 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    project-specific/heavy ones stay on-demand via `sudo apt` inside the container.
    Do NOT switch to `npm install -g @anthropic-ai/claude-code` — that lands at
    `/usr/local/bin/claude`, which Claude Code's `/doctor` flags as a broken
-   install and which self-update can't manage.
-2. **Substitutes the host UID** into the Dockerfile's `useradd` so the
-   in-container `claude` user matches `os.getuid()`. This keeps bind-mount file
-   ownership correct: working-dir edits land on the host owned by the user, and
-   the chmod-600 credentials file and mounted `~/.claude` stay readable inside —
-   keep it. (SSH-agent socket access is *not* what needs this; that's granted
-   separately by group-0 membership — see the gotchas.)
+   install and which self-update can't manage. The image **tag is
+   content-addressed** — `claude-yolo:{hash8}` where `hash8` hashes the Dockerfile
+   text + host UID (`_image_tag`) — so the inline default and each custom
+   Dockerfile get *distinct* images. This matters because yolo runs sessions in
+   parallel: a single fixed tag would let two concurrent builds (default vs.
+   custom) race and one `docker run` pick up the other's image. The default
+   Dockerfile stays inline (not a shipped file) to preserve the single-file
+   property — `--dockerfile` is an *override*, not a relocation.
+2. **Passes the host UID as the `HOST_UID` build ARG** (`--build-arg
+   HOST_UID=os.getuid()`), which the Dockerfile's `ARG HOST_UID` feeds to
+   `useradd`, so the in-container `claude` user matches `os.getuid()` (no Python
+   string substitution anymore — the Dockerfile is a literal). This keeps
+   bind-mount file ownership correct: working-dir edits land on the host owned by
+   the user, and the chmod-600 credentials file and mounted `~/.claude` stay
+   readable inside — keep it. A custom `--dockerfile` should likewise `ARG
+   HOST_UID` and use it for its non-root user. (SSH-agent socket access is *not*
+   what needs this; that's granted separately by group-0 membership — see the
+   gotchas.)
 3. **Checks host login** (`ensure_logged_in` / `_is_logged_in`) before launch in
    keychain mode only (the default oauth-token mode and Bedrock skip it). Runs
    `claude auth status --json` and
@@ -205,6 +219,20 @@ on top of whichever auth is chosen:
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
+- **`--dockerfile PATH`** (default unset; `dockerfile` in config) → build the
+  container image from this Dockerfile instead of the inline `DEFAULT_DOCKERFILE`.
+  Override semantics (a single path, not a concat key); the path must exist and
+  be a readable file (validated on the launch paths, like `--config-dir`, so a
+  stale config path can't break `list`/`finish`/`config`). The custom Dockerfile
+  receives the host UID via the `HOST_UID` build ARG, so it should `ARG HOST_UID`
+  and use it for its non-root user to keep bind-mount ownership correct. Resolved
+  by `_resolve_dockerfile`, which also derives the content-addressed image tag
+  (see "How it works" #1). **Caveat:** a `dockerfile` pointing at a file *inside*
+  the bind-mounted working tree (e.g. `./Dockerfile.yolo`) is editable by Claude
+  between runs, so Claude could alter the next image build. The *key* still lives
+  in host-side `projects.json` (Claude can't add it), only the referenced file is
+  in-tree — an accepted trade-off for an opt-in feature, but prefer an out-of-tree
+  Dockerfile when the isolation matters.
 - **`--tmux` / `--no-tmux`** (default **off**; `tmux` in config) → spawn the
   session as a window of a shared tmux session instead of exec'ing in the
   invoking terminal; `--tmux-session NAME` / `tmux-session` names that session
@@ -423,9 +451,10 @@ the higher layer **overrides**, except `prompts`, `mounts`, and `ports`
 values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
-`config-dir`, `auth` (one of `keychain`/`oauth-token`/`bedrock` — validated against
-`AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults` bypasses argparse's
-`choices` check), `aws-profile`, `aws-region`, `bedrock-model`, `claude-json`,
+`config-dir`, `dockerfile`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
+validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
+bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
+`bedrock-model`, `claude-json`,
 `ssh-agent`, `base`, `prompts` (string or list of strings; the pre-0.7 name
 `append-system-prompt` draws a pointed rename error),
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
@@ -433,8 +462,8 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
 (CLI-only by design); any of them in a config file is a hard error (not in
-`YOLO_KEYS`). `config-dir` gets `~` expanded (a JSON file can't lean on shell
-expansion). Booleans must be JSON `true`/`false`. A JSON **`null`** for any key
+`YOLO_KEYS`). `config-dir` and `dockerfile` get `~` expanded (a JSON file can't
+lean on shell expansion). Booleans must be JSON `true`/`false`. A JSON **`null`** for any key
 means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
 (`_parse_yolo_dict` / `_read_projects_file`).
@@ -880,8 +909,12 @@ never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `ensure_oauth_token`, `git_identity_args`, and `os.execvp`, then asserts on the
 captured `docker run` argv. `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
-warnings, and the `config` verb; `test_cli.py` covers verb dispatch and arg
-assembly across the credential/config axes, extra mounts, and the guardrails.
+warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
+and the `config` verb; `test_cli.py` covers verb dispatch and arg
+assembly across the credential/config axes, extra mounts, the guardrails, and the
+`--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, and the
+missing-path error). The tests locate the built image in the assembled argv by its
+`claude-yolo:` repo prefix (the tag is now content-addressed, not a fixed constant).
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects.

@@ -24,7 +24,11 @@ import termios
 import time
 import tty
 
-DOCKER_IMAGE = "claude-yolo:latest"
+# Image tag repo. The actual tag is content-addressed: claude-yolo:<hash8> where
+# hash8 derives from the Dockerfile text + host UID (see _image_tag). Each distinct
+# Dockerfile (the inline default or a --dockerfile override) gets its own image, so
+# parallel sessions can't race on a single shared tag and pick up each other's build.
+DOCKER_IMAGE_REPO = "claude-yolo"
 
 # The three mutually-exclusive auth mechanisms, selected by --auth (default
 # oauth-token). oauth-token = forward a long-lived CLAUDE_CODE_OAUTH_TOKEN env
@@ -34,11 +38,14 @@ DOCKER_IMAGE = "claude-yolo:latest"
 # bedrock = AWS Bedrock creds.
 AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
-# Dockerfile template — uid is substituted at runtime to match the host user so that
-# files in the bind-mounted working directory are owned by (and writable as) the in-container
-# user. The user is also put in group 0 so it can connect to the Docker engine's
-# root-owned ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below).
-DOCKERFILE_TEMPLATE = """\
+# The built-in default Dockerfile. The host UID is passed in as the HOST_UID build ARG
+# (build_docker_image adds --build-arg HOST_UID=<os.getuid()>) so that files in the
+# bind-mounted working directory are owned by (and writable as) the in-container user.
+# The user is also put in group 0 so it can connect to the Docker engine's root-owned
+# ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below). This is a plain
+# literal Dockerfile — no Python templating — so a --dockerfile override is the same kind
+# of thing: Dockerfile bytes built with the same HOST_UID build-arg.
+DEFAULT_DOCKERFILE = """\
 FROM ubuntu:24.04
 
 # Baked-in amenities used across most projects, so Claude doesn't re-install them in
@@ -49,12 +56,13 @@ RUN apt-get update && apt-get install -y sudo jq git curl ripgrep fd-find build-
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 # uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-# UID {uid} matches the host user so bind-mounted working-dir files are owned/writable.
-# Group 0 (root) membership grants access to the Docker engine's ssh-auth.sock, which is
-# mounted srw-rw---- root:root — without it a non-root user gets EACCES on connect(). This
-# adds no real privilege: the claude user already has NOPASSWD sudo, and the container is
-# the sandbox.
-RUN useradd -m -s /bin/bash --uid {uid} -G root claude
+# HOST_UID (passed via --build-arg) matches the host user so bind-mounted working-dir
+# files are owned/writable. Group 0 (root) membership grants access to the Docker engine's
+# ssh-auth.sock, which is mounted srw-rw---- root:root — without it a non-root user gets
+# EACCES on connect(). This adds no real privilege: the claude user already has NOPASSWD
+# sudo, and the container is the sandbox.
+ARG HOST_UID=1000
+RUN useradd -m -s /bin/bash --uid ${HOST_UID} -G root claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
 # Route GitHub HTTPS git operations over SSH so they reuse the forwarded ssh-agent — no
@@ -78,12 +86,41 @@ ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
 
 
-def build_docker_image(*, no_cache: bool = False) -> None:
-    """Write the Dockerfile to a temporary directory and build the Docker image."""
+def _image_tag(dockerfile_text: str, uid: int) -> str:
+    """Content-addressed image tag for a Dockerfile + host UID.
+
+    Hashing the Dockerfile text together with the UID (which is baked into the image
+    by the useradd line) gives each distinct build its own tag, so two concurrent
+    sessions building different Dockerfiles can't clobber a single shared tag and end
+    up running each other's image.
+    """
+    hash8 = hashlib.sha256((dockerfile_text + str(uid)).encode()).hexdigest()[:8]
+    return f"{DOCKER_IMAGE_REPO}:{hash8}"
+
+
+def _resolve_dockerfile(parsed) -> tuple[str, str]:
+    """Resolve (dockerfile_text, image_tag) for this launch.
+
+    Uses the file named by --dockerfile / the `dockerfile` config key when set
+    (its existence is validated on the launch paths in main), else the inline
+    DEFAULT_DOCKERFILE. The tag is derived from whichever text wins.
+    """
+    dockerfile = getattr(parsed, "dockerfile", None)
+    text = pathlib.Path(dockerfile).read_text() if dockerfile else DEFAULT_DOCKERFILE
+    return text, _image_tag(text, os.getuid())
+
+
+def build_docker_image(dockerfile_text: str, tag: str, uid: int, *, no_cache: bool = False) -> None:
+    """Write the Dockerfile to a temporary directory and build the Docker image.
+
+    The host UID is passed as the HOST_UID build ARG so the in-container `claude`
+    user matches it (keeping bind-mount ownership correct); `tag` is the
+    content-addressed tag from _image_tag.
+    """
     with tempfile.TemporaryDirectory(prefix="claude-yolo-build-") as build_dir:
         dockerfile = pathlib.Path(build_dir) / "Dockerfile"
-        dockerfile.write_text(DOCKERFILE_TEMPLATE.format(uid=os.getuid()))
-        cmd = ["docker", "build", "-t", DOCKER_IMAGE]
+        dockerfile.write_text(dockerfile_text)
+        cmd = ["docker", "build", "-t", tag, "--build-arg", f"HOST_UID={uid}"]
         if no_cache:
             cmd.append("--no-cache")
         subprocess.run(cmd + [build_dir], check=True)
@@ -696,6 +733,7 @@ def setup_worktree(
 # first time yolo ran there. A leftover file draws a warning in load_yolo_config.
 YOLO_KEYS = {
     "config_dir": ("config_dir", "path"),
+    "dockerfile": ("dockerfile", "path"),
     "auth": ("auth", "auth"),
     "aws_profile": ("aws_profile", "str"),
     "aws_region": ("aws_region", "str"),
@@ -1065,6 +1103,9 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
     for spec in [*explicit.get("ports", []), *parsed.add_ports]:
         _parse_port_spec(spec)  # likewise: a malformed port spec can't be pinned
+    df = explicit.get("dockerfile")
+    if df is not None and not pathlib.Path(os.path.expanduser(df)).is_file():
+        sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
 
     entry = dict(current)
     for k, v in explicit.items():
@@ -1550,6 +1591,16 @@ PARSER.add_argument(
     default=False,
     dest="rebuild_image",
     help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
+)
+PARSER.add_argument(
+    "--dockerfile",
+    dest="dockerfile",
+    default=None,
+    metavar="PATH",
+    help="Build the container image from this Dockerfile instead of the built-in "
+    "default (or set `dockerfile` in config). The host UID is passed in as the "
+    "HOST_UID build ARG, so the custom Dockerfile should `ARG HOST_UID` and use it "
+    "for its non-root user to keep bind-mount ownership correct.",
 )
 PARSER.add_argument(
     "--mount",
@@ -2194,7 +2245,8 @@ def launch_container(
         status_dir.mkdir(parents=True, exist_ok=True)
         (status_dir / f"{_cwd_slug(cwd)}.state").unlink(missing_ok=True)
 
-    build_docker_image(no_cache=parsed.rebuild_image)
+    dockerfile_text, image_tag = _resolve_dockerfile(parsed)
+    build_docker_image(dockerfile_text, image_tag, os.getuid(), no_cache=parsed.rebuild_image)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
@@ -2207,7 +2259,7 @@ def launch_container(
         *args,
         *entry,
         *docker_args,
-        DOCKER_IMAGE,
+        image_tag,
         *command,
     ]
 
@@ -2981,6 +3033,12 @@ def main():
             f"require-project-entry is set and no projects.json entry matches {cwd}; "
             "run `yolo config` here to create one, or pass --no-require-project-entry."
         )
+
+    # A custom Dockerfile must exist and be a readable file. Checked here on the
+    # launch paths only (like the mount/port resolution below), so a stale
+    # `dockerfile` config path can't break `list`/`finish`/`config`.
+    if parsed.dockerfile and not pathlib.Path(parsed.dockerfile).is_file():
+        sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
 
     # Extra mounts and port forwards, merged across config layers and the CLI.
     # Resolved only on the launch paths so a stale mount path or malformed port

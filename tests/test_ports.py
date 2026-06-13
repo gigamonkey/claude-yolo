@@ -23,7 +23,8 @@ def dirs(tmp_path):
 
 def claude_args(cy, argv):
     """The args after the image name — i.e. what's passed to `claude`."""
-    return argv[argv.index(cy.DOCKER_IMAGE) + 1 :]
+    i = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    return argv[i + 1 :]
 
 
 def system_prompt(cy, argv):
