@@ -43,7 +43,10 @@ FROM ubuntu:24.04
 
 # Baked-in amenities used across most projects, so Claude doesn't re-install them in
 # each ephemeral container. fd-find installs its binary as `fdfind`; symlink it to `fd`.
-RUN apt-get update && apt-get install -y nodejs npm sudo jq git curl ripgrep fd-find build-essential vim && ln -s /usr/bin/fdfind /usr/local/bin/fd
+# Ubuntu 24.04's own `nodejs` package is Node 18; install Node 24 from NodeSource instead
+# (its setup script adds the apt repo and pulls in npm, so no separate npm package).
+RUN apt-get update && apt-get install -y sudo jq git curl ripgrep fd-find build-essential vim && ln -s /usr/bin/fdfind /usr/local/bin/fd
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 # uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 # UID {uid} matches the host user so bind-mounted working-dir files are owned/writable.
