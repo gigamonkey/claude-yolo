@@ -74,6 +74,9 @@ def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, dirs):
     assert "SSH_AUTH_SOCK=/run/ssh-agent" not in envs
     assert not any("ssh-auth.sock" in m for m in mounts)
     assert not any("known_hosts" in m for m in mounts)
+    # without the agent, the GitHub HTTPS->SSH rewrite is NOT applied, so plain
+    # HTTPS clones of public repos still work instead of failing on an SSH URL
+    assert "GIT_CONFIG_COUNT=1" not in envs
 
 
 def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
@@ -83,6 +86,11 @@ def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
     envs = flag_values(argv, "-e")
     assert "SSH_AUTH_SOCK=/run/ssh-agent" in envs
     assert any("ssh-auth.sock" in m for m in mounts)
+    # the GitHub HTTPS->SSH rewrite rides along with the agent, applied as run-time
+    # git config via GIT_CONFIG_* (not baked into the image)
+    assert "GIT_CONFIG_COUNT=1" in envs
+    assert "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf" in envs
+    assert "GIT_CONFIG_VALUE_0=https://github.com/" in envs
 
 
 def test_no_claude_json_drops_that_mount(cy, run_cli, flag_values, dirs):

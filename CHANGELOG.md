@@ -5,6 +5,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **GitHub HTTPS→SSH rewrite is now conditioned on `--ssh-agent`.** Previously
+  the image unconditionally rewrote `https://github.com/` remotes to
+  `git@github.com:`, which — with `--ssh-agent` off (the default) — turned a
+  public-repo HTTPS clone (needing no auth) into an SSH URL that couldn't
+  authenticate, so the clone failed. The rewrite now rides along with the agent:
+  it's applied as run-time git config (`GIT_CONFIG_*` env) only under
+  `--ssh-agent`, so without an agent plain HTTPS clones of public repos work,
+  and with one authenticated fetch/push still routes over SSH token-free. It's
+  no longer baked into the image, so a custom `--dockerfile` image gets it too.
 - **`yolo dir [TOPIC]`**: print a session's working directory and exit — the
   worktree's root with a `TOPIC` (erroring if that worktree doesn't exist), or
   the current directory without one. Only the path is written to stdout, so it

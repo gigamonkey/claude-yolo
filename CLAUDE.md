@@ -201,8 +201,10 @@ on top of whichever auth is chosen:
   ssh-agent socket (see gotchas). Off by default to keep your SSH keys out of the
   skip-permissions container — opt in with `--ssh-agent` (or `ssh-agent: true` in
   config) when you need in-container git auth. When off, there's no socket mount,
-  `SSH_AUTH_SOCK`, or `known_hosts` mount; in-container GitHub git auth then won't
-  work, since the baked HTTPS→SSH rewrite relies on the agent.
+  `SSH_AUTH_SOCK`, `known_hosts` mount, **or HTTPS→SSH rewrite** — so plain HTTPS
+  clones of public repos still work (the rewrite would turn them into SSH URLs that
+  can't auth without the agent), but in-container *authenticated* GitHub git auth
+  won't. The rewrite is applied as run-time git config only under `--ssh-agent`.
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
   host directories ("reference" dirs) at their **identical host paths**, like the
   cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would
@@ -864,11 +866,16 @@ worktree session and so omits the resume flags.
   is neither owner nor in group 0. Fix: `useradd -G root` puts `claude` in group 0,
   granting the socket's group-rw. No real privilege added (the user already has
   NOPASSWD sudo; the container is the sandbox).
-- **GitHub HTTPS git is rewritten to SSH so it reuses the agent.** The image bakes
-  `git config --system url."git@github.com:".insteadOf "https://github.com/"`, so
-  in-container git operations on `https://github.com/...` remotes (fetch *and* push)
-  transparently route over SSH and authenticate via the forwarded ssh-agent — **no
-  token ever enters the container**. This is the only HTTPS-auth approach that keeps
+- **Under `--ssh-agent`, GitHub HTTPS git is rewritten to SSH so it reuses the
+  agent.** When the agent is forwarded, the launch sets run-time git config via
+  `GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf` /
+  `GIT_CONFIG_VALUE_0=https://github.com/` (highest-precedence env-based config, not
+  baked into the image), so in-container git operations on `https://github.com/...`
+  remotes (fetch *and* push) transparently route over SSH and authenticate via the
+  forwarded ssh-agent — **no token ever enters the container**. It's conditioned on
+  `--ssh-agent` deliberately: without an agent the rewrite would turn a public-repo
+  HTTPS clone (which needs no auth) into an SSH URL that can't authenticate, so when
+  the agent is off the rewrite is simply absent and plain HTTPS clones work. This is the only HTTPS-auth approach that keeps
   the secret-never-in-container property: HTTPS auth is a bearer token (the token
   must reach whoever makes the request), whereas SSH is challenge-response (the key
   stays on the host, the agent only signs). The host's `osxkeychain` credential

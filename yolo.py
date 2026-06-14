@@ -65,12 +65,6 @@ ARG HOST_UID=1000
 RUN useradd -m -s /bin/bash --uid ${HOST_UID} -G root claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
-# Route GitHub HTTPS git operations over SSH so they reuse the forwarded ssh-agent — no
-# tokens ever enter the container (HTTPS auth is a bearer token, which would have to; SSH is
-# challenge-response, so the key stays on the host). Remotes can stay https://github.com/...;
-# git rewrites them to git@github.com: before connecting. --system so it applies to the claude
-# user without mounting any gitconfig (the host's ~/.gitconfig is deliberately never mounted).
-RUN git config --system url."git@github.com:".insteadOf "https://github.com/"
 
 USER claude
 # Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
@@ -90,8 +84,9 @@ ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 # the default rather than replacing it. Referencing YOLO_BASE is what triggers
 # _build_image to build the default first and pass its tag in (see _build_image and
 # the README), so this template inherits the claude user, sudo, the native Claude
-# install, the GitHub HTTPS->SSH rewrite, PATH, and the ENTRYPOINT — the user only
-# fills in the marked block.
+# install, PATH, and the ENTRYPOINT — the user only fills in the marked block. (The
+# GitHub HTTPS->SSH rewrite is applied at run time under --ssh-agent, not in the image,
+# so a custom image gets it too.)
 CUSTOM_DOCKERFILE = """\
 # Custom yolo Dockerfile — layers your own steps on top of yolo's built-in image.
 #
@@ -101,8 +96,8 @@ CUSTOM_DOCKERFILE = """\
 #
 # Because this file references YOLO_BASE, yolo builds its default image first and
 # passes the tag in as the YOLO_BASE build arg, so you inherit the `claude` user
-# (with passwordless sudo), the native Claude install, the GitHub HTTPS->SSH
-# rewrite, PATH, and the ENTRYPOINT. Keep the two lines just below.
+# (with passwordless sudo), the native Claude install, PATH, and the ENTRYPOINT.
+# Keep the two lines just below.
 
 ARG YOLO_BASE
 FROM ${YOLO_BASE}
@@ -2273,8 +2268,7 @@ def launch_container(
         # is a socket the VM itself listens on and proxies to the host agent — both Docker
         # Desktop and OrbStack expose it at that path. It's mounted srw-rw----
         # root:root, so the claude user must be in group 0 to connect (see the useradd line).
-        # --no-ssh-agent skips all of this; in-container GitHub git auth won't work then,
-        # since the baked HTTPS->SSH rewrite relies on the forwarded agent.
+        # --no-ssh-agent skips all of this.
         args += [
             "-v",
             "/run/host-services/ssh-auth.sock:/run/ssh-agent",
@@ -2283,6 +2277,19 @@ def launch_container(
             # Mount host known_hosts so SSH host key verification succeeds
             "-v",
             f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
+            # Route GitHub HTTPS git operations over SSH so they reuse the forwarded agent —
+            # no tokens ever enter the container (HTTPS auth is a bearer token, which would
+            # have to; SSH is challenge-response, so the key stays on the host). Remotes can
+            # stay https://github.com/...; git rewrites them to git@github.com: before
+            # connecting. Applied as run-time git config via GIT_CONFIG_* env (highest
+            # precedence) ONLY here, so without --ssh-agent plain HTTPS clones of public
+            # repos still work instead of being rewritten to an SSH URL that can't auth.
+            "-e",
+            "GIT_CONFIG_COUNT=1",
+            "-e",
+            "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf",
+            "-e",
+            "GIT_CONFIG_VALUE_0=https://github.com/",
         ]
 
     # Worktree mode: mount the shared .git at its real host path so the worktree's
