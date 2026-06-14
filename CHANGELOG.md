@@ -5,6 +5,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **Per-worktree overlay config.** A worktree now carries its own config layer,
+  the most specific persisted one (`~/.yolo.json` < `projects.json` entry <
+  worktree overlay < CLI flags). `yolo start TOPIC [config flags]` snapshots the
+  explicit flags into it, so `yolo resume TOPIC` relaunches with the same config
+  (mounts, ports, auth, …) without retyping. It's editable with `yolo config
+  TOPIC` (same show/set/`--add-*`/`--unset` UX as the project entry) and removed
+  by `yolo finish TOPIC`. Stored host-side in `~/.claude-yolo/worktrees.json`,
+  keyed by worktree path — a sibling of the `worktrees/` dir, so (like
+  `projects.json`) it's never mounted into a container and can safely grant host
+  access.
 - **GitHub HTTPS→SSH rewrite is now conditioned on `--ssh-agent`.** Previously
   the image unconditionally rewrote `https://github.com/` remotes to
   `git@github.com:`, which — with `--ssh-agent` off (the default) — turned a

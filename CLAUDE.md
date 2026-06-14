@@ -75,6 +75,8 @@ written with the `config` verb (see the config section below; an in-directory
 ./yolo.py config --add-mount ~/other:rw      # edit the mounts list element-wise
 ./yolo.py config --remove-mount ~/refdocs    #   (vs --mount, which replaces it)
 ./yolo.py config --unset config-dir          # drop a key -> lower layers apply
+./yolo.py config fix-auth                     # show worktree fix-auth's overlay
+./yolo.py config fix-auth --add-port 8000     # edit that worktree's overlay
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
@@ -445,11 +447,11 @@ reported multi-day revocation lag — claude-code issues #34198/#48373/#59378/
   config-dir-must-exist check so a token for an already-deleted config dir can
   still be forgotten (`_oauth_service` only hashes the resolved path).
 
-## Host-side config: `~/.yolo.json` + `~/.claude-yolo/projects.json`
+## Host-side config: `~/.yolo.json` + `~/.claude-yolo/projects.json` + per-worktree overlay
 
 Config supplies defaults for most flags; `load_yolo_config` applies them via
 `PARSER.set_defaults` *before* the re-`parse_args`, so explicit CLI flags still
-win. Two layers, merged low→high, **both host-side only**:
+win. Up to three layers, merged low→high, **all host-side only**:
 
 1. **`~/.yolo.json`** (global) — a flat JSON object of config keys.
 2. **`~/.claude-yolo/projects.json`** (per-project) — a JSON object mapping a
@@ -459,6 +461,19 @@ win. Two layers, merged low→high, **both host-side only**:
    entry is used — the same nearest-wins rule the old in-directory search had,
    so running from a subdirectory picks up the project's entry. Written by
    `yolo config` (its only writer); a plain launch never touches it.
+3. **`~/.claude-yolo/worktrees.json`** (per-worktree overlay) — a JSON object
+   mapping a **worktree's absolute path** to a config object of the same keys,
+   layered on *only* in worktree mode (`load_yolo_config(..., worktree_dir=…)`)
+   as the most specific persisted layer (beats the project entry, still under the
+   CLI). It's **auto-managed**, unlike `projects.json`: `yolo start TOPIC [config
+   flags]` snapshots the explicitly-passed flags into it (via
+   `_explicit_config_flags`, so a resume relaunches with the same config without
+   retyping; an empty `{}` is still written, symmetric with the worktree
+   lifecycle), `yolo config TOPIC` edits it, and `yolo finish TOPIC` removes the
+   entry. `start` *creates* the overlay but deliberately does **not** consume one
+   during the same run (so a stale same-path entry from a manual removal can't
+   leak in); `resume`/`shell` consume it. Helpers mirror the projects ones
+   (`_read_worktrees_file`/`_write_worktrees_file`/`_worktree_overlay_key`).
 
 **An in-directory `.yolo.json` is deliberately no longer read.** It lives inside
 the bind-mounted tree, so Claude in a container could edit it and grant its next
@@ -468,14 +483,17 @@ someone else's config the first time you ran yolo there. Host-side-only config
 makes the safety property structural: nothing yolo reads is writable from inside
 a container. (`~/.claude` *is* mounted rw, which is why the project store lives
 under `~/.claude-yolo` — only `worktrees/<slug>/<topic>` dirs under it are ever
-mounted, never `projects.json`.) A leftover `.yolo.json` found at/above the cwd
+mounted, never `projects.json` **or `worktrees.json`**, which sits as a *sibling*
+of the `worktrees/` dir, not inside any worktree. This matters because an overlay,
+like a project entry, can grant host access — `mounts`, or an arbitrary rw mount
+via `config-dir` — so it must stay container-unwritable.) A leftover `.yolo.json` found at/above the cwd
 draws a **warning on every run** (never an error — the file is inert) naming the
 migration path; `~/.yolo.json` itself is exempt from the walk.
 
-Precedence overall: `~/.yolo.json` < `projects.json` entry < CLI flags. Per key
-the higher layer **overrides**, except `prompts`, `mounts`, and `ports`
-(`_CONCAT_DESTS`), which **concatenate** across the layers and then the CLI
-values (those lists accumulate; everything else replaces).
+Precedence overall: `~/.yolo.json` < `projects.json` entry < worktree overlay <
+CLI flags. Per key the higher layer **overrides**, except `prompts`, `mounts`,
+and `ports` (`_CONCAT_DESTS`), which **concatenate** across the layers and then
+the CLI values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `dockerfile`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
@@ -493,10 +511,11 @@ deliberately **not** config keys, and neither is `--dangerously-allow-home`
 lean on shell expansion). Booleans must be JSON `true`/`false`. A JSON **`null`** for any key
 means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
-(`_parse_yolo_dict` / `_read_projects_file`).
+(`_parse_yolo_dict` / `_read_projects_file` / `_read_worktrees_file`).
 
 Every load also prints a one-line **provenance note** to stderr — e.g.
-`config: ~/.yolo.json + projects.json[/Users/peter/hacks/foo]` or
+`config: ~/.yolo.json + projects.json[/Users/peter/hacks/foo]`, with a
+`+ worktrees.json[<topic>]` tail when a (non-empty) worktree overlay applies, or
 `config: built-in defaults (no project entry)` — and warns about **dangling
 project keys** (entries whose directory no longer exists: the signature of a
 moved/renamed project, whose config would otherwise *silently* fall back to the
@@ -511,11 +530,24 @@ directory configures nothing and writes nothing. The hard-mode version is the
 
 ### `config` verb
 
-`yolo.py config [CONFIG FLAGS]` (`do_config`) shows or updates this project's
-`projects.json` entry — or, with **`--global`**, `~/.yolo.json` itself — then
-exits; it does **not** run a container. The entry key is the **main repo root**
-when inside a git repo (so subdirectory runs and worktree sessions share it;
-`_project_key`), else the cwd. Behavior à la `git config`:
+`yolo.py config [TOPIC] [CONFIG FLAGS]` (`do_config`) shows or updates this
+project's `projects.json` entry — or, with **`--global`**, `~/.yolo.json`
+itself, or, with a **`TOPIC`**, that worktree's `worktrees.json` overlay
+(`_do_config_worktree`) — then exits; it does **not** run a container. The
+project entry key is the **main repo root** when inside a git repo (so
+subdirectory runs and worktree sessions share it; `_project_key`), else the cwd.
+Behavior à la `git config`:
+
+- **With a `TOPIC`** — `yolo config fix-auth --add-mount ~/refdocs` — targets
+  `worktrees.json[<worktree path>]` instead of the project entry, reusing the
+  same `_apply_config_edits` machinery (whole-key sets, `--add-*`/`--remove-*`,
+  `--unset`). Bare `yolo config TOPIC` shows the overlay (or "no overlay for
+  TOPIC"); editing requires the worktree to **exist** (configuring a
+  non-existent one is meaningless). `--global` and `--init` are
+  project/global notions and **error** when combined with a `TOPIC`. Running
+  `yolo config` from *inside* a worktree dir can't substitute: `_project_key`
+  follows the shared `.git` back to the main repo root, so it would hit the
+  project entry — the explicit `TOPIC` is the only handle on the overlay.
 
 - **With config flags** — `yolo config --auth bedrock --mount ~/refdocs` —
   persists **exactly the explicitly-passed `YOLO_KEYS` flags** into the entry,
@@ -594,12 +626,16 @@ gracefully outside one — there's just no repo slug to label/find by).
 - **`start [TOPIC]`** — *with `TOPIC`:* create a new worktree + branch `TOPIC` off
   `--base` (default `HEAD`; see `base` below) and launch a container with a fresh
   session named `TOPIC`; **errors if the worktree or branch already exists** (use
-  `resume`). *No `TOPIC`:* a fresh (unnamed) session in the current directory.
+  `resume`). Any **explicit config flags** passed here are snapshotted into the
+  worktree's `worktrees.json` overlay (see the config section), so a later
+  `resume TOPIC` reuses them. *No `TOPIC`:* a fresh (unnamed) session in the
+  current directory.
 - **`resume [TOPIC]`** — continue the most recent session (`claude --continue`).
   *With `TOPIC`:* on that existing worktree (**errors if it doesn't exist** — use
-  `start`); `--new` starts a fresh named session there instead. *No `TOPIC`:* in the
-  current directory. `-r [ID]` (either mode) resumes a specific session / opens the
-  picker. `--new` is worktree-only (for the cwd, a fresh session *is* `start`).
+  `start`), layering in that worktree's overlay config; `--new` starts a fresh
+  named session there instead. *No `TOPIC`:* in the current directory. `-r [ID]`
+  (either mode) resumes a specific session / opens the picker. `--new` is
+  worktree-only (for the cwd, a fresh session *is* `start`).
 - **`shell [TOPIC]`** — a bash shell. If a container is **running** (label match —
   by worktree for `TOPIC`, by cwd otherwise) → `docker exec -it <id> /bin/bash`;
   otherwise a fresh ephemeral container with `--entrypoint /bin/bash`. Either way
@@ -614,8 +650,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   so the env vars are stamped on *every* launch, not just `shell` ones.
 - **`finish TOPIC`** — `git worktree remove` the worktree, **keep the branch**.
   Refuses if a container is running, or on uncommitted changes (unless `--force`).
-  Leaves transcripts (they self-expire via `cleanupPeriodDays`). Prints whether
-  the kept branch is pushed.
+  Removes the worktree's `worktrees.json` overlay entry. Leaves transcripts (they
+  self-expire via `cleanupPeriodDays`). Prints whether the kept branch is pushed.
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
@@ -966,6 +1002,12 @@ tests locate the built image in the assembled argv by its
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
+`test_worktree_config.py` covers the per-worktree overlay (also against a real
+repo): `start` populating `worktrees.json` from explicit flags (and the empty
+`{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and
+concat-key accumulation, the provenance tail, `yolo config TOPIC` show/edit (and
+the `--global`/`--init`/missing-worktree errors), `finish` removing the entry,
+and a malformed-file error.
 `test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
 expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the `security`-wrapping helpers stubbed).

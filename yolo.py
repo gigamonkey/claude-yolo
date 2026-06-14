@@ -927,6 +927,44 @@ def _read_projects_file(path: pathlib.Path) -> dict:
     return raw
 
 
+# Per-worktree overlay config: ~/.claude-yolo/worktrees.json maps a worktree's
+# absolute path -> a config object (same shape as a projects.json entry). It's the
+# most specific persisted layer (projects.json entry < worktree overlay < CLI),
+# populated from the CLI flags at `start`, edited via `yolo config TOPIC`, and
+# removed by `finish`. Like projects.json it lives directly under ~/.claude-yolo/
+# — a *sibling* of the worktrees/ dir, never inside a worktree — so it's outside
+# every container mount: an overlay can grant host access (mounts, or an arbitrary
+# rw mount via config-dir), so it must not be writable from inside a container.
+def _worktrees_file(home: pathlib.Path) -> pathlib.Path:
+    return home / ".claude-yolo" / "worktrees.json"
+
+
+def _read_worktrees_file(path: pathlib.Path) -> dict:
+    """~/.claude-yolo/worktrees.json as {worktree path: config object}; {} if absent."""
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"{path}: cannot read worktree config: {e}")
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        sys.exit(f"{path}: must be a JSON object mapping worktree paths to config objects")
+    return raw
+
+
+def _write_worktrees_file(path: pathlib.Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _worktree_overlay_key(worktree_path: pathlib.Path) -> str:
+    """The worktrees.json key for a worktree dir — its resolved absolute path.
+
+    One definition shared by populate/edit/remove/load so they always agree.
+    """
+    return str(worktree_path.resolve())
+
+
 def _match_project_entry(projects: dict, start: pathlib.Path) -> tuple[str | None, dict | None]:
     """The (key, raw entry) whose directory contains `start`; longest key wins.
 
@@ -969,18 +1007,22 @@ def _warn_dangling_keys(projects: dict, *, no_entry: bool) -> None:
         )
 
 
-def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> tuple[dict, str | None]:
+def load_yolo_config(
+    start: pathlib.Path, home: pathlib.Path, *, worktree_dir: pathlib.Path | None = None
+) -> tuple[dict, str | None]:
     """Merge ~/.yolo.json with the matching ~/.claude-yolo/projects.json entry.
 
     Returns (merged_defaults, matched_project_key). Precedence low->high:
-    ~/.yolo.json < projects.json entry < CLI args (the caller applies the dict via
-    PARSER.set_defaults, so explicit flags still win). prompts and
-    mounts concatenate across the layers; every other key is overridden by the
-    higher layer. Both files are host-side only — outside every container mount —
-    so nothing Claude writes inside a container can change what the next launch
-    mounts or which credentials it uses. Also prints the config provenance line
-    and the stale-state warnings (dangling project keys, leftover in-directory
-    .yolo.json files) to stderr.
+    ~/.yolo.json < projects.json entry < worktree overlay < CLI args (the caller
+    applies the dict via PARSER.set_defaults, so explicit flags still win). When
+    `worktree_dir` is given (the launch verbs in worktree mode), that worktree's
+    ~/.claude-yolo/worktrees.json entry is layered on as the most specific
+    persisted layer. prompts/mounts/ports concatenate across the layers; every
+    other key is overridden by the higher layer. All three files are host-side
+    only — outside every container mount — so nothing Claude writes inside a
+    container can change what the next launch mounts or which credentials it uses.
+    Also prints the config provenance line and the stale-state warnings (dangling
+    project keys, leftover in-directory .yolo.json files) to stderr.
     """
     merged = {}
     layers = []
@@ -1004,6 +1046,16 @@ def load_yolo_config(start: pathlib.Path, home: pathlib.Path) -> tuple[dict, str
     if matched_key is not None:
         merge(_parse_yolo_dict(entry, f"{projects_file} [{matched_key}]"))
         layers.append(f"projects.json[{matched_key}]")
+
+    # Worktree overlay (when launching in worktree mode): the most specific
+    # persisted layer, beating the project entry but still under the CLI flags.
+    if worktree_dir is not None:
+        wt_entry = _read_worktrees_file(_worktrees_file(home)).get(
+            _worktree_overlay_key(worktree_dir)
+        )
+        if wt_entry:
+            merge(_parse_yolo_dict(wt_entry, f"worktrees.json [{worktree_dir.name}]"))
+            layers.append(f"worktrees.json[{worktree_dir.name}]")
 
     # Warn about (but never read) a leftover in-directory .yolo.json — loudly
     # enough that a file planted by a container can't go unnoticed, on every
@@ -1273,11 +1325,55 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
     return entry
 
 
-def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, parsed) -> None:
+def _do_config_worktree(
+    home: pathlib.Path, topic: str, explicit: dict, editing: bool, parsed
+) -> None:
+    """`yolo config TOPIC`: show or update a worktree's worktrees.json overlay.
+
+    The worktree counterpart to the project-entry path in `do_config`, reusing the
+    same `_apply_config_edits` machinery against worktrees.json keyed by the
+    worktree's absolute path. --global/--init are project/global notions and don't
+    combine with a worktree; editing requires the worktree to exist (configuring a
+    non-existent one is meaningless).
+    """
+    if parsed.cfg_global:
+        sys.exit("--global edits ~/.yolo.json; it can't target a worktree.")
+    if parsed.init:
+        sys.exit("--init registers a project entry, not a worktree overlay.")
+
+    worktree, _, _ = _worktree_dir(topic, home)
+    wt_file = _worktrees_file(home)
+    worktrees = _read_worktrees_file(wt_file)
+    key = _worktree_overlay_key(worktree)
+
+    if not explicit and not editing:
+        print(f"worktrees file: {wt_file}")
+        if key in worktrees:
+            print(json.dumps({topic: worktrees[key]}, indent=2))
+        else:
+            print(f"no overlay for '{topic}'")
+        return
+
+    if not worktree.is_dir():
+        sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+
+    where = f"{wt_file} [{topic}]"
+    entry = _apply_config_edits(dict(worktrees.get(key, {})), explicit, parsed, where)
+    _parse_yolo_dict(entry, where)  # never write an unloadable entry
+    worktrees[key] = entry
+    _write_worktrees_file(wt_file, worktrees)
+    print(f"Updated {wt_file}:")
+    print(json.dumps({topic: entry}, indent=2))
+
+
+def do_config(
+    script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, parsed, topic: str | None = None
+) -> None:
     """`config` verb: show or update yolo's host-side config, then exit.
 
     Operates on this project's ~/.claude-yolo/projects.json entry, or — with
-    --global — on ~/.yolo.json itself (a la `git config --global`). With config
+    --global — on ~/.yolo.json itself (a la `git config --global`), or — with a
+    TOPIC — on that worktree's ~/.claude-yolo/worktrees.json overlay. With config
     flags, persists exactly the explicitly-passed YOLO_KEYS flags into the
     target, per-key (other keys are left alone) — `yolo config` is the *only*
     writer of the project layer; a plain launch never touches the file, so it
@@ -1305,6 +1401,10 @@ def do_config(script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, par
         or parsed.remove_ports
         or parsed.unsets
     )
+
+    if topic:
+        _do_config_worktree(home, topic, explicit, editing, parsed)
+        return
 
     if parsed.init:
         if explicit or editing:
@@ -2454,6 +2554,14 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
     subprocess.run(remove, check=True)
     subprocess.run(["git", "worktree", "prune"])
 
+    # The worktree is gone, so its overlay config goes too (only finish removes it;
+    # a manual `git worktree remove` would leave a stale entry that the next `start`
+    # of the same topic overwrites).
+    wt_file = _worktrees_file(home)
+    worktrees = _read_worktrees_file(wt_file)
+    if worktrees.pop(_worktree_overlay_key(worktree), None) is not None:
+        _write_worktrees_file(wt_file, worktrees)
+
     # Best-effort note about where the (kept) branch stands relative to its upstream.
     upstream = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", f"{topic}@{{upstream}}"],
@@ -3074,7 +3182,7 @@ def main():
     # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
     if verb == "finish" and not topic:
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
-    if topic and verb not in ("start", "resume", "shell", "browse", "finish", "dir"):
+    if topic and verb not in ("start", "resume", "shell", "browse", "finish", "dir", "config"):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
@@ -3110,7 +3218,7 @@ def main():
             sys.exit(f"{flag} only applies to `config`.")
 
     if verb == "config":
-        do_config(script_argv, home, cwd, parsed)
+        do_config(script_argv, home, cwd, parsed, topic)
         return
 
     # `dockerfile` just prints a Dockerfile — no config, no container.
@@ -3127,8 +3235,14 @@ def main():
 
     # Every other verb gets the config defaults layered under the CLI flags
     # (so e.g. `list` honours a config-set `base`); re-parse so explicit flags win.
-    # Uses the real cwd, before any worktree retargeting below.
-    config_defaults, matched_project_key = load_yolo_config(cwd, home)
+    # Uses the real cwd, before any worktree retargeting below. `resume`/`shell` in
+    # worktree mode also layer that worktree's overlay on top of the project entry;
+    # `start` is excluded — it *creates* the overlay from the CLI flags (below), so
+    # it must not also consume a stale same-path entry left by a manual removal.
+    overlay_dir = None
+    if topic and verb in ("resume", "shell"):
+        overlay_dir, _, _ = _worktree_dir(topic, home)
+    config_defaults, matched_project_key = load_yolo_config(cwd, home, worktree_dir=overlay_dir)
     PARSER.set_defaults(**config_defaults)
     parsed = PARSER.parse_args(script_argv)
 
@@ -3267,6 +3381,16 @@ def main():
             if worktree.exists() or _branch_exists(topic):
                 sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
             cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
+            # Snapshot the explicit CLI config flags into the worktree overlay so a
+            # later `yolo resume {topic}` relaunches with the same config (and `yolo
+            # config {topic}` can edit it). Always written, even {} — symmetric with
+            # the worktree lifecycle (created here, removed by `finish`).
+            wt_overlay = _explicit_config_flags(script_argv)
+            _parse_yolo_dict(wt_overlay, f"worktrees.json [{topic}]")  # never persist unloadable
+            wt_file = _worktrees_file(home)
+            worktrees = _read_worktrees_file(wt_file)
+            worktrees[_worktree_overlay_key(cwd)] = wt_overlay
+            _write_worktrees_file(wt_file, worktrees)
         else:
             if not worktree.is_dir():
                 sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
