@@ -2583,12 +2583,14 @@ def launch_container(
     )
 
 
-def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
-    """`finish` verb: remove a worktree, keep its branch.
+def do_finish(topic: str, home: pathlib.Path, base: str, *, force: bool) -> None:
+    """`finish` verb: remove a worktree; delete its branch iff it's been merged.
 
     Guards against the real loss vectors — a running container holding the mount,
-    and uncommitted changes (unless --force) — then removes the worktree and prints
-    a reminder that the branch is kept (and whether it's been pushed).
+    and uncommitted changes (unless --force) — then removes the worktree. If the
+    branch is already reachable from `base` (merged or never diverged) there's
+    nothing left to preserve, so it's deleted; otherwise it's kept with a note
+    that it still needs to be merged or pushed (and where it stands vs. upstream).
     """
     _, _, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
@@ -2616,7 +2618,15 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
     if worktrees.pop(_worktree_overlay_key(worktree), None) is not None:
         _write_worktrees_file(wt_file, worktrees)
 
-    # Best-effort note about where the (kept) branch stands relative to its upstream.
+    # If the branch is already integrated into `base`, there's nothing left to
+    # preserve — delete it. (-d is the safe form: it refuses an unmerged branch,
+    # but _branch_merged has already confirmed it's reachable from base.)
+    if _branch_merged(topic, base):
+        subprocess.run(["git", "branch", "-d", topic], check=True)
+        print(f"Removed worktree for '{topic}'. Branch '{topic}' was merged; deleted it.")
+        return
+
+    # Not merged — keep the branch, with a note about where it stands vs. upstream.
     upstream = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", f"{topic}@{{upstream}}"],
         capture_output=True,
@@ -2631,7 +2641,10 @@ def do_finish(topic: str, home: pathlib.Path, *, force: bool) -> None:
         note = "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
     else:
         note = "local only — push it to open a PR"
-    print(f"Removed worktree for '{topic}'. Branch '{topic}' kept ({note}).")
+    print(
+        f"Removed worktree for '{topic}'. Branch '{topic}' still exists and needs "
+        f"to be merged or pushed ({note})."
+    )
 
 
 def _branch_merged(branch: str, base: str) -> bool:
@@ -3332,7 +3345,7 @@ def main():
         do_forget_token(parsed.config_dir)
         return
     if verb == "finish":
-        do_finish(topic, home, force=parsed.force)
+        do_finish(topic, home, parsed.base, force=parsed.force)
         return
     if verb == "shell":
         if topic:

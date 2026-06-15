@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **`yolo finish` now deletes a merged branch.** Previously `finish` always kept
+  the branch. It now checks whether the branch is reachable from `base` (the same
+  `--base`/`base` ref `start` and `list` use, default `HEAD`): if it's merged (or
+  never diverged), the branch is deleted along with the worktree, since there's
+  nothing left to preserve; if it's *not* merged, the branch is kept and `finish`
+  says it still exists and needs to be merged or pushed (with the same
+  pushed/unpushed note as before).
+
 - **`--tmux` mode now labels sessions clearly.** Each window's name is pinned
   (`automatic-rename`/`allow-rename` off) so the status bar keeps showing which
   container/topic it is instead of degrading to the foreground process name
@@ -13,6 +21,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   reflects the focused session+window. The title options are applied only when
   yolo *creates* the tmux session, so a pre-existing or personal
   (`--tmux-session`) session is never reconfigured.
+
 - **Per-worktree overlay config.** A worktree now carries its own config layer,
   the most specific persisted one (`~/.yolo.json` < `projects.json` entry <
   worktree overlay < CLI flags). `yolo start TOPIC [config flags]` snapshots the
@@ -26,6 +35,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   host-side in `~/.claude-yolo/worktrees.json`, keyed by worktree path — a sibling
   of the `worktrees/` dir, so (like `projects.json`) it's never mounted into a
   container and can safely grant host access.
+
 - **GitHub HTTPS→SSH rewrite is now conditioned on `--ssh-agent`.** Previously
   the image unconditionally rewrote `https://github.com/` remotes to
   `git@github.com:`, which — with `--ssh-agent` off (the default) — turned a
@@ -35,6 +45,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `--ssh-agent`, so without an agent plain HTTPS clones of public repos work,
   and with one authenticated fetch/push still routes over SSH token-free. It's
   no longer baked into the image, so a custom `--dockerfile` image gets it too.
+
 - **`yolo dir [TOPIC]`**: print a session's working directory and exit — the
   worktree's root with a `TOPIC` (erroring if that worktree doesn't exist), or
   the current directory without one. Only the path is written to stdout, so it
@@ -185,10 +196,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   globally/per-project with `tmux: true` in config. Window reuse: relaunching a
   session whose container is already running focuses its existing window instead
   of colliding on the container name.
+
 - **`yolo ps`**: list every running yolo container across *all* repos (the
   cross-repo counterpart to `list`) as a table (NAME/TOPIC/DIRECTORY/UP), read
   from the `yolo.*` container labels — needs no git repo. `--watch` redraws every
   2s.
+
 - **`ps --watch` is an interactive session picker inside tmux**: run from within
   tmux (TTY stdin + `$TMUX` set), `--watch` becomes a picker — j/k/arrows move,
   Enter `select-window`s to the chosen container's window, q/ESC quits — while the
@@ -205,6 +218,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   pointed rename error naming the one-call migration
   (`yolo config --unset append-system-prompt --add-prompt …`); inside the
   container the merged prompts still feed claude's own `--append-system-prompt`.
+
 - **`--ssh-agent` now defaults to off** (**breaking-ish**): forwarding the host
   ssh-agent lets Claude authenticate as you to *any* host your keys allow, not
   just GitHub — too much standing reach to grant a skip-permissions container by
@@ -212,16 +226,21 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   When off (the default), the built-in system prompt tells Claude it can't
   `git push`, as before. To restore the old behavior globally:
   `yolo config --global --ssh-agent`.
+
 - **`yolo config` is now a flexible editor**, à la `git config`:
+
   - **`--global`** shows or updates `~/.yolo.json` (the global layer) instead of
     the project's `projects.json` entry.
+
   - **`--unset KEY`** drops a key entirely so lower layers / built-in defaults
     apply. Any *present* key can be unset — even one yolo no longer recognizes —
     so a broken entry can be repaired without hand-editing the file.
+
   - **`--add-mount`/`--remove-mount`** and **`--add-prompt`/`--remove-prompt`**
     edit single elements of the list-valued keys, unlike `--mount`/`--prompt`,
     which replace the whole list. `--remove-mount` matches by path and doesn't
     require the directory to exist, so a stale mount is always removable.
+
   - Contradictory instructions in one call (set + `--unset` of the same key,
     `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`)
     are errors, not silently ordered.
@@ -248,21 +267,26 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   non-interactive launches with no cached token exit with guidance instead.
   To keep the old behavior: `echo '{"auth": "keychain"}' > ~/.yolo.json`, or
   per-project `yolo config --auth keychain`.
+
 - **Token registry**: tokens yolo mints are recorded (service name, config
   dir, mint timestamp) in host-side `~/.claude-yolo/tokens.json`. The mint
   timestamp matters: the claude.ai token list shows almost no per-token
   metadata, so it's the only practical handle for identifying a token there.
+
 - **`yolo tokens`**: lists the minted tokens with config dir, mint date,
   estimated expiry (mint + 1 year), and keychain status.
+
 - **`yolo forget-token`**: deletes the active config dir's token from the
   keychain and the registry. Named *forget* deliberately — there is no
   revocation API (no CLI command, no OAuth endpoint), so the token stays
   valid server-side until it expires; the only revocation path is manual at
   <https://claude.ai/settings/claude-code>, and the command says so.
+
 - **Expiry warning**: launches warn when the active token is within a week of
   its estimated 1-year expiry (read from the keychain entry's modification
   date, so it works for tokens minted before the registry existed), instead
   of letting it silently start 401ing inside containers.
+
 - README: new "Tokens & revocation" section documenting the manual-only
   revocation reality, with links to the relevant claude-code issues
   (#34198, #48373, #59378, #43801).
@@ -274,6 +298,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   repos — at their identical host paths, read-only by default. Each mount is
   also forwarded to claude as `--add-dir` so it shows up as a working
   directory. Mount lists concatenate across config layers and the CLI.
+
 - **Config is now host-side only**: defaults live in `~/.yolo.json` (global)
   and `~/.claude-yolo/projects.json` (per-project, keyed by repo root, longest
   matching key wins). An in-directory `.yolo.json` is **no longer read** — it
@@ -281,15 +306,18 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   to grant its next session new host access; a leftover file warns on every
   run. **Breaking**: repos relying on an in-directory `.yolo.json` (including
   one setting `config-dir`) must migrate it to one of the host-side layers.
+
 - **`config` verb replaces `init`** (**breaking**): `yolo config <flags>`
   persists exactly the explicitly-passed config flags into the project's
   `projects.json` entry, per-key; a bare `yolo config` prints the entry that
   currently applies without writing. There is no `.yolo.json` scaffold anymore.
+
 - **Rename detection**: every run prints a one-line config provenance note and
   warns about `projects.json` entries whose directory no longer exists (a
   moved/renamed project would otherwise silently fall back to global
   defaults). Opt-in `require-project-entry` upgrades that fallback to a hard
   error.
+
 - **Home-directory guard**: yolo now refuses to launch with the working
   directory at or above `$HOME` (which would mount the whole home dir —
   `~/.ssh`, yolo's own config — read-write into the container). Override per
@@ -306,8 +334,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 - yolo shells get a yolo-flagged PS1 (`yolo:<dir>$`), with long worktree paths
   shortened to a `<repo>/<topic>` label at prompt time.
+
 - Version bumps automated with bump-my-version (updates `pyproject.toml` and
   `uv.lock` together, commits, and tags `v{version}`).
+
 - README: document oauth-token scoping (per config dir) and keychain storage.
 
 ## v0.3.0 — 2026-06-09
@@ -323,18 +353,24 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   act on the current directory. The old `--worktree` flag is retired, and a
   bare `yolo` is now equivalent to `yolo start`. `list` shows a
   running/dirty/merged/unmerged status per worktree, judged against `--base`.
+
 - **Single `--auth` choice** (`keychain` [default] / `oauth-token` /
   `bedrock`) consolidating the auth flags; the config axes (`--config-dir`,
   `--claude-json`, `--ssh-agent`) compose orthogonally with it.
+
 - **`--auth oauth-token`**: authenticate containers with a long-lived token
   from `claude setup-token` (cached in the macOS keychain, forwarded as
   `CLAUDE_CODE_OAUTH_TOKEN`), making concurrent containers safe — unlike the
   rotating keychain-credential snapshots. Auto-minting is gated on an
   interactive tty.
+
 - Renamed the script to `yolo` and packaged it as an installable console
   command (`uv tool install` / `pipx`), plus an `install-from-git` wrapper.
+
 - `--rebuild-image` forces a no-cache Docker image rebuild.
+
 - A no-SSH note is added to Claude's system prompt under `--no-ssh-agent`.
+
 - README/docs cleanups, including OrbStack as a supported engine.
 
 ## v0.1.0 — 2026-06-07
@@ -344,18 +380,21 @@ Initial packaged version (starting from Migurski's gist):
 - Runs Claude Code with `--dangerously-skip-permissions` inside an ephemeral
   Ubuntu container, with the working directory bind-mounted at its identical
   host path and the in-container user matching the host UID.
+
 - Claude Code installed via the native installer; common tooling (ripgrep, fd,
   build-essential, vim, uv) baked into the image; in-container sandbox
   disabled (the container is the sandbox).
+
 - Credentials extracted from the macOS keychain (per `--config-dir` profile),
   with a host login pre-flight check.
+
 - SSH-agent forwarding via the Docker engine socket, GitHub HTTPS remotes
   rewritten to SSH so no token enters the container, and host git identity
   forwarded as env vars.
+
 - `--continue`/`--resume` for resuming sessions; `--worktree NAME` for
   parallel sessions (later superseded by the verbs).
+
 - Flag-based CLI with `.yolo.json` config defaults and an `init` scaffold
   (both later superseded); PEP 723 self-running script under uv; dev tooling
   (pytest suite, ruff).
-
-[Unreleased]: https://github.com/gigamonkey/claude-yolo/compare/v0.7.0...HEAD

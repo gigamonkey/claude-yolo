@@ -164,14 +164,28 @@ def test_worktree_launch_exports_ps1_rewrite_env(cy, run_cli, repo):
 # --- finish -----------------------------------------------------------------
 
 
-def test_finish_removes_worktree_keeps_branch(cy, run_cli, repo):
+def test_finish_keeps_unmerged_branch(cy, run_cli, repo):
     r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    # a commit on the topic branch makes it diverge from base (HEAD) -> unmerged
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    run_cli(["finish", "topic"], home=home, cwd=r)
+    assert not wt.exists()  # worktree gone
+    assert "topic" in git(r, "branch", "--list", "topic").stdout  # branch kept
+
+
+def test_finish_deletes_merged_branch(cy, run_cli, repo):
+    r, home = repo
+    # a fresh topic never diverged from base (HEAD), so it reads as merged
     run_cli(["start", "topic"], home=home, cwd=r)
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     assert wt.is_dir()
     run_cli(["finish", "topic"], home=home, cwd=r)
     assert not wt.exists()  # worktree gone
-    assert "topic" in git(r, "branch", "--list", "topic").stdout  # branch kept
+    assert "topic" not in git(r, "branch", "--list", "topic").stdout  # branch deleted
 
 
 def test_finish_refuses_dirty_without_force(cy, run_cli, repo):

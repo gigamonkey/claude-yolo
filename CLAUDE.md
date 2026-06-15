@@ -42,7 +42,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
 ./yolo.py resume fix-auth          # re-enter that worktree, continue the session
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
-./yolo.py finish fix-auth          # remove the worktree, keep the branch
+./yolo.py finish fix-auth          # remove the worktree; delete the branch if merged, else keep+warn
 ./yolo.py list                     # this repo's worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
@@ -658,10 +658,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   `claude-yolo/fix-auth`; with a single slug the label is just the topic. The
   exec'd case works because `docker exec` inherits the container's run-time env —
   so the env vars are stamped on *every* launch, not just `shell` ones.
-- **`finish TOPIC`** — `git worktree remove` the worktree, **keep the branch**.
-  Refuses if a container is running, or on uncommitted changes (unless `--force`).
-  Removes the worktree's `worktrees.json` overlay entry. Leaves transcripts (they
-  self-expire via `cleanupPeriodDays`). Prints whether the kept branch is pushed.
+- **`finish TOPIC`** — `git worktree remove` the worktree, then **delete the
+  branch iff it's merged**: if the branch is reachable from `base` (the same
+  `--base`/`base` ref as `start`/`list`, default `HEAD`; via `_branch_merged`) it's
+  deleted (`git branch -d`) since nothing remains to preserve, otherwise it's
+  **kept** with a message that it still exists and needs to be merged or pushed
+  (plus the pushed/unpushed note). Refuses if a container is running, or on
+  uncommitted changes (unless `--force`). Removes the worktree's `worktrees.json`
+  overlay entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`).
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
@@ -772,7 +776,7 @@ Implementation shape:
   set: `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
-  `start` and `list`), `--new` (resume, worktree-only), `--force` (finish),
+  `start`, `list`, and `finish`), `--new` (resume, worktree-only), `--force` (finish),
   `--resume`/`-r` (resume), `--watch` (ps), `--print`/`-n` (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
