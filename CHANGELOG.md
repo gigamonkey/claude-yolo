@@ -19,10 +19,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   explicit flags into it, so `yolo resume TOPIC` relaunches with the same config
   (mounts, ports, auth, …) without retyping. It's editable with `yolo config
   TOPIC` (same show/set/`--add-*`/`--unset` UX as the project entry) and removed
-  by `yolo finish TOPIC`. Stored host-side in `~/.claude-yolo/worktrees.json`,
-  keyed by worktree path — a sibling of the `worktrees/` dir, so (like
-  `projects.json`) it's never mounted into a container and can safely grant host
-  access.
+  by `yolo finish TOPIC`. **`yolo resume TOPIC [config flags]` also updates the
+  overlay** — since the container restarts, flags passed to resume both apply now
+  and persist (lists like `mounts`/`ports` accumulate, scalars override), so you
+  can add a mount or port to an existing worktree session on the fly. Stored
+  host-side in `~/.claude-yolo/worktrees.json`, keyed by worktree path — a sibling
+  of the `worktrees/` dir, so (like `projects.json`) it's never mounted into a
+  container and can safely grant host access.
 - **GitHub HTTPS→SSH rewrite is now conditioned on `--ssh-agent`.** Previously
   the image unconditionally rewrote `https://github.com/` remotes to
   `git@github.com:`, which — with `--ssh-agent` off (the default) — turned a

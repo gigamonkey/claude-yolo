@@ -110,6 +110,69 @@ def test_concat_keys_accumulate_project_overlay_cli(cy, run_cli, repo, flag_valu
         assert any(p.endswith(f":{cport}") for p in published)
 
 
+# --- resume updates the overlay ---------------------------------------------
+
+
+def test_resume_flags_update_overlay(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    run_cli(["start", "fix-auth", "--port", "8000"], home=home, cwd=r)
+    # resume restarts the container, so its config flags persist (lists accumulate,
+    # scalars override)
+    run_cli(
+        ["resume", "fix-auth", "--port", "9000", "--mount", str(ref), "--ssh-agent"],
+        home=home,
+        cwd=r,
+    )
+    assert overlay_for(cy, home, r, "fix-auth") == {
+        "ports": ["8000", "9000"],
+        "mounts": [str(ref)],
+        "ssh-agent": True,
+    }
+
+
+def test_resume_added_flags_persist_to_next_resume(cy, run_cli, repo, flag_values):
+    r, home = repo
+    run_cli(["start", "wt", "--port", "8000"], home=home, cwd=r)
+    run_cli(["resume", "wt", "--port", "9000"], home=home, cwd=r)  # add 9000
+    argv = run_cli(["resume", "wt"], home=home, cwd=r)  # plain resume, no flags
+    published = flag_values(argv, "-p")
+    assert any(p.endswith(":8000") for p in published)
+    assert any(p.endswith(":9000") for p in published)
+
+
+def test_resume_repeated_spec_does_not_duplicate(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "wt", "--port", "8000"], home=home, cwd=r)
+    run_cli(["resume", "wt", "--port", "8000"], home=home, cwd=r)  # same port again
+    assert overlay_for(cy, home, r, "wt")["ports"] == ["8000"]
+
+
+def test_resume_scalar_flag_overrides_overlay_persistently(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "wt", "--ssh-agent"], home=home, cwd=r)  # overlay ssh-agent true
+    run_cli(["resume", "wt", "--no-ssh-agent"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "wt")["ssh-agent"] is False
+
+
+def test_resume_without_flags_leaves_overlay_untouched(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "wt", "--port", "8000"], home=home, cwd=r)
+    run_cli(["resume", "wt"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "wt") == {"ports": ["8000"]}
+
+
+def test_shell_flags_do_not_persist_to_overlay(cy, run_cli, repo):
+    # shell is excluded — a fresh shell applies the flag for the run but must not
+    # silently rewrite the persisted config (and a shell into a running container
+    # couldn't change mounts at all).
+    r, home = repo
+    run_cli(["start", "wt", "--port", "8000"], home=home, cwd=r)
+    run_cli(["shell", "wt", "--port", "9000"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "wt") == {"ports": ["8000"]}
+
+
 def test_resume_provenance_names_worktree_overlay(cy, run_cli, repo, capsys):
     r, home = repo
     run_cli(["start", "fix-auth", "--port", "8000"], home=home, cwd=r)

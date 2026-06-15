@@ -965,6 +965,38 @@ def _worktree_overlay_key(worktree_path: pathlib.Path) -> str:
     return str(worktree_path.resolve())
 
 
+def _merge_worktree_overlay(
+    home: pathlib.Path, worktree_path: pathlib.Path, explicit: dict
+) -> None:
+    """Fold explicit CLI config flags into a worktree's overlay (resume updates it).
+
+    Since `resume` restarts the container, config flags passed to it both apply
+    now (load_yolo_config already layered them over the overlay for this run) and
+    stick for next time. The merge rule matches load_yolo_config's: the list keys
+    (prompts/mounts/ports) accumulate onto the stored list (exact-dup specs
+    dropped, so a repeat is a no-op), every other key overrides. A no-op when no
+    config flags were passed, so a plain `yolo resume TOPIC` never rewrites the
+    file. The result equals what this run already resolved, so persisted == live.
+    """
+    if not explicit:
+        return
+    wt_file = _worktrees_file(home)
+    worktrees = _read_worktrees_file(wt_file)
+    key = _worktree_overlay_key(worktree_path)
+    entry = dict(worktrees.get(key, {}))
+    for k, v in explicit.items():
+        if k.replace("-", "_") in _CONCAT_DESTS:
+            existing = entry.get(k, [])
+            if isinstance(existing, str):
+                existing = [existing]
+            entry[k] = existing + [item for item in v if item not in existing]
+        else:
+            entry[k] = v
+    _parse_yolo_dict(entry, f"worktrees.json [{worktree_path.name}]")  # never persist unloadable
+    worktrees[key] = entry
+    _write_worktrees_file(wt_file, worktrees)
+
+
 def _match_project_entry(projects: dict, start: pathlib.Path) -> tuple[str | None, dict | None]:
     """The (key, raw entry) whose directory contains `start`; longest key wins.
 
@@ -3417,6 +3449,12 @@ def main():
             if not worktree.is_dir():
                 sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
             cwd, common_git = worktree, _repo_paths()[0]
+            # `resume` restarts the container, so config flags passed to it update
+            # the overlay (add mounts/ports, change auth, …) and persist for next
+            # time. `shell` is excluded: shelling into a *running* container can't
+            # change its mounts, so persisting there would mislead.
+            if verb == "resume":
+                _merge_worktree_overlay(home, cwd, _explicit_config_flags(script_argv))
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
         session_name = topic

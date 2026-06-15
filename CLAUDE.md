@@ -77,6 +77,7 @@ written with the `config` verb (see the config section below; an in-directory
 ./yolo.py config --unset config-dir          # drop a key -> lower layers apply
 ./yolo.py config fix-auth                     # show worktree fix-auth's overlay
 ./yolo.py config fix-auth --add-port 8000     # edit that worktree's overlay
+./yolo.py resume fix-auth --mount ~/refdocs   # resume + persist the new mount to the overlay
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
@@ -470,9 +471,16 @@ win. Up to three layers, merged low→high, **all host-side only**:
    `_explicit_config_flags`, so a resume relaunches with the same config without
    retyping; an empty `{}` is still written, symmetric with the worktree
    lifecycle), `yolo config TOPIC` edits it, and `yolo finish TOPIC` removes the
-   entry. `start` *creates* the overlay but deliberately does **not** consume one
-   during the same run (so a stale same-path entry from a manual removal can't
-   leak in); `resume`/`shell` consume it. Helpers mirror the projects ones
+   entry. **`yolo resume TOPIC [config flags]` also updates the overlay** —
+   because resume restarts the container, flags passed to it both apply now and
+   persist (`_merge_worktree_overlay`, same concat/override rule as the loader:
+   `mounts`/`ports`/`prompts` accumulate onto the stored list with exact-dup
+   specs dropped, scalars override; the merged result equals what the run already
+   resolved, so persisted == live). `shell` is **excluded** from this — shelling
+   into a *running* container can't change its mounts, so persisting there would
+   mislead. `start` *creates* the overlay but deliberately does **not** consume
+   one during the same run (so a stale same-path entry from a manual removal
+   can't leak in); `resume`/`shell` consume it. Helpers mirror the projects ones
    (`_read_worktrees_file`/`_write_worktrees_file`/`_worktree_overlay_key`).
 
 **An in-directory `.yolo.json` is deliberately no longer read.** It lives inside
@@ -632,10 +640,12 @@ gracefully outside one — there's just no repo slug to label/find by).
   current directory.
 - **`resume [TOPIC]`** — continue the most recent session (`claude --continue`).
   *With `TOPIC`:* on that existing worktree (**errors if it doesn't exist** — use
-  `start`), layering in that worktree's overlay config; `--new` starts a fresh
-  named session there instead. *No `TOPIC`:* in the current directory. `-r [ID]`
-  (either mode) resumes a specific session / opens the picker. `--new` is
-  worktree-only (for the cwd, a fresh session *is* `start`).
+  `start`), layering in that worktree's overlay config; any **explicit config
+  flags** passed here update that overlay (add mounts/ports, change auth, …) and
+  persist for next time, since the container restarts anyway. `--new` starts a
+  fresh named session there instead. *No `TOPIC`:* in the current directory.
+  `-r [ID]` (either mode) resumes a specific session / opens the picker. `--new`
+  is worktree-only (for the cwd, a fresh session *is* `start`).
 - **`shell [TOPIC]`** — a bash shell. If a container is **running** (label match —
   by worktree for `TOPIC`, by cwd otherwise) → `docker exec -it <id> /bin/bash`;
   otherwise a fresh ephemeral container with `--entrypoint /bin/bash`. Either way
@@ -1019,9 +1029,11 @@ stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and
-concat-key accumulation, the provenance tail, `yolo config TOPIC` show/edit (and
-the `--global`/`--init`/missing-worktree errors), `finish` removing the entry,
-and a malformed-file error.
+concat-key accumulation, `resume` flags *updating* the overlay (lists accumulate
++ dedup, scalars override, no-flags no-op, persistence to the next resume) while
+`shell` doesn't, the provenance tail, `yolo config TOPIC` show/edit (and the
+`--global`/`--init`/missing-worktree errors), `finish` removing the entry, and a
+malformed-file error.
 `test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
 expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the `security`-wrapping helpers stubbed).
