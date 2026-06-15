@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **`--tmux` mode now labels sessions clearly.** Each window's name is pinned
+  (`automatic-rename`/`allow-rename` off) so the status bar keeps showing which
+  container/topic it is instead of degrading to the foreground process name
+  (node/python/bash), and the OS terminal title is turned on
+  (`set-titles` + `set-titles-string "yolo · #S · #W"`) so the window/tab title
+  reflects the focused session+window. The title options are applied only when
+  yolo *creates* the tmux session, so a pre-existing or personal
+  (`--tmux-session`) session is never reconfigured.
 - **Per-worktree overlay config.** A worktree now carries its own config layer,
   the most specific persisted one (`~/.yolo.json` < `projects.json` entry <
   worktree overlay < CLI flags). `yolo start TOPIC [config flags]` snapshots the

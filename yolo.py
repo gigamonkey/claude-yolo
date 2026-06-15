@@ -2149,6 +2149,19 @@ def _self_invocation() -> str:
     return str(pathlib.Path(found).absolute())
 
 
+def _pin_tmux_window_name(target: str) -> None:
+    """Lock a window's name so tmux can't relabel it out from under us.
+
+    `new-window -n` sets the name, but tmux's automatic-rename (and a program's
+    own title escape, governed by allow-rename) can later overwrite it with the
+    foreground process name — node, python, bash — so the status bar stops
+    showing which container/topic each window is. Turning both off for our
+    windows keeps the explicit name (and #W in the terminal title) stable.
+    """
+    _tmux("set-window-option", "-t", target, "automatic-rename", "off")
+    _tmux("set-window-option", "-t", target, "allow-rename", "off")
+
+
 def _tmux_window_command(run_cmd: list) -> str:
     """The shell command a tmux window runs: run_cmd, held open on failure.
 
@@ -2197,6 +2210,14 @@ def _ensure_tmux_session(session: str) -> None:
     res = _tmux("new-session", "-d", "-s", session, "-n", TMUX_DASHBOARD_WINDOW, dashboard)
     if res.returncode != 0:
         sys.exit(f"tmux new-session failed: {res.stderr.strip()}")
+    # Make the OS terminal title reflect the focused yolo window: tmux's set-titles
+    # is off by default, so the title would otherwise stay whatever it was before
+    # attaching (#W is the window name = the container/topic). Scoped to the session
+    # we just created — a pre-existing session (incl. a personal one aimed at via
+    # --tmux-session) is never reconfigured, since we return above when it exists.
+    _tmux("set-option", "-t", f"={session}", "set-titles", "on")
+    _tmux("set-option", "-t", f"={session}", "set-titles-string", "yolo · #S · #W")
+    _pin_tmux_window_name(f"={session}:{TMUX_DASHBOARD_WINDOW}")
 
 
 def _launch_in_tmux(
@@ -2242,6 +2263,7 @@ def _launch_in_tmux(
         if res.returncode != 0:
             sys.exit(f"tmux new-window failed: {res.stderr.strip()}")
         window_id = res.stdout.strip()
+        _pin_tmux_window_name(window_id)
 
     if os.environ.get("TMUX"):
         # Already a tmux client: re-point it at the session and window. (Window

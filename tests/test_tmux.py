@@ -172,6 +172,31 @@ def test_tmux_existing_session_not_recreated(cy, run_cli, tmux, dirs):
     assert len(tmux.named("new-window")) == 1
 
 
+def test_tmux_new_session_enables_terminal_title(cy, run_cli, tmux, dirs):
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    opts = tmux.named("set-option")
+    assert ["set-option", "-t", "=yolo", "set-titles", "on"] in opts
+    assert any(c[3] == "set-titles-string" and "#W" in c[4] for c in opts)
+
+
+def test_tmux_existing_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
+    # a pre-existing session (e.g. a personal one via --tmux-session) is left alone
+    home, work = dirs
+    tmux.has_session = True
+    run_cli(["--tmux"], home=home, cwd=work)
+    assert tmux.named("set-option") == []
+
+
+def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):
+    # automatic-rename/allow-rename off so the container name stays in the bar
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    pinned = [c for c in tmux.named("set-window-option") if c[-2] == "automatic-rename"]
+    assert ["set-window-option", "-t", "@10", "automatic-rename", "off"] in pinned
+    assert all(c[-1] == "off" for c in tmux.named("set-window-option"))
+
+
 def test_tmux_session_name_flag(cy, run_cli, tmux, dirs):
     home, work = dirs
     run_cli(["--tmux", "--tmux-session", "hacking"], home=home, cwd=work)
