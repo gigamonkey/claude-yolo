@@ -1832,7 +1832,9 @@ PARSER.add_argument(
 PARSER.add_argument(
     "--force",
     action="store_true",
-    help="For `finish`: remove the worktree even with uncommitted changes.",
+    help="For `finish`: remove the worktree even with uncommitted changes. For "
+    "`rebase`: rebase even when a container is running and its session isn't "
+    "confirmed idle.",
 )
 PARSER.add_argument(
     "--config-dir",
@@ -2816,7 +2818,14 @@ def _branch_merged(branch: str, base: str) -> bool:
     )
 
 
-def do_rebase(topic: str, home: pathlib.Path, base: str) -> None:
+def do_rebase(
+    topic: str,
+    home: pathlib.Path,
+    base: str,
+    *,
+    config_dir: str | None,
+    force: bool,
+) -> None:
     """`rebase` verb: rebase a worktree's branch onto `base` (e.g. main's new work).
 
     Resolves `base` (default HEAD) to a commit in the *main* checkout — run from
@@ -2825,18 +2834,44 @@ def do_rebase(topic: str, home: pathlib.Path, base: str) -> None:
     commits landed on the base since the worktree branched are replayed under the
     worktree's work, exactly like `git rebase main` from the branch.
 
-    Guards against a running container (which holds the branch checked out and
-    whose mount git would be rewriting underneath) and against uncommitted changes
-    (git rebase refuses a dirty tree anyway, but the message is clearer). A rebase
-    that hits conflicts is left in-progress in the worktree for the user to resolve
-    (`git rebase --continue`) or abort (`git rebase --abort`).
+    Unlike `finish` (which removes the worktree and so can't tolerate a live
+    container at all), rebase only rewrites commits in a worktree that stays put,
+    so a running container isn't a hard blocker — only an *active* session is. So
+    when a container is running, we consult the session-activity state file the
+    hooks write (the same one `ps` reads): a `waiting` session (idle at a prompt)
+    is rebased through; a `working` one — or an unknown state (`-`: a `yolo shell`,
+    which has no hooks, or a session that hasn't taken a turn yet) — is refused
+    unless `--force`. The only residual race (the user prompting the session in
+    the instant between our check and the rebase) needs them driving the same
+    session from two places at once, so in practice it's a non-issue.
+
+    A dirty worktree is always refused (no `--force` bypass): `git rebase` needs a
+    clean tree regardless. A rebase that hits conflicts is left in-progress in the
+    worktree for the user to resolve (`git rebase --continue`) or abort.
     """
     _, _, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
         sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
     if running_container_for(slug, topic):
-        sys.exit(f"a container is running for '{topic}'; exit it first.")
+        state_dir = pathlib.Path(config_dir) if config_dir else home / ".claude"
+        state_file = state_dir / _STATUS_DIR_NAME / f"{_cwd_slug(worktree)}.state"
+        state = _read_session_state(state_file, time.time())
+        activity = state.split()[0]  # "waiting" | "working" | "-"
+        if activity == "waiting":
+            print(f"Session for '{topic}' is idle ({state}); rebasing.")
+        elif force:
+            print(f"--force: rebasing '{topic}' despite a running container ({state}).")
+        else:
+            detail = (
+                f"its session is active ({state})"
+                if activity == "working"
+                else f"can't confirm its session is idle (state: {state})"
+            )
+            sys.exit(
+                f"a container is running for '{topic}' and {detail}; wait for it "
+                "to finish or re-run with --force."
+            )
     dirty = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
         capture_output=True,
@@ -3469,8 +3504,8 @@ def main():
         sys.exit("--resume/-r only applies to `resume`.")
     if parsed.new and parsed.resume is not None:
         sys.exit("--new can't be combined with --resume/-r.")
-    if parsed.force and verb != "finish":
-        sys.exit("--force only applies to `finish`.")
+    if parsed.force and verb not in ("finish", "rebase"):
+        sys.exit("--force only applies to `finish` and `rebase`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
     if parsed.print_url and verb != "browse":
@@ -3562,7 +3597,7 @@ def main():
         )
         return
     if verb == "rebase":
-        do_rebase(topic, home, parsed.base)
+        do_rebase(topic, home, parsed.base, config_dir=parsed.config_dir, force=parsed.force)
         return
     if verb == "shell":
         if topic:

@@ -710,13 +710,26 @@ gracefully outside one — there's just no repo slug to label/find by).
   branch — the same reason `_branch_merged` runs from the main repo), then runs
   `git -C <worktree> rebase <commit>`, streaming git's output. So commits landed
   on the base since the worktree branched are replayed under its work, exactly
-  like `git rebase main` from the branch. Like `finish` it requires a `TOPIC` and
-  refuses if a container is running; it also refuses on **any** uncommitted change
-  (no `--force` — `git rebase` needs a clean tree regardless). A rebase that hits
+  like `git rebase main` from the branch. Requires a `TOPIC`. A rebase that hits
   conflicts exits nonzero with a pointer to resolve (`git rebase --continue`) or
   abort (`git rebase --abort`) **in the worktree dir**, leaving it in-progress
   there. A terminal verb — no container; the `worktrees.json` overlay is
-  untouched (the worktree lives on).
+  untouched (the worktree lives on). **Running-container handling is
+  session-aware, unlike `finish`'s flat refusal:** `finish` removes the worktree
+  so it can't tolerate a live container at all, but rebase only rewrites commits
+  in a worktree that stays put — so only an *active* session is a real hazard. A
+  running container is checked against the **session-activity state file the hooks
+  write** (`<config-dir>/.yolo-status/<cwd-slug>.state`, read by
+  `_read_session_state` — the same file `ps`'s STATE column uses): a `waiting`
+  session (idle at a prompt) is rebased **through**; a `working` one — or an
+  unknown state (`-`: a `yolo shell`, which runs no hooks, or a session that hasn't
+  taken a turn yet) — is **refused unless `--force`**. The one residual race (the
+  user prompting the session in the gap between the check and the rebase) needs
+  them driving the same session from two places at once, so it's a non-issue in
+  practice. The **dirty-tree refusal is independent and absolute** — no `--force`
+  bypass, since `git rebase` needs a clean tree regardless (this is why `--force`
+  here gates *only* the running-container check, not the dirty check as it does in
+  `finish`).
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
@@ -828,9 +841,11 @@ Implementation shape:
   set: `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
-  `start`, `list`, and `finish`), `--finish-action`/`--finish-remote`
+  `start`, `list`, `finish`, and `rebase`), `--finish-action`/`--finish-remote`
   (config-backed like `base`, so ungated; consumed by `finish`), `--new`
-  (resume, worktree-only), `--force` (finish),
+  (resume, worktree-only), `--force` (`finish` and `rebase` — skips the
+  uncommitted-changes guard for the former, the not-confirmed-idle running
+  container for the latter),
   `--resume`/`-r` (resume), `--watch` (ps), `--print`/`-n` (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
@@ -1097,8 +1112,10 @@ stubbing only `running_container_for` (docker) plus the `run_cli` side effects �
 including the four `--finish-action` behaviors (`keep`, `merge` and its
 conflict-abort/keep path, and `push` to a `--finish-remote` bare repo) alongside
 the default `delete-if-merged`, and the `rebase` verb (replaying a branch onto
-the base's new commits, honouring `--base`, and the required-topic/
-missing-worktree/dirty-tree/running-container refusals).
+the base's new commits, honouring `--base`; the required-topic/missing-worktree/
+dirty-tree refusals; and the session-aware running-container handling — a
+`waiting` session rebases through, `working`/unknown refuse, and `--force`
+overrides — driven by a stamped `.yolo-status` state file).
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and

@@ -16,9 +16,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   branch's commits on top of work that landed on the base since it branched —
   i.e. `git rebase main` from the branch. `base` is resolved to a commit in the
   main checkout first (so a `HEAD` base means the main repo's tip, not the
-  worktree's own branch). Like `finish` it requires a `TOPIC` and refuses when a
-  container is running; it also refuses on uncommitted changes (`git rebase`
-  needs a clean tree). A rebase that hits conflicts is left in-progress in the
+  worktree's own branch). It refuses on uncommitted changes (`git rebase` needs a
+  clean tree). A *running* container is handled by session activity rather than
+  refused outright (unlike `finish`, which removes the worktree): the hooks'
+  `.yolo-status` state file is consulted, and an idle (`waiting`) session is
+  rebased through, while an active (`working`) or unknown-state one is refused
+  unless `--force`. A rebase that hits conflicts is left in-progress in the
   worktree to `git rebase --continue` or `git rebase --abort`.
 
 - **`yolo finish` branch handling is now configurable** via `--finish-action`

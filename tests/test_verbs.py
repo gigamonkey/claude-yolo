@@ -6,6 +6,7 @@ worktree machinery against a throwaway repo, and stub only `running_container_fo
 """
 
 import subprocess
+import time
 
 import pytest
 
@@ -315,12 +316,60 @@ def test_rebase_refuses_dirty_worktree(cy, run_cli, repo):
         run_cli(["rebase", "topic"], home=home, cwd=r)
 
 
-def test_rebase_refuses_when_container_running(cy, run_cli, repo, monkeypatch):
+def _write_session_state(cy, home, worktree, activity):
+    """Stamp a hook-style activity state file for `worktree` (default config dir)."""
+    sd = home / ".claude" / cy._STATUS_DIR_NAME
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / f"{cy._cwd_slug(worktree)}.state").write_text(f"{activity} {int(time.time())}")
+
+
+def test_rebase_refuses_when_container_running_and_state_unknown(cy, run_cli, repo, monkeypatch):
+    # A running container with no state file (e.g. a `yolo shell`, or a session
+    # that hasn't taken a turn): state is "-", so refuse without --force.
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     with pytest.raises(SystemExit):
         run_cli(["rebase", "topic"], home=home, cwd=r)
+
+
+def _rebase_setup_with_main_commit(cy, run_cli, repo):
+    """start topic, commit on it, commit on main; return (r, home, worktree)."""
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    (r / "main.txt").write_text("mainwork")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main work")
+    return r, home, wt
+
+
+def test_rebase_proceeds_when_session_waiting(cy, run_cli, repo, monkeypatch):
+    r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "waiting")
+    run_cli(["rebase", "topic"], home=home, cwd=r)
+    assert (wt / "main.txt").exists()  # rebased through an idle running container
+
+
+def test_rebase_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
+    r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "working")
+    with pytest.raises(SystemExit):
+        run_cli(["rebase", "topic"], home=home, cwd=r)
+    assert not (wt / "main.txt").exists()  # not rebased
+
+
+def test_rebase_force_overrides_active_session(cy, run_cli, repo, monkeypatch):
+    r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "working")
+    run_cli(["rebase", "topic", "--force"], home=home, cwd=r)
+    assert (wt / "main.txt").exists()  # --force rebased despite a working session
 
 
 def test_rebase_honours_base(cy, run_cli, repo):

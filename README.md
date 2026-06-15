@@ -214,10 +214,12 @@ Verb details:
   `HEAD`, the same ref `start` branches off and `finish`/`list` judge against),
   replaying the branch's commits on top of work that landed on the base since it
   branched — exactly like running `git rebase main` from the branch. It refuses
-  if a container is still running or if the worktree has uncommitted changes
-  (`git rebase` needs a clean tree); a rebase that hits conflicts is left
-  in-progress in the worktree for you to `git rebase --continue` or
-  `git rebase --abort`.
+  if the worktree has uncommitted changes (`git rebase` needs a clean tree). A
+  *running* container is handled by session activity, not refused outright: if
+  the session is idle (`waiting`, per `yolo ps`) the rebase goes through; if it's
+  actively `working` (or can't be confirmed idle) it's refused unless you pass
+  `--force`. A rebase that hits conflicts is left in-progress in the worktree for
+  you to `git rebase --continue` or `git rebase --abort`.
 
 - **`finish TOPIC`** refuses if a container is still running or if there are
   uncommitted changes (override with `--force`). What it does with the branch
