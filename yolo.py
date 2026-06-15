@@ -1676,6 +1676,7 @@ PARSER.add_argument(
         "shell",
         "browse",
         "finish",
+        "rebase",
         "list",
         "ps",
         "dir",
@@ -1690,7 +1691,9 @@ PARSER.add_argument(
     "fresh session, resume the most recent one, or open a shell). 'browse' opens "
     "the host browser at the running session's forwarded port (see --port/`ports` "
     "config). 'finish' removes a "
-    "worktree and requires a TOPIC. 'list' shows this repo's worktrees; 'ps' shows "
+    "worktree and requires a TOPIC; 'rebase' rebases a worktree's branch onto "
+    "--base (default HEAD), replaying it on top of commits landed on the base "
+    "since it branched (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
     "all running yolo containers across repos (see --watch); 'dir' prints a "
     "session's directory (a worktree's root with a TOPIC, else the current "
     "directory) for `cd $(yolo dir TOPIC)`; 'config' "
@@ -1708,15 +1711,17 @@ PARSER.add_argument(
 PARSER.add_argument(
     "topic",
     nargs="?",
-    help="Worktree/branch name. Required for finish; optional for start/resume/shell "
-    "(omit it to act on the current directory).",
+    help="Worktree/branch name. Required for finish and rebase; optional for "
+    "start/resume/shell (omit it to act on the current directory).",
 )
 PARSER.add_argument(
     "--base",
     metavar="REF",
     default="HEAD",
-    help="For `start`: git ref the new branch is created from (default: HEAD). "
-    'Also settable as `base` in .yolo.json (e.g. "origin/main").',
+    help="For `start`: git ref the new branch is created from; for `rebase`: the "
+    "ref a worktree's branch is rebased onto; for `list`/`finish`: the ref a branch "
+    "is judged merged against (default: HEAD). Also settable as `base` in config "
+    '(e.g. "origin/main").',
 )
 PARSER.add_argument(
     "--finish-action",
@@ -2806,6 +2811,60 @@ def _branch_merged(branch: str, base: str) -> bool:
     )
 
 
+def do_rebase(topic: str, home: pathlib.Path, base: str) -> None:
+    """`rebase` verb: rebase a worktree's branch onto `base` (e.g. main's new work).
+
+    Resolves `base` (default HEAD) to a commit in the *main* checkout — run from
+    the current dir, so HEAD means the main repo's tip, not the worktree's own
+    branch — then runs `git rebase` inside the worktree onto that commit. So
+    commits landed on the base since the worktree branched are replayed under the
+    worktree's work, exactly like `git rebase main` from the branch.
+
+    Guards against a running container (which holds the branch checked out and
+    whose mount git would be rewriting underneath) and against uncommitted changes
+    (git rebase refuses a dirty tree anyway, but the message is clearer). A rebase
+    that hits conflicts is left in-progress in the worktree for the user to resolve
+    (`git rebase --continue`) or abort (`git rebase --abort`).
+    """
+    _, _, slug = _repo_paths()
+    worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    if not worktree.is_dir():
+        sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+    if running_container_for(slug, topic):
+        sys.exit(f"a container is running for '{topic}'; exit it first.")
+    dirty = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if dirty:
+        sys.exit(
+            f"worktree '{topic}' has uncommitted changes; commit or stash them "
+            "first (git rebase requires a clean tree)."
+        )
+
+    # Resolve `base` to a concrete commit in the main checkout (cwd), so a ref
+    # like HEAD means the main repo's tip rather than the worktree's own branch.
+    rev = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", base],
+        capture_output=True,
+        text=True,
+    )
+    target = rev.stdout.strip()
+    if rev.returncode != 0 or not target:
+        sys.exit(f"can't resolve base ref '{base}'.")
+
+    # Stream git's own output (no capture) so the user sees the rebase progress.
+    rebase = subprocess.run(["git", "-C", str(worktree), "rebase", target])
+    if rebase.returncode != 0:
+        sys.exit(
+            f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
+            f"{worktree} and run `git rebase --continue`, or `git rebase --abort` "
+            "there to back out."
+        )
+    print(f"Rebased '{topic}' onto '{base}'.")
+
+
 def _format_table(headers: tuple, rows: list) -> list[str]:
     """Rows as column-aligned table lines (no trailing whitespace)."""
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
@@ -3381,7 +3440,18 @@ def main():
     # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
     if verb == "finish" and not topic:
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
-    if topic and verb not in ("start", "resume", "shell", "browse", "finish", "dir", "config"):
+    if verb == "rebase" and not topic:
+        sys.exit("`rebase` needs a topic name, e.g. `yolo rebase my-topic`.")
+    if topic and verb not in (
+        "start",
+        "resume",
+        "shell",
+        "browse",
+        "finish",
+        "rebase",
+        "dir",
+        "config",
+    ):
         sys.exit(f"unexpected argument: {topic!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
@@ -3485,6 +3555,9 @@ def main():
             action=parsed.finish_action,
             remote=parsed.finish_remote,
         )
+        return
+    if verb == "rebase":
+        do_rebase(topic, home, parsed.base)
         return
     if verb == "shell":
         if topic:

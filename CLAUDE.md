@@ -45,6 +45,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py finish fix-auth          # remove the worktree; delete the branch if merged, else keep+warn
 ./yolo.py finish fix-auth --finish-action merge    # ...merge the branch into HEAD, then delete it
 ./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
+./yolo.py rebase fix-auth          # rebase the worktree's branch onto --base (default HEAD)
 ./yolo.py list                     # this repo's worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
@@ -58,7 +59,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`list`/`ps`/`dir`/
+(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`rebase`/`list`/`ps`/`dir`/
 `dockerfile`/`setup-token`/`tokens`/`forget-token`) and its `TOPIC`; see [Workflow
 verbs](#workflow-verbs).
 
@@ -702,6 +703,20 @@ gracefully outside one — there's just no repo slug to label/find by).
   All actions still refuse if a container is running, or on uncommitted changes
   (unless `--force`), and all remove the worktree's `worktrees.json` overlay
   entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`).
+- **`rebase TOPIC`** (`do_rebase`) — rebase a worktree's branch onto `base` (the
+  same `--base`/`base` ref as `start`/`list`/`finish`, default `HEAD`). Resolves
+  `base` to a concrete commit **in the main checkout** first (`git rev-parse` from
+  the cwd, so a `HEAD` base means the main repo's tip, not the worktree's own
+  branch — the same reason `_branch_merged` runs from the main repo), then runs
+  `git -C <worktree> rebase <commit>`, streaming git's output. So commits landed
+  on the base since the worktree branched are replayed under its work, exactly
+  like `git rebase main` from the branch. Like `finish` it requires a `TOPIC` and
+  refuses if a container is running; it also refuses on **any** uncommitted change
+  (no `--force` — `git rebase` needs a clean tree regardless). A rebase that hits
+  conflicts exits nonzero with a pointer to resolve (`git rebase --continue`) or
+  abort (`git rebase --abort`) **in the worktree dir**, leaving it in-progress
+  there. A terminal verb — no container; the `worktrees.json` overlay is
+  untouched (the worktree lives on).
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
@@ -760,7 +775,8 @@ Implementation shape:
   path, are dispatched right after `config` — before that re-parse — since they
   need no config at all; `dir` in particular keeps its stdout free of the config
   provenance note). The other
-  terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `setup-token`,
+  terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `rebase`,
+  `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
   right per-dir service name, while `forget-token` is dispatched *before* the
@@ -1073,7 +1089,9 @@ tests locate the built image in the assembled argv by its
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects —
 including the four `--finish-action` behaviors (`keep`, `merge` and its
 conflict-abort/keep path, and `push` to a `--finish-remote` bare repo) alongside
-the default `delete-if-merged`.
+the default `delete-if-merged`, and the `rebase` verb (replaying a branch onto
+the base's new commits, honouring `--base`, and the required-topic/
+missing-worktree/dirty-tree/running-container refusals).
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and

@@ -269,6 +269,79 @@ def test_finish_refuses_when_container_running(cy, run_cli, repo, monkeypatch):
         run_cli(["finish", "topic"], home=home, cwd=r)
 
 
+# --- rebase -----------------------------------------------------------------
+
+
+def test_rebase_replays_branch_onto_base(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    # a commit on the topic branch
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    topic_before = git(wt, "rev-parse", "HEAD").stdout.strip()
+    # a commit lands on main after the worktree branched
+    (r / "main.txt").write_text("mainwork")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main work")
+    main_head = git(r, "rev-parse", "HEAD").stdout.strip()
+    run_cli(["rebase", "topic"], home=home, cwd=r)
+    # the topic now sits on top of main's new commit (parent == main HEAD) and
+    # was rewritten (a new commit hash)
+    assert git(wt, "rev-parse", "HEAD~1").stdout.strip() == main_head
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() != topic_before
+    assert (wt / "main.txt").exists()  # main's work is now in the worktree
+
+
+def test_rebase_requires_topic(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["rebase"], home=home, cwd=r)
+
+
+def test_rebase_errors_without_worktree(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["rebase", "ghost"], home=home, cwd=r)
+
+
+def test_rebase_refuses_dirty_worktree(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "scratch.txt").write_text("uncommitted")
+    with pytest.raises(SystemExit):
+        run_cli(["rebase", "topic"], home=home, cwd=r)
+
+
+def test_rebase_refuses_when_container_running(cy, run_cli, repo, monkeypatch):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    with pytest.raises(SystemExit):
+        run_cli(["rebase", "topic"], home=home, cwd=r)
+
+
+def test_rebase_honours_base(cy, run_cli, repo):
+    r, home = repo
+    # branch topic off the first commit, then add a second commit on main
+    first = git(r, "rev-parse", "HEAD").stdout.strip()
+    (r / "second.txt").write_text("two")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "second")
+    run_cli(["start", "topic", "--base", first], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    # rebase onto the first commit (an explicit --base): a no-op replay, the
+    # branch stays based on `first`, not main's second commit
+    run_cli(["rebase", "topic", "--base", first], home=home, cwd=r)
+    assert git(wt, "rev-parse", "HEAD~1").stdout.strip() == first
+    assert not (wt / "second.txt").exists()
+
+
 # --- list -------------------------------------------------------------------
 
 

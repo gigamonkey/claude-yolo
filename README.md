@@ -192,6 +192,7 @@ repo, i.e. the worktrees started via `yolo start <name>`.
 yolo start something                    # new worktree+branch, launch a session
 yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
+yolo rebase something                   # rebase its branch onto --base (e.g. main's new commits)
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
 yolo finish something --finish-action push    # ...or push it to a remote, keep it locally
@@ -208,6 +209,15 @@ Verb details:
 
 - **`resume TOPIC`** continues that worktree's most recent session (`-r` for a
   specific one); `--new` starts a fresh named session there instead.
+
+- **`rebase TOPIC`** rebases the worktree's branch onto `--base` (default
+  `HEAD`, the same ref `start` branches off and `finish`/`list` judge against),
+  replaying the branch's commits on top of work that landed on the base since it
+  branched — exactly like running `git rebase main` from the branch. It refuses
+  if a container is still running or if the worktree has uncommitted changes
+  (`git rebase` needs a clean tree); a rebase that hits conflicts is left
+  in-progress in the worktree for you to `git rebase --continue` or
+  `git rebase --abort`.
 
 - **`finish TOPIC`** refuses if a container is still running or if there are
   uncommitted changes (override with `--force`). What it does with the branch
