@@ -119,7 +119,7 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
 1. **Builds the image** (`build_docker_image`) from the inline
    `DEFAULT_DOCKERFILE` (a plain literal Dockerfile, no templating) written to a
    temp dir — or, when `--dockerfile`/the `dockerfile` config key is set, from
-   **that** file instead. Ubuntu 24.04 + nodejs/npm + a few
+   **that** file instead. Ubuntu 26.04 + nodejs/npm + a few
    baked-in amenities used across most projects (`ripgrep`, `fd-find` symlinked to
    `fd`, `build-essential`, `vim`, and `uv`/`uvx` copied from `ghcr.io/astral-sh/uv`) +
    Claude Code installed via the **native installer**

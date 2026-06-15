@@ -46,12 +46,13 @@ AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 # literal Dockerfile — no Python templating — so a --dockerfile override is the same kind
 # of thing: Dockerfile bytes built with the same HOST_UID build-arg.
 DEFAULT_DOCKERFILE = """\
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # Baked-in amenities used across most projects, so Claude doesn't re-install them in
 # each ephemeral container. fd-find installs its binary as `fdfind`; symlink it to `fd`.
-# Ubuntu 24.04's own `nodejs` package is Node 18; install Node 24 from NodeSource instead
-# (its setup script adds the apt repo and pulls in npm, so no separate npm package).
+# Ubuntu's own `nodejs` package lags; install Node 24 from NodeSource instead (its setup
+# script adds a codename-independent `nodistro` apt repo and pulls in npm, so no separate
+# npm package).
 RUN apt-get update && apt-get install -y sudo jq git curl ripgrep fd-find build-essential vim && ln -s /usr/bin/fdfind /usr/local/bin/fd
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 # uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)

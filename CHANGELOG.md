@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **Base image bumped to Ubuntu 26.04 LTS** (from 24.04). Almost nothing in the
+  built-in Dockerfile depends on the distro version — Node comes from NodeSource
+  (a codename-independent `nodistro` repo), `uv`/`uvx` from the astral image, and
+  Claude from the native installer — so the bump just keeps the base current with
+  a longer support window for tools Claude installs on demand. The
+  content-addressed image tag changes with the Dockerfile text, so the new base
+  builds as a distinct image automatically.
+
 - **`--dockerfile` relative paths now resolve against the session's working
   directory.** A relative path — the common per-project case, a Dockerfile
   committed in the repo — is now resolved against the worktree dir in worktree

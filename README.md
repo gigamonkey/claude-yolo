@@ -831,7 +831,7 @@ When you run the script, it does five things:
 ### 1. Builds the Docker image
 
 It writes the built-in Dockerfile to a temp directory and builds it. The image is
-Ubuntu 24.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
+Ubuntu 26.04 with `nodejs`, `npm`, `git`, `curl`, `jq`, and a handful of baked-in
 amenities used across most projects — `ripgrep`, `fd` (the `fd-find` package,
 symlinked to `fd`), `build-essential`, and `uv`/`uvx` — plus Claude Code installed
 via the **native installer** (`curl https://claude.ai/install.sh | bash`, landing
