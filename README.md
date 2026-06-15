@@ -182,16 +182,19 @@ flagged so you know where you are (`yolo:<dir>$`).
 ### Worktree mode
 
 For worktree mode use the same verbs followed by a worktree name. The `finish`
-command requires a worktree name and cleans up the worktree for you. The branch
-will still exist, however, until you `git branch -d` it. And the `list` command,
-run in a directory, shows the worktrees associated with that repo, i.e. the
-worktrees started via `yolo start <name>`.
+command requires a worktree name and cleans up the worktree for you. What
+happens to the branch is controlled by [`finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
+— by default it's deleted if it's already merged and kept otherwise. And the
+`list` command, run in a directory, shows the worktrees associated with that
+repo, i.e. the worktrees started via `yolo start <name>`.
 
 ```bash
 yolo start something                    # new worktree+branch, launch a session
 yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
-yolo finish something                   # remove the worktree, keep the branch
+yolo finish something                   # remove the worktree; delete the branch if merged
+yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
+yolo finish something --finish-action push    # ...or push it to a remote, keep it locally
 yolo list                               # show this repo's worktrees
 yolo dir something                      # print its directory: cd "$(yolo dir something)"
 ```
@@ -207,7 +210,10 @@ Verb details:
   specific one); `--new` starts a fresh named session there instead.
 
 - **`finish TOPIC`** refuses if a container is still running or if there are
-  uncommitted changes (override with `--force`).
+  uncommitted changes (override with `--force`). What it does with the branch
+  after removing the worktree is set by
+  [`--finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
+  (default: delete it if merged, else keep it).
 
 - **`list`** shows TOPIC / BRANCH / STATUS / DIRECTORY, where STATUS is
   `running`, `dirty` (uncommitted changes), or — when idle and clean —
@@ -693,6 +699,32 @@ The git ref worktree branches are created from (`yolo start TOPIC`) and judged
 `merged`/`unmerged` against (`yolo list`). Set it to e.g. `"origin/main"` if
 your worktrees should branch from the remote rather than whatever the main
 checkout is on.
+
+### `finish-action` (`--finish-action MODE`, default `delete-if-merged`)
+
+What `yolo finish TOPIC` does with the branch after removing the worktree. Four
+modes:
+
+- **`delete-if-merged`** (default) — delete the branch if it's already reachable
+  from [`base`](#base---base-ref-default-head) (merged or never diverged), since
+  nothing remains to preserve; otherwise keep it, with a note that it still needs
+  to be merged or pushed.
+
+- **`merge`** — merge the branch into the current checkout (the `HEAD` of the
+  main repo, where `finish` runs — not `base`, which may be a remote ref you
+  can't merge into), then delete it. If the merge fails (conflicts, a dirty tree,
+  unrelated histories) it's aborted and the branch is kept — the worktree is gone
+  but the commits live on in the branch.
+
+- **`push`** — push the branch to a remote and keep it locally. The remote is the
+  **`finish-remote`** key (`--finish-remote NAME`, default `origin`). A push
+  failure keeps the branch locally too.
+
+- **`keep`** — leave the branch alone (just clean up the worktree).
+
+Every mode still refuses on a running container or uncommitted changes (unless
+`--force`). Set it in config to make e.g. `merge` your default `finish`, or pass
+`--finish-action` for a one-off.
 
 ### `prompts` (`--prompt` / `-p`, repeatable)
 
