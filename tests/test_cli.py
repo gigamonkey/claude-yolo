@@ -489,6 +489,15 @@ def test_docker_passthrough_after_double_dash(cy, run_cli, dirs):
     assert argv[img - 2 : img] == ["--network", "host"]
 
 
+# --- YOLO_SESSION marker ----------------------------------------------------
+
+
+def test_every_launch_sets_yolo_session_marker(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    assert "YOLO_SESSION=1" in flag_values(argv, "-e")
+
+
 # --- PS1 (yolo shell prompt) ------------------------------------------------
 
 

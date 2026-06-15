@@ -2459,6 +2459,11 @@ def launch_container(
         # Hostname set to working dir basename so Claude Code status line shows project name without git
         "--hostname",
         cwd.name,
+        # A deterministic marker that this is a yolo container, so anything inside
+        # (Claude, scripts, hooks) can tell — e.g. to commit freely on the current
+        # branch, since the worktree/branch is already the unit of isolation.
+        "-e",
+        "YOLO_SESSION=1",
         # A yolo-flagged bash prompt for `yolo shell` (fresh or exec'd into this container)
         *_ps1_env_args(cwd, worktree_name),
         # Forward the host git identity so commits made in the container are attributed correctly

@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **Every container now exports `YOLO_SESSION=1`**, a deterministic marker that
+  code running inside (Claude, hooks, scripts) is in a yolo container. Covers
+  claude sessions and `yolo shell` (a `docker exec`-ed shell inherits it too).
+  Unlike `YOLO_PS1` (a presentation var for the bash prompt), this is the
+  semantic "am I in a yolo session?" flag.
+
 - **New `yolo rebase TOPIC` verb** rebases a worktree's branch onto `--base`
   (the same ref as `start`/`list`/`finish`, default `HEAD`), replaying the
   branch's commits on top of work that landed on the base since it branched —
