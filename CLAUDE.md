@@ -43,6 +43,8 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py resume fix-auth          # re-enter that worktree, continue the session
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
 ./yolo.py finish fix-auth          # remove the worktree; delete the branch if merged, else keep+warn
+./yolo.py finish fix-auth --finish-action merge    # ...merge the branch into HEAD, then delete it
+./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
 ./yolo.py list                     # this repo's worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
@@ -523,7 +525,10 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `bedrock-model`, `claude-json`,
-`ssh-agent`, `base`, `prompts` (string or list of strings; the pre-0.7 name
+`ssh-agent`, `base`, `finish-action` (one of
+`delete-if-merged`/`merge`/`push`/`keep` — validated against `FINISH_CHOICES` in
+`_parse_yolo_dict`, same as `auth`), `finish-remote`,
+`prompts` (string or list of strings; the pre-0.7 name
 `append-system-prompt` draws a pointed rename error),
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
 `[HOST:]CONTAINER`), `require-project-entry`, `tmux`, `tmux-session`.
@@ -673,14 +678,30 @@ gracefully outside one — there's just no repo slug to label/find by).
   `claude-yolo/fix-auth`; with a single slug the label is just the topic. The
   exec'd case works because `docker exec` inherits the container's run-time env —
   so the env vars are stamped on *every* launch, not just `shell` ones.
-- **`finish TOPIC`** — `git worktree remove` the worktree, then **delete the
-  branch iff it's merged**: if the branch is reachable from `base` (the same
-  `--base`/`base` ref as `start`/`list`, default `HEAD`; via `_branch_merged`) it's
-  deleted (`git branch -d`) since nothing remains to preserve, otherwise it's
-  **kept** with a message that it still exists and needs to be merged or pushed
-  (plus the pushed/unpushed note). Refuses if a container is running, or on
-  uncommitted changes (unless `--force`). Removes the worktree's `worktrees.json`
-  overlay entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`).
+- **`finish TOPIC`** — `git worktree remove` the worktree, then handle the branch
+  per **`--finish-action`** (config key `finish-action`, default `delete-if-merged`;
+  `FINISH_CHOICES`). The four actions (dispatched at the tail of `do_finish`):
+  - **`delete-if-merged`** (default, the prior behavior) — **delete the branch iff
+    it's merged**: if reachable from `base` (the same `--base`/`base` ref as
+    `start`/`list`, default `HEAD`; via `_branch_merged`) it's deleted (`git
+    branch -d`) since nothing remains to preserve, otherwise it's **kept** with a
+    message that it still needs to be merged or pushed (plus the pushed/unpushed
+    note from `_branch_status_note`).
+  - **`merge`** (`_finish_merge`) — `git merge TOPIC` into the **current
+    checkout** (HEAD of the main repo, where `finish` runs — *not* `base`, which
+    may be a remote ref you can't merge into), then `git branch -d` it. A merge
+    failure (conflicts, dirty tree, unrelated histories) is **aborted** (`git
+    merge --abort`) and the branch is **kept** — the worktree is already gone but
+    the commits live on in the branch.
+  - **`push`** (`_finish_push`) — `git push <remote> TOPIC` to the
+    **`--finish-remote`** (config key `finish-remote`, default `origin`) and keep
+    the branch **locally**. A push failure keeps the branch locally too.
+  - **`keep`** — leave the branch entirely alone (just clean up the worktree),
+    with the `_branch_status_note` appended.
+
+  All actions still refuse if a container is running, or on uncommitted changes
+  (unless `--force`), and all remove the worktree's `worktrees.json` overlay
+  entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`).
 - **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
@@ -791,7 +812,9 @@ Implementation shape:
   set: `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
-  `start`, `list`, and `finish`), `--new` (resume, worktree-only), `--force` (finish),
+  `start`, `list`, and `finish`), `--finish-action`/`--finish-remote`
+  (config-backed like `base`, so ungated; consumed by `finish`), `--new`
+  (resume, worktree-only), `--force` (finish),
   `--resume`/`-r` (resume), `--watch` (ps), `--print`/`-n` (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
@@ -1033,7 +1056,9 @@ never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 captured `docker run` argv. `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
-and the `config` verb; `test_cli.py` covers verb dispatch and arg
+the `finish-action`/`finish-remote` keys (parse, the `FINISH_CHOICES` validation,
+and `config`-verb persist), and the `config` verb; `test_cli.py` covers verb
+dispatch and arg
 assembly across the credential/config axes, extra mounts, the guardrails, the
 `--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
 missing-path error, the relative-vs-absolute path resolution against the session
@@ -1045,7 +1070,10 @@ tests locate the built image in the assembled argv by its
 `claude-yolo:` repo prefix (the tag is now content-addressed, not a fixed constant).
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
-stubbing only `running_container_for` (docker) plus the `run_cli` side effects.
+stubbing only `running_container_for` (docker) plus the `run_cli` side effects —
+including the four `--finish-action` behaviors (`keep`, `merge` and its
+conflict-abort/keep path, and `push` to a `--finish-remote` bare repo) alongside
+the default `delete-if-merged`.
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and

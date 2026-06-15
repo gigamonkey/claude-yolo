@@ -188,6 +188,67 @@ def test_finish_deletes_merged_branch(cy, run_cli, repo):
     assert "topic" not in git(r, "branch", "--list", "topic").stdout  # branch deleted
 
 
+def test_finish_keep_action_keeps_merged_branch(cy, run_cli, repo):
+    r, home = repo
+    # a fresh topic reads as merged; `keep` must leave it alone anyway
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    run_cli(["finish", "topic", "--finish-action", "keep"], home=home, cwd=r)
+    assert not wt.exists()
+    assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept despite merged
+
+
+def test_finish_merge_action_merges_and_deletes(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    run_cli(["finish", "topic", "--finish-action", "merge"], home=home, cwd=r)
+    assert not wt.exists()
+    assert "topic" not in git(r, "branch", "--list", "topic").stdout  # deleted
+    assert (r / "work.txt").exists()  # merged into main's working tree
+
+
+def test_finish_merge_conflict_keeps_branch(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    # both branches change README differently -> merge conflict
+    (wt / "README").write_text("from topic\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "topic edit")
+    (r / "README").write_text("from main\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main edit")
+    run_cli(["finish", "topic", "--finish-action", "merge"], home=home, cwd=r)
+    assert not wt.exists()
+    assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept on failure
+    # the aborted merge left main clean
+    assert git(r, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_finish_push_action_pushes_and_keeps(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    git(r, "remote", "add", "upstream", str(remote))
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    run_cli(
+        ["finish", "topic", "--finish-action", "push", "--finish-remote", "upstream"],
+        home=home,
+        cwd=r,
+    )
+    assert not wt.exists()
+    assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept locally
+    assert "refs/heads/topic" in git(r, "ls-remote", "upstream").stdout  # on the remote
+
+
 def test_finish_refuses_dirty_without_force(cy, run_cli, repo):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)

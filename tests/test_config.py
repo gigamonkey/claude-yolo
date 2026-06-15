@@ -41,6 +41,23 @@ def test_parse_rejects_invalid_auth(cy, tmp_path):
         cy._parse_yolo_file(p)
 
 
+def test_parse_finish_action_and_remote(cy, tmp_path):
+    p = write(
+        tmp_path / ".yolo.json",
+        {"finish-action": "push", "finish-remote": "upstream"},
+    )
+    assert cy._parse_yolo_file(p) == {
+        "finish_action": "push",
+        "finish_remote": "upstream",
+    }
+
+
+def test_parse_rejects_invalid_finish_action(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"finish-action": "nonsense"})
+    with pytest.raises(SystemExit):
+        cy._parse_yolo_file(p)
+
+
 def test_parse_accepts_underscored_keys(cy, tmp_path):
     p = write(tmp_path / ".yolo.json", {"aws_profile": "prod"})
     assert cy._parse_yolo_file(p) == {"aws_profile": "prod"}
@@ -326,6 +343,18 @@ def test_config_verb_writes_only_explicit_flags(cy, run_cli, dirs):
     assert argv is None  # terminal verb: no container launched
     # only the explicitly-passed flags are persisted — no defaulted keys
     assert read_projects(home) == {str(work): {"auth": "bedrock", "aws-profile": "prod"}}
+
+
+def test_config_verb_persists_finish_action_and_remote(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(
+        ["config", "--finish-action", "push", "--finish-remote", "upstream"],
+        home=home,
+        cwd=work,
+    )
+    assert read_projects(home) == {
+        str(work): {"finish-action": "push", "finish-remote": "upstream"}
+    }
 
 
 def test_config_verb_persists_explicit_default_value(cy, run_cli, dirs):

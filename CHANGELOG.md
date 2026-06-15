@@ -3,6 +3,19 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## UNRELEASED
+
+- **`yolo finish` branch handling is now configurable** via `--finish-action`
+  (config key `finish-action`, default `delete-if-merged` — the prior behavior).
+  Four modes: **`delete-if-merged`** deletes the branch iff it's reachable from
+  `--base`, else keeps it with the merged/pushed note; **`merge`** merges the
+  branch into the current checkout (HEAD of the main repo, not `base`) and then
+  deletes it, aborting and keeping the branch on a merge failure; **`push`**
+  pushes the branch to a remote (**`--finish-remote`**, config key
+  `finish-remote`, default `origin`) and keeps it locally; **`keep`** leaves the
+  branch alone. All modes still remove the worktree (and its overlay entry) and
+  refuse on a running container or uncommitted changes (unless `--force`).
+
 ## v0.12.0 — 2026-06-15
 
 - **Base image bumped to Ubuntu 26.04 LTS** (from 24.04). Almost nothing in the

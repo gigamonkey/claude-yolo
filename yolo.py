@@ -38,6 +38,13 @@ DOCKER_IMAGE_REPO = "claude-yolo"
 # bedrock = AWS Bedrock creds.
 AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
+# What `yolo finish` does with the branch after removing the worktree:
+#   delete-if-merged = delete it iff reachable from base, else keep it (default);
+#   merge          = merge it into the current checkout, then delete it;
+#   push           = push it to a remote (--finish-remote, default origin), keep it locally;
+#   keep           = leave the branch alone.
+FINISH_CHOICES = ["delete-if-merged", "merge", "push", "keep"]
+
 # The built-in default Dockerfile. The host UID is passed in as the HOST_UID build ARG
 # (build_docker_image adds --build-arg HOST_UID=<os.getuid()>) so that files in the
 # bind-mounted working directory are owned by (and writable as) the in-container user.
@@ -864,6 +871,8 @@ YOLO_KEYS = {
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
     "base": ("base", "str"),
+    "finish_action": ("finish_action", "finish"),
+    "finish_remote": ("finish_remote", "str"),
     "prompts": ("prompts", "list"),
     "mounts": ("mounts", "list"),
     "ports": ("ports", "list"),
@@ -907,6 +916,11 @@ def _parse_yolo_dict(raw: dict, source: str) -> dict:
             # set_defaults bypasses argparse's `choices` check, so validate here.
             if val not in AUTH_CHOICES:
                 sys.exit(f"{source}: {key!r} must be one of {', '.join(AUTH_CHOICES)}")
+            out[dest] = val
+        elif kind == "finish":
+            # set_defaults bypasses argparse's `choices` check, so validate here.
+            if val not in FINISH_CHOICES:
+                sys.exit(f"{source}: {key!r} must be one of {', '.join(FINISH_CHOICES)}")
             out[dest] = val
         elif kind in ("str", "path"):
             if not isinstance(val, str):
@@ -1703,6 +1717,24 @@ PARSER.add_argument(
     default="HEAD",
     help="For `start`: git ref the new branch is created from (default: HEAD). "
     'Also settable as `base` in .yolo.json (e.g. "origin/main").',
+)
+PARSER.add_argument(
+    "--finish-action",
+    choices=FINISH_CHOICES,
+    default="delete-if-merged",
+    help="For `finish`: what to do with the branch after removing the worktree "
+    "(default: delete-if-merged). 'delete-if-merged' deletes the branch iff it's "
+    "reachable from --base, else keeps it; 'merge' merges it into the current "
+    "checkout then deletes it; 'push' pushes it to --finish-remote and keeps it "
+    "locally; 'keep' leaves the branch alone. Also settable as `finish-action` "
+    "in config.",
+)
+PARSER.add_argument(
+    "--finish-remote",
+    metavar="NAME",
+    default="origin",
+    help="For `finish --finish-action push`: the remote to push the branch to "
+    "(default: origin). Also settable as `finish-remote` in config.",
 )
 PARSER.add_argument(
     "--new",
@@ -2609,14 +2641,28 @@ def launch_container(
     )
 
 
-def do_finish(topic: str, home: pathlib.Path, base: str, *, force: bool) -> None:
-    """`finish` verb: remove a worktree; delete its branch iff it's been merged.
+def do_finish(
+    topic: str,
+    home: pathlib.Path,
+    base: str,
+    *,
+    force: bool,
+    action: str = "delete-if-merged",
+    remote: str = "origin",
+) -> None:
+    """`finish` verb: remove a worktree, then handle its branch per `action`.
 
     Guards against the real loss vectors — a running container holding the mount,
-    and uncommitted changes (unless --force) — then removes the worktree. If the
-    branch is already reachable from `base` (merged or never diverged) there's
-    nothing left to preserve, so it's deleted; otherwise it's kept with a note
-    that it still needs to be merged or pushed (and where it stands vs. upstream).
+    and uncommitted changes (unless --force) — then removes the worktree. What
+    happens to the branch is controlled by `action` (--finish-action):
+
+    - `delete-if-merged` (default): delete the branch iff it's reachable from
+      `base` (merged or never diverged); otherwise keep it with a note about
+      where it stands vs. upstream.
+    - `merge`: merge the branch into the current checkout, then delete it (on a
+      merge failure the branch is kept and the worktree is already gone).
+    - `push`: push the branch to `remote` (--finish-remote) and keep it locally.
+    - `keep`: leave the branch alone.
     """
     _, _, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
@@ -2644,33 +2690,93 @@ def do_finish(topic: str, home: pathlib.Path, base: str, *, force: bool) -> None
     if worktrees.pop(_worktree_overlay_key(worktree), None) is not None:
         _write_worktrees_file(wt_file, worktrees)
 
-    # If the branch is already integrated into `base`, there's nothing left to
-    # preserve — delete it. (-d is the safe form: it refuses an unmerged branch,
-    # but _branch_merged has already confirmed it's reachable from base.)
-    if _branch_merged(topic, base):
-        subprocess.run(["git", "branch", "-d", topic], check=True)
-        print(f"Removed worktree for '{topic}'. Branch '{topic}' was merged; deleted it.")
+    prefix = f"Removed worktree for '{topic}'."
+
+    if action == "merge":
+        _finish_merge(topic, prefix)
         return
 
-    # Not merged — keep the branch, with a note about where it stands vs. upstream.
+    if action == "push":
+        _finish_push(topic, remote, prefix)
+        return
+
+    if action == "keep":
+        print(f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic)}).")
+        return
+
+    # delete-if-merged (default): if the branch is already integrated into `base`,
+    # there's nothing left to preserve — delete it. (-d is the safe form: it
+    # refuses an unmerged branch, but _branch_merged has confirmed reachability.)
+    if _branch_merged(topic, base):
+        subprocess.run(["git", "branch", "-d", topic], check=True)
+        print(f"{prefix} Branch '{topic}' was merged; deleted it.")
+        return
+    print(
+        f"{prefix} Branch '{topic}' still exists and needs to be merged or pushed "
+        f"({_branch_status_note(topic)})."
+    )
+
+
+def _branch_status_note(branch: str) -> str:
+    """A short note on where `branch` stands vs. its upstream, for finish output."""
     upstream = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", f"{topic}@{{upstream}}"],
+        ["git", "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
         capture_output=True,
         text=True,
     )
-    if upstream.returncode == 0:
-        unpushed = subprocess.run(
-            ["git", "rev-list", "--count", f"{upstream.stdout.strip()}..{topic}"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        note = "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
-    else:
-        note = "local only — push it to open a PR"
-    print(
-        f"Removed worktree for '{topic}'. Branch '{topic}' still exists and needs "
-        f"to be merged or pushed ({note})."
+    if upstream.returncode != 0:
+        return "local only — push it to open a PR"
+    unpushed = subprocess.run(
+        ["git", "rev-list", "--count", f"{upstream.stdout.strip()}..{branch}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
+
+
+def _finish_merge(topic: str, prefix: str) -> None:
+    """Merge `topic` into the current checkout, then delete it (the `merge` action).
+
+    On any merge failure (conflicts, dirty tree, no common history) the merge is
+    aborted and the branch is kept — the worktree is already gone, but the commits
+    live on in the branch, recoverable by merging or re-checking-out manually.
+    """
+    merge = subprocess.run(["git", "merge", topic], capture_output=True, text=True)
+    if merge.returncode != 0:
+        subprocess.run(["git", "merge", "--abort"], capture_output=True)
+        detail = merge.stderr.strip() or merge.stdout.strip()
+        print(
+            f"{prefix} Merging '{topic}' failed (the branch is kept); resolve it "
+            f"manually.\n{detail}"
+        )
+        return
+    subprocess.run(["git", "branch", "-d", topic], check=True)
+    target = _current_branch() or "the current branch"
+    print(f"{prefix} Merged '{topic}' into {target} and deleted the branch.")
+
+
+def _finish_push(topic: str, remote: str, prefix: str) -> None:
+    """Push `topic` to `remote` and keep it locally (the `push` action)."""
+    push = subprocess.run(["git", "push", remote, topic], capture_output=True, text=True)
+    if push.returncode != 0:
+        detail = push.stderr.strip() or push.stdout.strip()
+        print(
+            f"{prefix} Pushing '{topic}' to '{remote}' failed (the branch is kept "
+            f"locally).\n{detail}"
+        )
+        return
+    print(f"{prefix} Pushed '{topic}' to '{remote}'; the branch is kept locally.")
+
+
+def _current_branch() -> str | None:
+    """The current branch name of the repo at cwd, or None if detached/unknown."""
+    r = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
     )
+    name = r.stdout.strip()
+    return name if r.returncode == 0 and name and name != "HEAD" else None
 
 
 def _branch_merged(branch: str, base: str) -> bool:
@@ -3371,7 +3477,14 @@ def main():
         do_forget_token(parsed.config_dir)
         return
     if verb == "finish":
-        do_finish(topic, home, parsed.base, force=parsed.force)
+        do_finish(
+            topic,
+            home,
+            parsed.base,
+            force=parsed.force,
+            action=parsed.finish_action,
+            remote=parsed.finish_remote,
+        )
         return
     if verb == "shell":
         if topic:
