@@ -47,6 +47,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
 ./yolo.py rebase fix-auth          # rebase the worktree's branch onto --base (default HEAD)
 ./yolo.py list                     # this repo's worktrees
+./yolo.py list --all               # every repo's worktrees under ~/.claude-yolo/worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
 ./yolo.py ps --watch               # ...refreshing every 2s (the tmux dashboard)
@@ -730,14 +731,24 @@ gracefully outside one — there's just no repo slug to label/find by).
   bypass, since `git rebase` needs a clean tree regardless (this is why `--force`
   here gates *only* the running-container check, not the dirty check as it does in
   `finish`).
-- **`list`** — the repo's worktrees as a table (TOPIC/BRANCH/STATUS/DIRECTORY).
+- **`list`** — the repo's worktrees as a table (TOPIC/STATUS/DIRECTORY). The
+  TOPIC cell is just the topic, since yolo names the worktree's branch the same;
+  it's only shown as `topic (branch: X)` when the worktree has a *different*
+  branch checked out (someone switched it inside the container) — so there's no
+  standing BRANCH column for what's almost always redundant.
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
   the `base` config key/`--base`). So a fast-forward-merged or never-diverged branch reads
   `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
-  to the main checkout, not the worktree's own branch.
+  to the main checkout, not the worktree's own branch. **`--all`** (verb-only,
+  `all_repos`) instead lists every worktree under `~/.claude-yolo/worktrees`
+  across all repos, with a leading **REPO** column — the cross-repo counterpart
+  to a plain `list`, like `ps` is for running containers. Under `--all` the
+  `merged` check is run in each worktree's *own* main repo (resolved via
+  `_worktree_main_repo`: the shared `.git`'s parent), since the branch and a
+  `HEAD` base only resolve there, not in the dir `list` was invoked from.
 - **`ps`** — every **running** yolo container, across **all** repos (the
   cross-repo counterpart to `list`), as a table
   (NAME/TOPIC/PORTS/CREATED/STATE) read from the `yolo.*` labels
@@ -846,7 +857,8 @@ Implementation shape:
   (resume, worktree-only), `--force` (`finish` and `rebase` — skips the
   uncommitted-changes guard for the former, the not-confirmed-idle running
   container for the latter),
-  `--resume`/`-r` (resume), `--watch` (ps), `--print`/`-n` (browse), and the
+  `--resume`/`-r` (resume), `--watch` (ps), `--all` (list), `--print`/`-n`
+  (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
   `--add-port`/`--remove-port`.
@@ -1115,7 +1127,11 @@ the default `delete-if-merged`, and the `rebase` verb (replaying a branch onto
 the base's new commits, honouring `--base`; the required-topic/missing-worktree/
 dirty-tree refusals; and the session-aware running-container handling — a
 `waiting` session rebases through, `working`/unknown refuse, and `--force`
-overrides — driven by a stamped `.yolo-status` state file).
+overrides — driven by a stamped `.yolo-status` state file), and `list` (the
+TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
+diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
+the per-repo `merged` judgement run from a different repo, the empty case, and
+the verb gating).
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and

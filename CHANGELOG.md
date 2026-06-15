@@ -5,6 +5,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **`yolo list --all`** lists every worktree under
+  `~/.claude-yolo/worktrees` across all repos (with a leading REPO column), not
+  just the current repo's — the cross-repo counterpart to a plain `list`. The
+  `merged`/`unmerged` status is judged in each worktree's own repo (its branch
+  and `--base` only resolve there).
+
+- **`yolo list` drops the BRANCH column.** yolo names a worktree's branch the
+  same as its topic, so the column was almost always redundant; the branch is
+  now folded into TOPIC as `topic (branch: X)` *only* when the worktree has a
+  different branch checked out (switched inside the container).
+
 - **Every container now exports `YOLO_SESSION=1`**, a deterministic marker that
   code running inside (Claude, hooks, scripts) is in a yolo container. Covers
   claude sessions and `yolo shell` (a `docker exec`-ed shell inherits it too).

@@ -402,10 +402,31 @@ def test_list_shows_worktrees(cy, run_cli, repo, capsys):
     run_cli(["list"], home=home, cwd=r)
     lines = capsys.readouterr().out.splitlines()
     # header row, then one row per topic, each showing its worktree directory
-    assert lines[0].split() == ["TOPIC", "BRANCH", "STATUS", "DIRECTORY"]
+    assert lines[0].split() == ["TOPIC", "STATUS", "DIRECTORY"]
     body = "\n".join(lines[1:])
     assert "alpha" in body and "beta" in body
     assert "~/.claude-yolo/worktrees" in body  # the worktree directory column
+
+
+def test_list_no_branch_column_when_topic_matches(cy, run_cli, repo, capsys):
+    """The TOPIC cell is just the topic when the checked-out branch matches it."""
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    assert "branch:" not in capsys.readouterr().out
+
+
+def test_list_shows_branch_when_diverged(cy, run_cli, repo, capsys):
+    """A worktree on a *different* branch than its topic surfaces it inline."""
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("alpha"))
+    git(wt, "checkout", "-qb", "other")  # someone switched branches in the container
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    out = capsys.readouterr().out
+    assert "alpha (branch: other)" in out
 
 
 def test_list_empty(cy, run_cli, repo, capsys):
@@ -420,7 +441,7 @@ def _status_for(out, topic):
     for line in out.splitlines()[1:]:  # skip header
         cols = line.split()
         if cols and cols[0] == topic:
-            return cols[2]  # TOPIC BRANCH STATUS DIRECTORY
+            return cols[1]  # TOPIC STATUS DIRECTORY
     raise AssertionError(f"{topic} not in list output")
 
 
@@ -495,6 +516,69 @@ def test_list_merged_uses_base_target(cy, run_cli, repo, capsys):
     capsys.readouterr()
     run_cli(["list", "--base", "release"], home=home, cwd=r)
     assert _status_for(capsys.readouterr().out, "feat") == "merged"  # vs release
+
+
+def _make_repo(tmp_path, name):
+    """A second throwaway git repo sharing the test's fake HOME."""
+    r = tmp_path / name
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "Tester")
+    (r / "README").write_text("hi\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "init")
+    return r
+
+
+def test_list_all_spans_repos(cy, run_cli, repo, tmp_path, capsys):
+    """`list --all` shows worktrees across every repo, with a REPO column."""
+    r, home = repo
+    other = _make_repo(tmp_path, "other-repo")
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    run_cli(["start", "beta"], home=home, cwd=other)
+    capsys.readouterr()
+    run_cli(["list", "--all"], home=home, cwd=r)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split() == ["REPO", "TOPIC", "STATUS", "DIRECTORY"]
+    body = "\n".join(lines[1:])
+    # both repos' worktrees appear, even though we ran from `repo`
+    assert "alpha" in body and "beta" in body
+    assert "repo" in body and "other-repo" in body
+
+
+def test_list_all_empty(cy, run_cli, repo, capsys):
+    r, home = repo
+    capsys.readouterr()
+    run_cli(["list", "--all"], home=home, cwd=r)
+    assert "No worktrees" in capsys.readouterr().out
+
+
+def test_list_all_merged_judged_per_repo(cy, run_cli, repo, tmp_path, capsys):
+    """A branch merged in its own repo reads `merged` under --all, run from elsewhere."""
+    r, home = repo
+    other = _make_repo(tmp_path, "other-repo")
+    run_cli(["start", "done"], home=home, cwd=other)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("done"))
+    (wt / "x").write_text("x")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    git(other, "merge", "--no-ff", "-m", "merge done", "done")
+    capsys.readouterr()
+    # run from `repo`, but `done` lives in `other-repo`
+    run_cli(["list", "--all"], home=home, cwd=r)
+    out = capsys.readouterr().out
+    # STATUS is the 3rd column under --all (REPO TOPIC STATUS DIRECTORY)
+    status = next(
+        line.split()[2] for line in out.splitlines()[1:] if line.split()[1] == "done"
+    )
+    assert status == "merged"
+
+
+def test_all_only_applies_to_list(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["ps", "--all"], home=home, cwd=r)
 
 
 # --- current-directory mode (no TOPIC) --------------------------------------

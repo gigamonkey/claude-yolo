@@ -1908,6 +1908,13 @@ PARSER.add_argument(
     "to the selected session's window, q quits.",
 )
 PARSER.add_argument(
+    "--all",
+    action="store_true",
+    dest="all_repos",
+    help="For `list`: show worktrees across all repos under ~/.claude-yolo/worktrees "
+    "(with a leading REPO column), not just the current repo's.",
+)
+PARSER.add_argument(
     "--ssh-agent",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -2791,7 +2798,7 @@ def _current_branch() -> str | None:
     return name if r.returncode == 0 and name and name != "HEAD" else None
 
 
-def _branch_merged(branch: str, base: str) -> bool:
+def _branch_merged(branch: str, base: str, cwd: pathlib.Path | None = None) -> bool:
     """Whether `branch` is already contained in `base` (the integration ref).
 
     Matches `git branch --merged <base>`: true when the branch tip is reachable
@@ -2800,22 +2807,20 @@ def _branch_merged(branch: str, base: str) -> bool:
     hasn't diverged from `base` — just-created, or **fast-forward**-merged (tip ==
     base) — therefore reads as merged, exactly as git reports it. A *squash*-merge
     creates a new commit, so the tip isn't reachable and reads as unmerged (a safe
-    false negative for a display hint).
+    false negative for a display hint). Pass `cwd` to resolve `branch`/`base` in
+    another repo (used by `list --all`, where each worktree's branch lives in its
+    own repo, not the current one).
     """
-    exists = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", base],
-        capture_output=True,
-        text=True,
-    )
-    if exists.returncode != 0:
-        return False
-    return (
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", branch, base],
+    def run(args):
+        return subprocess.run(
+            ["git", *(["-C", str(cwd)] if cwd else []), *args],
             capture_output=True,
-        ).returncode
-        == 0
-    )
+            text=True,
+        )
+
+    if run(["rev-parse", "--verify", "--quiet", base]).returncode != 0:
+        return False
+    return run(["merge-base", "--is-ancestor", branch, base]).returncode == 0
 
 
 def do_rebase(
@@ -2941,48 +2946,91 @@ def do_dir(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
         print(cwd)
 
 
-def do_list(home: pathlib.Path, base: str) -> None:
-    """`list` verb: show this repo's worktrees, their branch, status, and directory.
+def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
+    """The main checkout backing a linked worktree (its shared `.git`'s parent).
+
+    Used by `list --all` to judge `merged` in each worktree's own repo: its branch
+    and a `base` like HEAD only resolve there, not in the current repo. None if `wt`
+    isn't a git worktree.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    return pathlib.Path(out.stdout.strip()).parent
+
+
+def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
+    """`list` verb: show worktrees, their status, and directory.
+
+    By default just this repo's worktrees; with `all_repos` (--all), every worktree
+    under ~/.claude-yolo/worktrees across all repos, with a leading REPO column.
+
+    The TOPIC column normally equals the branch (yolo names them alike), so the
+    branch is only shown — as `topic (branch: X)` — when the worktree has a
+    *different* branch checked out (someone switched it inside the container).
 
     `merged` is judged against `base` (the same ref `start` branches off — default
-    HEAD, or whatever `.yolo.json`/--base set).
+    HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
+    own main repo, since the branch/base only resolve there.
     """
-    _, _, slug = _repo_paths()
-    root = home / ".claude-yolo" / "worktrees" / slug
-    topics = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
-    if not topics:
-        print("No worktrees for this repo.")
-        return
+    root = home / ".claude-yolo" / "worktrees"
+    if all_repos:
+        slug_dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    else:
+        _, _, slug = _repo_paths()
+        sd = root / slug
+        slug_dirs = [sd] if sd.is_dir() else []
 
     rows = []
-    for wt in topics:
-        topic = wt.name
-        branch = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        dirty = bool(
-            subprocess.run(
-                ["git", "-C", str(wt), "status", "--porcelain"],
+    for slug_dir in slug_dirs:
+        slug = slug_dir.name
+        topics = sorted(p for p in slug_dir.iterdir() if p.is_dir())
+        for wt in topics:
+            topic = wt.name
+            branch = subprocess.run(
+                ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-        )
-        running = running_container_for(slug, topic)
-        flags = (["running"] if running else []) + (["dirty"] if dirty else [])
-        # `merged` vs `unmerged` only matters when it's idle and clean — i.e. when
-        # it's actually a candidate to `finish`.
-        if not flags:
-            flags.append("merged" if _branch_merged(branch, base) else "unmerged")
-        status = ", ".join(flags)
-        try:
-            directory = "~/" + str(wt.relative_to(home))
-        except ValueError:
-            directory = str(wt)
-        rows.append((topic, branch, status, directory))
+            dirty = bool(
+                subprocess.run(
+                    ["git", "-C", str(wt), "status", "--porcelain"],
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            # Under --all, resolve the branch in its own repo (the current dir
+            # isn't it); also names the REPO column.
+            repo = _worktree_main_repo(wt) if all_repos else None
+            running = running_container_for(slug, topic)
+            flags = (["running"] if running else []) + (["dirty"] if dirty else [])
+            # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
+            # when it's actually a candidate to `finish`.
+            if not flags:
+                flags.append("merged" if _branch_merged(branch, base, repo) else "unmerged")
+            status = ", ".join(flags)
+            try:
+                directory = "~/" + str(wt.relative_to(home))
+            except ValueError:
+                directory = str(wt)
+            # Fold the branch into TOPIC, surfaced only when it differs (the
+            # off-the-happy-path case of a branch switched inside the container).
+            label = topic if branch in (topic, "") else f"{topic} (branch: {branch})"
+            repo_name = repo.name if repo else slug
+            rows.append((repo_name, label, status, directory))
 
-    _print_table(("TOPIC", "BRANCH", "STATUS", "DIRECTORY"), rows)
+    if not rows:
+        print("No worktrees." if all_repos else "No worktrees for this repo.")
+        return
+
+    if all_repos:
+        _print_table(("REPO", "TOPIC", "STATUS", "DIRECTORY"), rows)
+    else:
+        _print_table(("TOPIC", "STATUS", "DIRECTORY"), [r[1:] for r in rows])
 
 
 PS_WATCH_INTERVAL = 2  # seconds between `ps --watch` refreshes
@@ -3508,6 +3556,8 @@ def main():
         sys.exit("--force only applies to `finish` and `rebase`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
+    if parsed.all_repos and verb != "list":
+        sys.exit("--all only applies to `list`.")
     if parsed.print_url and verb != "browse":
         sys.exit("--print/-n only applies to `browse`.")
     if parsed.custom and verb != "dockerfile":
@@ -3557,7 +3607,7 @@ def main():
 
     # Terminal verbs (no credential config needed) — handle and return.
     if verb == "list":
-        do_list(home, parsed.base)
+        do_list(home, parsed.base, parsed.all_repos)
         return
     if verb == "ps":
         do_ps(home, watch=parsed.watch)
