@@ -6,10 +6,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 ## UNRELEASED
 
 - **`--dockerfile` relative paths now resolve against the session's working
-  directory.** An absolute path (including a `~` path) is still used as-is and
-  shared by every session, but a *relative* path is now resolved against the
-  worktree dir in worktree mode (else the cwd), so a topical worktree can carry
-  its own `./Dockerfile.yolo` that differs from the main checkout's. This makes
+  directory.** A relative path — the common per-project case, a Dockerfile
+  committed in the repo — is now resolved against the worktree dir in worktree
+  mode (else the cwd), so the same checked-in `./Dockerfile.yolo` works in the
+  main checkout and in every worktree, and a topical worktree can carry its own
+  that differs from the others'. An absolute path (including a `~` path) is used
+  as-is, for a generic image kept in a central collection. This makes
   `yolo config TOPIC --dockerfile ./Dockerfile.yolo` work even when run from the
   main repo: the path is validated (and later built) against the worktree's copy,
   not the directory you ran the command from. Previously a relative path was

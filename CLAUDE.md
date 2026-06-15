@@ -242,12 +242,17 @@ on top of whichever auth is chosen:
   Override semantics (a single path, not a concat key); the path must exist and
   be a readable file (validated on the launch paths, like `--config-dir`, so a
   stale config path can't break `list`/`finish`/`config`). **Path resolution
-  (`_resolve_dockerfile`):** an **absolute** path (including a `~`-expanded one)
-  is used as-is — the usual case, where the Dockerfile is committed in the repo
-  and shared by every session — while a **relative** path is resolved against the
-  session's working directory (the **worktree dir** in worktree mode, else the
-  cwd), so a topical worktree can carry its own `./Dockerfile.yolo` that differs
-  from the main checkout's, and each session builds from its own copy. The same
+  (`_resolve_dockerfile`):** a **relative** path — the common per-project case, a
+  Dockerfile committed in the repo — is resolved against the session's working
+  directory (the **worktree dir** in worktree mode, else the launch cwd), so the
+  same checked-in `./Dockerfile.yolo` works in the main checkout and in every
+  worktree, and a topical worktree can carry its own that differs from the
+  others'. An **absolute** path (including a `~`-expanded one) is used as-is, for
+  a generic image kept in some central collection rather than tied to a project.
+  (Caveat: in plain non-worktree mode the cwd is wherever you launched, so a
+  relative path resolves against a launch *subdirectory* rather than the repo
+  root — fine for the dominant repo-root and worktree launches, and the right
+  behavior for a monorepo subproject.) The same
   rule is applied at *both* the launch-time read (`_build_image`, against the
   retargeted `cwd`) and the `config`-time validation (`_apply_config_edits` takes
   a `base_dir` — the worktree dir for `config TOPIC`, the cwd otherwise — so

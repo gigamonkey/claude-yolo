@@ -199,12 +199,13 @@ def _verify_image_user(tag: str) -> None:
 def _resolve_dockerfile(dockerfile: str, base: pathlib.Path) -> pathlib.Path:
     """Resolve a --dockerfile / `dockerfile`-config value to a filesystem path.
 
-    An **absolute** path (including a `~`-expanded one) is used as-is, so the same
-    Dockerfile applies to every session — the usual case, where it's committed in
-    the repo. A **relative** path is resolved against `base` — the session's
-    working directory: the worktree dir in worktree mode, else the launch cwd — so
-    a topical worktree can carry its own Dockerfile that differs from the main
-    checkout's (or from another worktree's) and each session uses its own copy.
+    A **relative** path — the common per-project case, a Dockerfile checked into
+    the repo — is resolved against `base`, the session's working directory: the
+    worktree dir in worktree mode, else the launch cwd. So the same checked-in
+    path works in the main checkout and in every worktree, and a topical worktree
+    can carry its own Dockerfile that differs from the others'. An **absolute**
+    path (including a `~`-expanded one) is used as-is, for a generic image kept in
+    some central collection rather than tied to a project.
     """
     path = pathlib.Path(os.path.expanduser(dockerfile))
     return path if path.is_absolute() else base / path
