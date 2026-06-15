@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## UNRELEASED
+## v0.12.0 — 2026-06-15
 
 - **Base image bumped to Ubuntu 26.04 LTS** (from 24.04). Almost nothing in the
   built-in Dockerfile depends on the distro version — Node comes from NodeSource
