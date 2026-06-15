@@ -753,11 +753,11 @@ def _record_builds(cy, monkeypatch):
     return builds
 
 
-def test_build_image_default_builds_once(cy, monkeypatch):
+def test_build_image_default_builds_once(cy, monkeypatch, tmp_path):
     import os
 
     builds = _record_builds(cy, monkeypatch)
-    tag = cy._build_image(_parsed(cy))
+    tag = cy._build_image(_parsed(cy), tmp_path)
     assert len(builds) == 1
     assert builds[0]["text"] == cy.DEFAULT_DOCKERFILE
     assert tag == cy._image_tag(cy.DEFAULT_DOCKERFILE, os.getuid())
@@ -769,7 +769,7 @@ def test_build_image_fully_custom_builds_once_no_base(cy, monkeypatch, tmp_path)
     builds = _record_builds(cy, monkeypatch)
     df = tmp_path / "Dockerfile"
     df.write_text("FROM ubuntu:24.04\nARG HOST_UID\nRUN echo hi\n")
-    tag = cy._build_image(_parsed(cy, str(df)))
+    tag = cy._build_image(_parsed(cy, str(df)), tmp_path)
     # No YOLO_BASE reference → single build, no base, no YOLO_BASE build arg.
     assert len(builds) == 1
     assert "YOLO_BASE" not in builds[0]["build_args"]
@@ -783,7 +783,7 @@ def test_build_image_layers_on_base_when_yolo_base_referenced(cy, monkeypatch, t
     df = tmp_path / "Dockerfile"
     text = "ARG YOLO_BASE\nFROM ${YOLO_BASE}\nRUN sudo apt-get install -y foo\n"
     df.write_text(text)
-    tag = cy._build_image(_parsed(cy, str(df)))
+    tag = cy._build_image(_parsed(cy, str(df)), tmp_path)
 
     uid = os.getuid()
     base_tag = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
@@ -796,18 +796,37 @@ def test_build_image_layers_on_base_when_yolo_base_referenced(cy, monkeypatch, t
     assert tag == cy._image_tag(text + base_tag, uid)
 
 
+def test_build_image_relative_dockerfile_resolves_against_cwd(cy, monkeypatch, tmp_path):
+    # A relative --dockerfile path is read from the session cwd (a worktree dir),
+    # not the process cwd — so a worktree can carry its own Dockerfile.
+    builds = _record_builds(cy, monkeypatch)
+    (tmp_path / "Dockerfile.yolo").write_text("FROM ubuntu:24.04\nARG HOST_UID\n")
+    cy._build_image(_parsed(cy, "Dockerfile.yolo"), tmp_path)
+    assert builds[0]["text"] == "FROM ubuntu:24.04\nARG HOST_UID\n"
+
+
+def test_build_image_absolute_dockerfile_ignores_cwd(cy, monkeypatch, tmp_path):
+    # An absolute path is used as-is regardless of the session cwd.
+    builds = _record_builds(cy, monkeypatch)
+    df = tmp_path / "abs" / "Dockerfile"
+    df.parent.mkdir()
+    df.write_text("FROM ubuntu:24.04\nARG HOST_UID\nRUN echo abs\n")
+    cy._build_image(_parsed(cy, str(df)), tmp_path / "unrelated")
+    assert builds[0]["text"] == df.read_text()
+
+
 def test_build_image_verifies_user_for_custom(cy, monkeypatch, tmp_path):
     # A custom build must be USER-verified; the default must not be.
     seen = []
     monkeypatch.setattr(cy, "build_docker_image", lambda *a, **k: None)
     monkeypatch.setattr(cy, "_verify_image_user", lambda tag: seen.append(tag))
 
-    cy._build_image(_parsed(cy))  # default
+    cy._build_image(_parsed(cy), tmp_path)  # default
     assert seen == []
 
     df = tmp_path / "Dockerfile"
     df.write_text("FROM ubuntu:24.04\nARG HOST_UID\n")
-    cy._build_image(_parsed(cy, str(df)))  # custom
+    cy._build_image(_parsed(cy, str(df)), tmp_path)  # custom
     assert len(seen) == 1
 
 

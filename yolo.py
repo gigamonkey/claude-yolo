@@ -196,16 +196,32 @@ def _verify_image_user(tag: str) -> None:
         )
 
 
-def _build_image(parsed) -> str:
+def _resolve_dockerfile(dockerfile: str, base: pathlib.Path) -> pathlib.Path:
+    """Resolve a --dockerfile / `dockerfile`-config value to a filesystem path.
+
+    An **absolute** path (including a `~`-expanded one) is used as-is, so the same
+    Dockerfile applies to every session — the usual case, where it's committed in
+    the repo. A **relative** path is resolved against `base` — the session's
+    working directory: the worktree dir in worktree mode, else the launch cwd — so
+    a topical worktree can carry its own Dockerfile that differs from the main
+    checkout's (or from another worktree's) and each session uses its own copy.
+    """
+    path = pathlib.Path(os.path.expanduser(dockerfile))
+    return path if path.is_absolute() else base / path
+
+
+def _build_image(parsed, cwd: pathlib.Path) -> str:
     """Build the container image for this launch and return its tag.
 
     Default path: build the inline DEFAULT_DOCKERFILE. Custom `--dockerfile` path:
-    build that file instead. If the custom file references YOLO_BASE — i.e. it does
-    `FROM ${YOLO_BASE}` to *layer on* yolo's default rather than replace it — first
-    build the default as the base image and pass its tag in as the YOLO_BASE build
-    arg, then verify the resulting image still runs as `claude` (a layering file
-    that ends on `USER root` would break bind-mount ownership). A fully-custom file
-    that doesn't reference YOLO_BASE is built as-is (the escape hatch).
+    build that file instead (resolved via _resolve_dockerfile against `cwd`, the
+    session working dir, so a relative path tracks the worktree). If the custom
+    file references YOLO_BASE — i.e. it does `FROM ${YOLO_BASE}` to *layer on*
+    yolo's default rather than replace it — first build the default as the base
+    image and pass its tag in as the YOLO_BASE build arg, then verify the resulting
+    image still runs as `claude` (a layering file that ends on `USER root` would
+    break bind-mount ownership). A fully-custom file that doesn't reference
+    YOLO_BASE is built as-is (the escape hatch).
     """
     uid = os.getuid()
     no_cache = parsed.rebuild_image
@@ -215,7 +231,7 @@ def _build_image(parsed) -> str:
         build_docker_image(DEFAULT_DOCKERFILE, tag, uid, no_cache=no_cache)
         return tag
 
-    text = pathlib.Path(dockerfile).read_text()
+    text = _resolve_dockerfile(dockerfile, cwd).read_text()
     build_args = {}
     if YOLO_BASE_ARG in text:
         base_tag = _image_tag(DEFAULT_DOCKERFILE, uid)
@@ -1254,13 +1270,18 @@ def _take_list_key(entry: dict, key: str, where: str) -> list[str]:
     return vals
 
 
-def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> dict:
+def _apply_config_edits(
+    current: dict, explicit: dict, parsed, where: str, base_dir: pathlib.Path
+) -> dict:
     """One updated config object: whole-key sets, then --unset, then list edits.
 
-    Shared by the project-entry and --global paths of `do_config`; `where` names
-    the target in error messages. Conflicting instructions for the same key in
-    one invocation (set + unset, --mount alongside --add/--remove-mount, -p
-    alongside --add/--remove-prompt) are errors, not silently ordered.
+    Shared by the project-entry, --global, and worktree-overlay paths of
+    `do_config`; `where` names the target in error messages. `base_dir` is the
+    directory a *relative* `dockerfile` path is validated against (the worktree
+    dir for a TOPIC overlay, else the cwd) — mirroring how the launch resolves it.
+    Conflicting instructions for the same key in one invocation (set + unset,
+    --mount alongside --add/--remove-mount, -p alongside --add/--remove-prompt)
+    are errors, not silently ordered.
     """
     if "mounts" in explicit and (parsed.add_mounts or parsed.remove_mounts):
         sys.exit(
@@ -1293,7 +1314,7 @@ def _apply_config_edits(current: dict, explicit: dict, parsed, where: str) -> di
     for spec in [*explicit.get("ports", []), *parsed.add_ports]:
         _parse_port_spec(spec)  # likewise: a malformed port spec can't be pinned
     df = explicit.get("dockerfile")
-    if df is not None and not pathlib.Path(os.path.expanduser(df)).is_file():
+    if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
         sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
 
     entry = dict(current)
@@ -1390,7 +1411,10 @@ def _do_config_worktree(
         sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
 
     where = f"{wt_file} [{topic}]"
-    entry = _apply_config_edits(dict(worktrees.get(key, {})), explicit, parsed, where)
+    # A relative `dockerfile` is validated (and later resolved) against the
+    # worktree dir, so `config TOPIC --dockerfile ./Dockerfile.yolo` pins the
+    # worktree's own copy even when run from the main checkout.
+    entry = _apply_config_edits(dict(worktrees.get(key, {})), explicit, parsed, where, worktree)
     _parse_yolo_dict(entry, where)  # never write an unloadable entry
     worktrees[key] = entry
     _write_worktrees_file(wt_file, worktrees)
@@ -1483,7 +1507,7 @@ def do_config(
             print(f"global config file: {global_file}")
             print(json.dumps(current, indent=2) if global_file.is_file() else "no global config")
             return
-        updated = _apply_config_edits(current, explicit, parsed, where)
+        updated = _apply_config_edits(current, explicit, parsed, where, cwd)
         _parse_yolo_dict(updated, where)  # never write an unloadable config
         global_file.write_text(json.dumps(updated, indent=2) + "\n")
         print(f"Updated {global_file}:")
@@ -1504,7 +1528,7 @@ def do_config(
         return
 
     where = f"{projects_file} [{key}]"
-    entry = _apply_config_edits(dict(projects.get(key, {})), explicit, parsed, where)
+    entry = _apply_config_edits(dict(projects.get(key, {})), explicit, parsed, where, cwd)
     _parse_yolo_dict(entry, where)  # never write an unloadable entry
     projects[key] = entry
     projects_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2552,7 +2576,7 @@ def launch_container(
         status_dir.mkdir(parents=True, exist_ok=True)
         (status_dir / f"{_cwd_slug(cwd)}.state").unlink(missing_ok=True)
 
-    image_tag = _build_image(parsed)
+    image_tag = _build_image(parsed, cwd)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
@@ -3416,12 +3440,6 @@ def main():
             "run `yolo config` here to create one, or pass --no-require-project-entry."
         )
 
-    # A custom Dockerfile must exist and be a readable file. Checked here on the
-    # launch paths only (like the mount/port resolution below), so a stale
-    # `dockerfile` config path can't break `list`/`finish`/`config`.
-    if parsed.dockerfile and not pathlib.Path(parsed.dockerfile).is_file():
-        sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
-
     # Extra mounts and port forwards, merged across config layers and the CLI.
     # Resolved only on the launch paths so a stale mount path or malformed port
     # spec can't break `list`/`finish`/`config`.
@@ -3475,6 +3493,14 @@ def main():
         slug = _repo_slug_or_none()
         container_base = cwd.name
         session_name = None  # a plain cwd session is unnamed
+
+    # A custom Dockerfile must exist and be a readable file. Checked here on the
+    # launch paths only (like the mount/port resolution above), so a stale
+    # `dockerfile` config path can't break `list`/`finish`/`config`. Resolved
+    # against the now-final `cwd` (the worktree dir in worktree mode), so a
+    # relative path points at the session's own copy — matching _build_image.
+    if parsed.dockerfile and not _resolve_dockerfile(parsed.dockerfile, cwd).is_file():
+        sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
 
     # Session-activity hooks (Stop/UserPromptSubmit) write to this file, which
     # `ps` reads for the STATE column. Path is the container-side mount location

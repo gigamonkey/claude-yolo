@@ -5,6 +5,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **`--dockerfile` relative paths now resolve against the session's working
+  directory.** An absolute path (including a `~` path) is still used as-is and
+  shared by every session, but a *relative* path is now resolved against the
+  worktree dir in worktree mode (else the cwd), so a topical worktree can carry
+  its own `./Dockerfile.yolo` that differs from the main checkout's. This makes
+  `yolo config TOPIC --dockerfile ./Dockerfile.yolo` work even when run from the
+  main repo: the path is validated (and later built) against the worktree's copy,
+  not the directory you ran the command from. Previously a relative path was
+  resolved against the launch directory at both validation and build time, so a
+  worktree-local Dockerfile couldn't be referenced.
+
 - **`yolo finish` now deletes a merged branch.** Previously `finish` always kept
   the branch. It now checks whether the branch is reachable from `base` (the same
   `--base`/`base` ref `start` and `list` use, default `HEAD`): if it's merged (or

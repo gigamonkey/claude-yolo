@@ -205,6 +205,26 @@ def test_config_topic_edits_overlay(cy, run_cli, repo):
     assert "ports" not in overlay_for(cy, home, r, "fix-auth")
 
 
+def test_config_topic_relative_dockerfile_resolves_against_worktree(cy, run_cli, repo):
+    # The Dockerfile lives in the worktree, not the main checkout. A relative
+    # path is validated against the worktree dir, so `config TOPIC` succeeds even
+    # though it's run from the main repo (where the file doesn't exist).
+    r, home = repo
+    run_cli(["start", "fix-auth"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("fix-auth"))
+    (wt / "Dockerfile.yolo").write_text("ARG YOLO_BASE\nFROM ${YOLO_BASE}\n")
+    assert not (r / "Dockerfile.yolo").exists()  # absent from the main checkout
+    run_cli(["config", "fix-auth", "--dockerfile", "Dockerfile.yolo"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "fix-auth")["dockerfile"] == "Dockerfile.yolo"
+
+
+def test_config_topic_relative_dockerfile_missing_in_worktree_errors(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "fix-auth"], home=home, cwd=r)
+    with pytest.raises(SystemExit):
+        run_cli(["config", "fix-auth", "--dockerfile", "nope.yolo"], home=home, cwd=r)
+
+
 def test_config_topic_show_missing_worktree_is_not_an_error(cy, run_cli, repo, capsys):
     r, home = repo
     run_cli(["config", "ghost"], home=home, cwd=r)

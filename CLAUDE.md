@@ -241,8 +241,18 @@ on top of whichever auth is chosen:
   container image from this Dockerfile instead of the inline `DEFAULT_DOCKERFILE`.
   Override semantics (a single path, not a concat key); the path must exist and
   be a readable file (validated on the launch paths, like `--config-dir`, so a
-  stale config path can't break `list`/`finish`/`config`). Handled by
-  `_build_image` (which replaced `_resolve_dockerfile`): it reads the file, builds
+  stale config path can't break `list`/`finish`/`config`). **Path resolution
+  (`_resolve_dockerfile`):** an **absolute** path (including a `~`-expanded one)
+  is used as-is — the usual case, where the Dockerfile is committed in the repo
+  and shared by every session — while a **relative** path is resolved against the
+  session's working directory (the **worktree dir** in worktree mode, else the
+  cwd), so a topical worktree can carry its own `./Dockerfile.yolo` that differs
+  from the main checkout's, and each session builds from its own copy. The same
+  rule is applied at *both* the launch-time read (`_build_image`, against the
+  retargeted `cwd`) and the `config`-time validation (`_apply_config_edits` takes
+  a `base_dir` — the worktree dir for `config TOPIC`, the cwd otherwise — so
+  `yolo config TOPIC --dockerfile ./Dockerfile.yolo` validates the worktree's copy
+  even when run from the main checkout). `_build_image` then reads the file, builds
   it, and derives the content-addressed image tag (see "How it works" #1). The
   **recommended** custom-Dockerfile shape *layers on* the default rather than
   replacing it: a file that mentions `YOLO_BASE` (i.e. `ARG YOLO_BASE` / `FROM
@@ -1021,7 +1031,8 @@ warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 and the `config` verb; `test_cli.py` covers verb dispatch and arg
 assembly across the credential/config axes, extra mounts, the guardrails, the
 `--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
-missing-path error, and that the build context contains only the Dockerfile), the
+missing-path error, the relative-vs-absolute path resolution against the session
+cwd, and that the build context contains only the Dockerfile), the
 `FROM ${YOLO_BASE}` layering (`_build_image` builds the base then the custom image
 and folds the base tag into the final tag; `_verify_image_user` rejects a non-
 `claude` image), and the `dockerfile` dump verb. The
@@ -1036,8 +1047,9 @@ repo): `start` populating `worktrees.json` from explicit flags (and the empty
 concat-key accumulation, `resume` flags *updating* the overlay (lists accumulate
 + dedup, scalars override, no-flags no-op, persistence to the next resume) while
 `shell` doesn't, the provenance tail, `yolo config TOPIC` show/edit (and the
-`--global`/`--init`/missing-worktree errors), `finish` removing the entry, and a
-malformed-file error.
+`--global`/`--init`/missing-worktree errors, and a relative `--dockerfile`
+validated against the worktree dir rather than the cwd), `finish` removing the
+entry, and a malformed-file error.
 `test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
 expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the `security`-wrapping helpers stubbed).
