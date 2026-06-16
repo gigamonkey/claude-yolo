@@ -25,6 +25,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --submodules             # populate git submodules before launch (off by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
+./yolo.py --yolorc ./setup.sh      # source this file inside the container at startup
 ./yolo.py --dockerfile ./Dockerfile.yolo  # build the image from a custom Dockerfile
 ./yolo.py dockerfile               # print the built-in default Dockerfile (a starting point)
 ./yolo.py --port 8000              # forward container port 8000 (docker picks the host port)
@@ -230,11 +231,14 @@ on top of whichever auth is chosen:
   submodule contents, so without this you'd populate them by hand inside the
   container.
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
-  host directories ("reference" dirs) at their **identical host paths**, like the
-  cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would
-  otherwise create it root-owned on the host). Each mount is also forwarded to
-  claude as `--add-dir`, so the dirs are working directories Claude actually knows
-  about. Mount lists **concatenate** across the config layers and the CLI (exact
+  host **files or directories** (reference dirs, or a single secret like a token
+  file) at their **identical host paths**, like the cwd. **Read-only by default**;
+  `:rw` opts in. The source must exist (docker would otherwise create a *missing*
+  one as a root-owned dir on the host — wrong, and wrong for an intended file).
+  Each mounted **directory** is also forwarded to claude as `--add-dir`, so the
+  dirs are working directories Claude actually knows about; a mounted **file** is
+  not (`--add-dir` is dir-only) — it's bind-mounted but not announced. Mount lists
+  **concatenate** across the config layers and the CLI (exact
   dups deduped; on a same-path ro/rw conflict the higher layer wins). A `shell`
   exec'd into a *running* container necessarily joins it with the mounts it was
   started with — docker can't add mounts to a live container.
@@ -299,6 +303,31 @@ on top of whichever auth is chosen:
   in host-side `projects.json` (Claude can't add it), only the referenced file is
   in-tree — an accepted trade-off for an opt-in feature, but prefer an out-of-tree
   Dockerfile when the isolation matters.
+- **`--yolorc PATH`** (default unset; `yolorc` in config) → **source** this shell
+  file *inside* the container before the session starts. Path resolution mirrors
+  `--dockerfile` (`_resolve_yolorc`): a **relative** path resolves against the
+  session working dir (the worktree dir in worktree mode, else the launch cwd), so
+  a checked-in rc tracks the worktree; an **absolute** path (incl. `~`) is used
+  as-is, for an out-of-tree rc the container can't edit. The resolved file is
+  bind-mounted **read-only** at the fixed `/home/claude/.yolorc`
+  (`_YOLORC_CONTAINER_PATH`) and `YOLO_RC` is pointed at it. **Two source paths,
+  one per session kind:** a *claude* launch is command-wrapped — yolo overrides the
+  entrypoint to `/bin/bash` and runs `. "$YOLO_RC"; exec claude …` (claude isn't a
+  shell, so `.bashrc` never runs for it); the claude args are passed positionally
+  to `"$@"` so the `--settings` JSON and OAuth token need no re-quoting. A `yolo
+  shell` (fresh or `docker exec`'d into a running container) instead sources it via
+  the baked **`.bashrc`** (guarded by a `YOLO_RC_SOURCED` sentinel so nested
+  subshells don't re-run it) — the env var rides the container's runtime env.
+  `source` (not run) so the rc's `export`s reach the session env; a nonzero rc
+  **warns but doesn't block** the session. The point is per-session setup that
+  keeps secrets out of Claude's transcript — e.g. `gh auth login --with-token <
+  tokenfile`, with `tokenfile` supplied via `--mount`. **Opt-in by design** (a key,
+  not presence-detection): a repo's `.yolorc` is inert unless this key points at it,
+  so cloning-and-running can't auto-execute it. The blast radius is the container
+  anyway (anything the rc can do, the session could), and like an in-tree
+  `--dockerfile` the *key* lives in host-side config (Claude can't add it) while an
+  in-tree rc file is Claude-editable between runs — prefer an out-of-tree rc when
+  that matters.
 - **`--tmux` / `--no-tmux`** (default **off**; `tmux` in config) → spawn the
   session as a window of a shared tmux session instead of exec'ing in the
   invoking terminal; `--tmux-session NAME` / `tmux-session` names that session
@@ -540,7 +569,7 @@ and `ports` (`_CONCAT_DESTS`), which **concatenate** across the layers and then
 the CLI values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
-`config-dir`, `dockerfile`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
+`config-dir`, `dockerfile`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `bedrock-model`, `claude-json`,
@@ -554,7 +583,7 @@ bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
 (CLI-only by design); any of them in a config file is a hard error (not in
-`YOLO_KEYS`). `config-dir` and `dockerfile` get `~` expanded (a JSON file can't
+`YOLO_KEYS`). `config-dir`, `dockerfile`, and `yolorc` get `~` expanded (a JSON file can't
 lean on shell expansion). Booleans must be JSON `true`/`false`. A JSON **`null`** for any key
 means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
@@ -1194,4 +1223,11 @@ status path), the `yolo.config-dir` label, the stale-status-file reset (and that
 `shell` does neither), the user-hook merge (`_read_settings_hooks` +
 concatenation), and the `_humanize_secs`/`_read_session_state` rendering; the
 `ps` STATE column itself is exercised in `test_tmux.py`.
+`test_yolorc.py` covers the `--yolorc` axis: `_resolve_yolorc`
+(relative/absolute/`~`), the `yolorc` config-key parse + `~` expansion, the launch
+wiring (the read-only mount at `_YOLORC_CONTAINER_PATH` + the `YOLO_RC` env), the
+claude-launch source wrapper (bash entrypoint, reconstructed `claude
+--dangerously-skip-permissions … "$@"`) vs the `.bashrc` path a `yolo shell` uses
+(not command-wrapped), the missing-file guard, the unwrapped default launch, the
+baked `.bashrc` sourcing line, and the `config` verb persist/validate.
 Keep them green when changing flags or mounts.

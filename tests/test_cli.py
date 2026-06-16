@@ -406,7 +406,21 @@ def test_mount_rw_suffix(cy, run_cli, flag_values, tmp_path):
     assert f"{ref}:{ref}:rw" in flag_values(argv, "-v")
 
 
-def test_mount_missing_dir_exits(cy, run_cli, dirs):
+def test_mount_file_is_bind_mounted_but_not_added_as_dir(cy, run_cli, flag_values, tmp_path):
+    # A file (e.g. a token file) can be mounted; it's bind-mounted like a dir but
+    # NOT forwarded to claude as --add-dir (which is directory-only).
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    for d in (home, work):
+        d.mkdir()
+    token = tmp_path / "token"
+    token.write_text("sekret\n")
+    argv = run_cli(["--mount", f"{token}:ro"], home=home, cwd=work)
+    assert f"{token}:{token}:ro" in flag_values(argv, "-v")
+    assert str(token) not in flag_values(claude_args(cy, argv), "--add-dir")
+
+
+def test_mount_missing_path_exits(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit):
         run_cli(["--mount", str(work / "nope")], home=home, cwd=work)

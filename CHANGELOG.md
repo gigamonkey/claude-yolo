@@ -3,6 +3,29 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **New `--yolorc PATH` flag (`yolorc` config key, default unset)** sources a
+  shell file *inside* the container before the session starts — for per-session
+  setup that keeps secrets out of Claude's transcript, e.g. `gh auth login
+  --with-token < tokenfile`. Path resolution mirrors `--dockerfile`: a relative
+  path resolves against the session working dir (the worktree dir in worktree
+  mode), an absolute path (incl. `~`) is used as-is for an out-of-tree rc the
+  container can't edit. The file is bind-mounted read-only at
+  `/home/claude/.yolorc` with `YOLO_RC` pointed at it; a claude launch is
+  command-wrapped to `. "$YOLO_RC"; exec claude …` (claude isn't a shell), while
+  `yolo shell` sources it via the baked `.bashrc`. `source` (not run), so the
+  rc's `export`s reach the session env; a nonzero rc warns but doesn't block.
+  Opt-in by design (a key, not presence-detection): a repo's `.yolorc` is inert
+  unless this key points at it, so cloning-and-running can't auto-execute it.
+
+- **`--mount` now accepts a file, not just a directory.** The previous
+  directory-only check was really an existence guard (docker auto-creates a
+  missing bind-mount source as a root-owned dir); a file satisfies it equally.
+  Mounted directories are still forwarded to claude as `--add-dir`; a mounted
+  file is bind-mounted but not (—`--add-dir` is dir-only). This makes mounting a
+  single token file for `--yolorc` work directly.
+
 ## v0.13.0 — 2026-06-16
 
 - **New `--submodules` flag (`submodules` config key, default off)** populates a

@@ -83,6 +83,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # (see _ps1_env_args): flags any bash as a yolo shell and shows where it is.
 # Appended last so it wins over the distro default PS1.
 RUN echo 'if [ -n "$YOLO_PS1" ]; then PS1="$YOLO_PS1"; fi' >> /home/claude/.bashrc
+# Source the --yolorc file (mounted at $YOLO_RC) once per interactive shell tree,
+# so `yolo shell` gets the same per-session setup claude launches do. The sentinel
+# keeps nested subshells from re-running it. claude launches don't read .bashrc;
+# they source the rc via the launch wrapper (see launch_container).
+RUN echo 'if [ -n "$YOLO_RC" ] && [ -f "$YOLO_RC" ] && [ -z "$YOLO_RC_SOURCED" ]; then export YOLO_RC_SOURCED=1; . "$YOLO_RC"; fi' >> /home/claude/.bashrc
 ENV PATH=/home/claude/.local/bin:$PATH
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
 """
@@ -216,6 +221,24 @@ def _resolve_dockerfile(dockerfile: str, base: pathlib.Path) -> pathlib.Path:
     some central collection rather than tied to a project.
     """
     path = pathlib.Path(os.path.expanduser(dockerfile))
+    return path if path.is_absolute() else base / path
+
+
+# Container path the resolved `--yolorc` file is bind-mounted to (read-only) and
+# the value of the YOLO_RC env var. A fixed mount point — uniform regardless of
+# the host path — that the .bashrc and the claude-launch wrapper both source.
+_YOLORC_CONTAINER_PATH = "/home/claude/.yolorc"
+
+
+def _resolve_yolorc(yolorc: str, base: pathlib.Path) -> pathlib.Path:
+    """Resolve a --yolorc / `yolorc`-config value to a host filesystem path.
+
+    Same rule as _resolve_dockerfile: a **relative** path resolves against `base`,
+    the session working dir (the worktree dir in worktree mode, else the launch
+    cwd), so a checked-in rc tracks the worktree; an **absolute** path (including a
+    `~`-expanded one) is used as-is, for an out-of-tree rc the container can't edit.
+    """
+    path = pathlib.Path(os.path.expanduser(yolorc))
     return path if path.is_absolute() else base / path
 
 
@@ -864,6 +887,7 @@ def setup_worktree(
 YOLO_KEYS = {
     "config_dir": ("config_dir", "path"),
     "dockerfile": ("dockerfile", "path"),
+    "yolorc": ("yolorc", "path"),
     "auth": ("auth", "auth"),
     "aws_profile": ("aws_profile", "str"),
     "aws_region": ("aws_region", "str"),
@@ -1146,18 +1170,20 @@ def load_yolo_config(
 
 
 def _parse_mount_spec(spec: str) -> tuple[pathlib.Path, str]:
-    """One --mount / `mounts` value, `PATH[:ro|:rw]` -> (resolved dir, mode).
+    """One --mount / `mounts` value, `PATH[:ro|:rw]` -> (resolved path, mode).
 
-    Read-only is the default (the use case is reference material; :rw is the
-    explicit opt-in). The directory must exist: docker silently creates a missing
-    bind-mount source as a root-owned dir on the host, which we never want.
+    A file or a directory; read-only is the default (the use case is reference
+    material or a single secret like a token file; :rw is the explicit opt-in). The
+    source must exist: docker silently creates a missing bind-mount source as a
+    root-owned *directory* on the host, which we never want (and would be wrong for
+    an intended file). Only directories are later forwarded to claude as --add-dir.
     """
     path_part, mode = spec, "ro"
     if spec.endswith((":ro", ":rw")):
         path_part, mode = spec[:-3], spec[-2:]
     path = pathlib.Path(os.path.expanduser(path_part))
-    if not path.is_dir():
-        sys.exit(f"mount: not a directory: {path_part}")
+    if not path.exists():
+        sys.exit(f"mount: no such file or directory: {path_part}")
     return path.resolve(), mode
 
 
@@ -1333,6 +1359,9 @@ def _apply_config_edits(
     df = explicit.get("dockerfile")
     if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
         sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
+    rc = explicit.get("yolorc")
+    if rc is not None and not _resolve_yolorc(rc, base_dir).is_file():
+        sys.exit(f"yolorc: not a file: {rc}")  # a typo'd path can't be pinned
 
     entry = dict(current)
     for k, v in explicit.items():
@@ -1951,16 +1980,29 @@ PARSER.add_argument(
     "for its non-root user to keep bind-mount ownership correct.",
 )
 PARSER.add_argument(
+    "--yolorc",
+    dest="yolorc",
+    default=None,
+    metavar="PATH",
+    help="Source this shell file inside the container before the session starts "
+    "(or set `yolorc` in config). A relative path resolves against the session "
+    "working dir (a checked-in rc); an absolute path (~ ok) is used as-is, for an "
+    "out-of-tree rc the container can't edit. Use it for per-session setup such as "
+    "`gh auth login --with-token < tokenfile` (tokenfile supplied via --mount); "
+    "`export`s reach Claude's env. Opt-in by design: a repo's rc is inert unless "
+    "you point this key at it. Code it runs is container-confined, like the session.",
+)
+PARSER.add_argument(
     "--mount",
     dest="mounts",
     action="append",
     default=[],
     metavar="PATH[:ro|:rw]",
-    help="Extra host directory to bind-mount into the container at its identical "
-    "host path, read-only unless :rw is appended. Repeatable; also settable as "
-    "`mounts` in config, where the lists concatenate across the layers and the "
-    "CLI. Each directory is also passed to claude as --add-dir so it shows up as "
-    "a working directory.",
+    help="Extra host file or directory to bind-mount into the container at its "
+    "identical host path, read-only unless :rw is appended. Repeatable; also "
+    "settable as `mounts` in config, where the lists concatenate across the layers "
+    "and the CLI. Each mounted *directory* is also passed to claude as --add-dir so "
+    "it shows up as a working directory (files aren't — --add-dir is dir-only).",
 )
 PARSER.add_argument(
     "--port",
@@ -2529,6 +2571,17 @@ def launch_container(
     for host_port, container_port in ports:
         args += ["-p", f"127.0.0.1:{host_port or 0}:{container_port}"]
 
+    # --yolorc: bind-mount the rc read-only at a fixed path and point YOLO_RC at
+    # it. The .bashrc sources it for `yolo shell` (fresh or exec'd in — the env
+    # var rides the container's runtime env); claude launches source it via the
+    # command wrapper below (claude isn't a shell, so .bashrc never runs for it).
+    # Read-only here even for an in-tree rc; the rw cwd mount is the editable copy
+    # (same Claude-can-edit-between-runs caveat as an in-tree --dockerfile).
+    yolorc_host = _resolve_yolorc(parsed.yolorc, cwd) if parsed.yolorc else None
+    if yolorc_host:
+        args += ["-v", f"{yolorc_host}:{_YOLORC_CONTAINER_PATH}:ro"]
+        args += ["-e", f"YOLO_RC={_YOLORC_CONTAINER_PATH}"]
+
     if parsed.ssh_agent:
         # Forward the host ssh-agent via the Docker engine's magic socket. We canNOT bind-mount
         # the raw host $SSH_AUTH_SOCK: that socket's listener lives in the macOS kernel, while
@@ -2671,6 +2724,25 @@ def launch_container(
         _init_submodules(cwd)
 
     image_tag = _build_image(parsed, cwd)
+
+    # For a claude launch (entrypoint is None → the image's `claude
+    # --dangerously-skip-permissions` ENTRYPOINT) with --yolorc, drop into bash to
+    # source the rc first, then exec the reconstructed claude command. `source`
+    # (not run) so the rc's `export`s reach claude's env; a nonzero rc warns but
+    # doesn't block the session. The claude args are passed positionally to "$@"
+    # so the --settings JSON and OAuth token need no re-quoting. `shell` launches
+    # (entrypoint already /bin/bash) source the rc via .bashrc instead.
+    if yolorc_host and entrypoint is None:
+        entrypoint = "/bin/bash"
+        command = [
+            "-c",
+            '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '
+            'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; exec "$@"',
+            "yolo-rc",
+            "claude",
+            "--dangerously-skip-permissions",
+            *command,
+        ]
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
     run_cmd = [
@@ -3782,7 +3854,9 @@ def main():
     # Resolved only on the launch paths so a stale mount path or malformed port
     # spec can't break `list`/`finish`/`config`.
     mounts = _resolve_mounts(parsed.mounts)
-    mount_dirs = [path for path, _ in mounts]
+    # Only directories are forwarded to claude as --add-dir (it's dir-only); a
+    # mounted file is still bind-mounted, just not announced as a working dir.
+    mount_dirs = [path for path, _ in mounts if path.is_dir()]
     ports = _resolve_ports(parsed.ports)
     container_ports = [c for _, c in ports]
 
@@ -3839,6 +3913,14 @@ def main():
     # relative path points at the session's own copy — matching _build_image.
     if parsed.dockerfile and not _resolve_dockerfile(parsed.dockerfile, cwd).is_file():
         sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
+
+    # A --yolorc rc file must exist and be a readable file, resolved against the
+    # final cwd (the worktree dir in worktree mode) so a relative path points at
+    # the session's own copy — matching launch_container's resolution. Launch-path
+    # only, like the dockerfile check, so a stale config path can't break the
+    # terminal verbs.
+    if parsed.yolorc and not _resolve_yolorc(parsed.yolorc, cwd).is_file():
+        sys.exit(f"yolorc: not a file: {parsed.yolorc}")
 
     # Session-activity hooks (Stop/UserPromptSubmit) write to this file, which
     # `ps` reads for the STATE column. Path is the container-side mount location

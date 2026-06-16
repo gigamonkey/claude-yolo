@@ -324,7 +324,13 @@ def test_parse_mount_spec_expands_user(cy, tmp_path, monkeypatch):
     assert cy._parse_mount_spec("~/ref:rw") == (d, "rw")
 
 
-def test_parse_mount_spec_missing_dir_exits(cy, tmp_path):
+def test_parse_mount_spec_accepts_a_file(cy, tmp_path):
+    f = tmp_path / "token"
+    f.write_text("x")
+    assert cy._parse_mount_spec(f"{f}:ro") == (f, "ro")
+
+
+def test_parse_mount_spec_missing_path_exits(cy, tmp_path):
     with pytest.raises(SystemExit):
         cy._parse_mount_spec(str(tmp_path / "nope"))
 
