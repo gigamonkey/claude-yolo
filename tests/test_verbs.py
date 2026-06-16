@@ -333,6 +333,8 @@ def test_finish_push_action_pushes_and_keeps(cy, run_cli, repo, tmp_path):
     assert not wt.exists()
     assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept locally
     assert "refs/heads/topic" in git(r, "ls-remote", "upstream").stdout  # on the remote
+    # -u set up tracking, so a later bare push/pull on the branch just works
+    assert git(r, "rev-parse", "--abbrev-ref", "topic@{upstream}").stdout.strip() == "upstream/topic"
 
 
 def test_finish_refuses_dirty_without_force(cy, run_cli, repo):

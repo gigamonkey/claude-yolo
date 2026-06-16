@@ -819,9 +819,11 @@ modes:
   unrelated histories) it's aborted and the branch is kept — the worktree is gone
   but the commits live on in the branch.
 
-- **`push`** — push the branch to a remote and keep it locally. The remote is the
-  **`finish-remote`** key (`--finish-remote NAME`, default `origin`). A push
-  failure keeps the branch locally too.
+- **`push`** — push the branch to a remote (with `-u`, so the local branch tracks
+  it) and keep it locally. The remote is the **`finish-remote`** key
+  (`--finish-remote NAME`, default `origin`). Tracking is set up because this mode
+  is for the open-a-PR flow, where a later bare `git push`/`git pull` on the branch
+  should just work. A push failure keeps the branch locally too.
 
 - **`keep`** — leave the branch alone (just clean up the worktree).
 
@@ -895,11 +897,26 @@ yolo config --config-dir ~/.claude-work --mount ~/refdocs
 Exactly those flags are saved as the project's entry, keyed by the repo root
 (so subdirectory runs and worktree sessions share it; outside a git repo, the
 current directory). Re-running with a flag updates just that key, leaving the
-rest of the entry alone. A bare `yolo config` is read-only: it prints the entry
-that currently applies (and the path of `projects.json`) without writing
-anything. `yolo config` is the only thing that writes `projects.json` — a plain
-launch never does — so the file stays a deliberate, auditable record of
-per-project grants.
+rest of the entry alone. A bare `yolo config` is read-only: it prints the
+**complete effective config that would apply here** — the global `~/.yolo.json`
+values that aren't overridden, merged with this project's entry — with the
+source of each value, so you can see what's inherited versus pinned:
+
+```text
+$ yolo config
+projects file: /Users/you/.claude-yolo/projects.json
+effective config for /Users/you/hacks/foo:
+  ssh-agent   true               [~/.yolo.json]
+  auth        "bedrock"          [projects.json]
+  mounts      ["~/refdocs", "~/proj"]  [~/.yolo.json + projects.json]
+  config-dir  "~/.claude-work"   [projects.json]
+```
+
+A concat key (`mounts`/`ports`/`prompts`/`secrets`) shows the values from both
+layers and is attributed to both; everything else is the winning layer's value.
+It writes nothing. `yolo config` is the only thing that writes `projects.json`
+— a plain launch never does — so the file stays a deliberate, auditable record
+of per-project grants.
 
 With **`--global`**, the same invocations read and write `~/.yolo.json` — the
 global layer — instead of the project entry (you can also just edit that file;

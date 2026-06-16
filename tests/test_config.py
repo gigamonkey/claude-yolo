@@ -428,13 +428,33 @@ def test_config_verb_bare_prints_without_writing(cy, run_cli, dirs, capsys):
     argv = run_cli(["config"], home=home, cwd=work)
     assert argv is None
     out = capsys.readouterr().out
-    assert "projects.json" in out and f"no entry for {work}" in out
+    assert "projects.json" in out and "built-in defaults" in out and "no project entry" in out
     assert not (home / ".claude-yolo" / "projects.json").exists()  # read-only
 
     write_projects(home, {str(work): {"auth": "bedrock"}})
     run_cli(["config"], home=home, cwd=work)
     out = capsys.readouterr().out
     assert str(work) in out and "bedrock" in out
+
+
+def test_config_verb_bare_shows_merged_effective_config(cy, run_cli, dirs, capsys):
+    """Bare `yolo config` shows the complete effective config — global values
+    that aren't overridden, merged with the project entry — with provenance."""
+    home, work = dirs
+    write(home / ".yolo.json", {"ssh-agent": True, "auth": "keychain", "mounts": ["~/g"]})
+    write_projects(home, {str(work): {"auth": "bedrock", "mounts": ["~/p"]}})
+    run_cli(["config"], home=home, cwd=work)
+    out = capsys.readouterr().out
+    assert "effective config" in out
+    # inherited-but-not-overridden global value shows, attributed to the global file
+    assert "ssh-agent" in out and "~/.yolo.json" in out
+    # project overrides the scalar; provenance is the project layer
+    auth_line = next(line for line in out.splitlines() if line.strip().startswith("auth"))
+    assert '"bedrock"' in auth_line and "projects.json" in auth_line
+    # concat key accumulates across both layers, both attributed
+    mounts_line = next(line for line in out.splitlines() if line.strip().startswith("mounts"))
+    assert "~/g" in mounts_line and "~/p" in mounts_line
+    assert "~/.yolo.json + projects.json" in mounts_line
 
 
 def test_config_verb_bare_flags_dangling_keys(cy, run_cli, dirs, capsys):

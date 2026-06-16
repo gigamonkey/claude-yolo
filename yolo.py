@@ -1953,6 +1953,68 @@ def _do_config_worktree(
     print(json.dumps({topic: entry}, indent=2))
 
 
+def _effective_config(
+    home: pathlib.Path, cwd: pathlib.Path
+) -> tuple[list[tuple[str, object, list[str]]], str | None]:
+    """The merged global+project config that would apply at `cwd`, with per-key
+    provenance — what a bare `yolo config` shows.
+
+    Returns (items, matched_key). `items` is an ordered list of
+    `(key, value, sources)`: the canonical dashed key, its raw JSON value (paths
+    left un-expanded, so you see what's written), and the layer label(s) that
+    set it — one for a scalar (the winning layer), possibly two for a concat key
+    (`mounts`/`ports`/`prompts`/`secrets`) where global + project both
+    contribute. Mirrors `load_yolo_config`'s precedence (`~/.yolo.json` <
+    projects.json entry), but keeps values raw and tracks provenance for display.
+    It does **not** add the worktree overlay (bare `config` is project-scoped;
+    `yolo config TOPIC` shows the overlay) or the CLI layer or built-in defaults.
+
+    Read leniently like the `--global` show path: a present-but-unloadable file
+    errors pointedly, but an entry with an unknown key still displays (you fix it
+    here with `--unset`), so this never validates via `_parse_yolo_dict`.
+    """
+    raw_layers: list[tuple[str, dict]] = []
+
+    global_file = home / ".yolo.json"
+    if global_file.is_file():
+        try:
+            g = json.loads(global_file.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            sys.exit(f"{global_file}: cannot read config: {e}")
+        if not isinstance(g, dict):
+            sys.exit(f"{global_file}: must contain a JSON object")
+        raw_layers.append(("~/.yolo.json", g))
+
+    projects = _read_projects_file(home / ".claude-yolo" / "projects.json")
+    matched_key, entry = _match_project_entry(projects, cwd)
+    if matched_key is not None:
+        raw_layers.append(("projects.json", entry))
+
+    values: dict[str, object] = {}
+    sources: dict[str, list[str]] = {}
+    order: list[str] = []
+    for label, raw in raw_layers:
+        for k, v in raw.items():
+            norm = k.replace("-", "_")
+            key = norm.replace("_", "-")
+            if v is None:
+                continue  # explicit null = leave at built-in default (skipped, like the loader)
+            if key not in values:
+                order.append(key)
+            if norm in _CONCAT_DESTS:
+                # concat keys accumulate across layers; normalize to a list so a
+                # global string + a project list still merge cleanly.
+                add = list(v) if isinstance(v, list) else [v]
+                values[key] = (values[key] if key in values else []) + add  # type: ignore[operator]
+                sources.setdefault(key, []).append(label)
+            else:
+                values[key] = v
+                sources[key] = [label]
+
+    items = [(k, values[k], sources[k]) for k in order]
+    return items, matched_key
+
+
 def do_config(
     script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, parsed, topic: str | None = None
 ) -> None:
@@ -2051,12 +2113,19 @@ def do_config(
     key = _project_key(cwd)
 
     if not explicit and not editing:
-        matched_key, entry = _match_project_entry(projects, cwd)
+        # Show the *complete* effective config that would apply here — the global
+        # ~/.yolo.json values that aren't overridden, merged with this project's
+        # entry — not just the project entry, with per-key provenance.
+        items, matched_key = _effective_config(home, cwd)
         print(f"projects file: {projects_file}")
-        if matched_key is None:
-            print(f"no entry for {key}")
+        if not items:
+            note = "" if matched_key is not None else " (no project entry)"
+            print(f"no config applies for {key}; built-in defaults{note}")
         else:
-            print(json.dumps({matched_key: entry}, indent=2))
+            print(f"effective config for {key}:")
+            width = max(len(k) for k, _, _ in items)
+            for k, v, srcs in items:
+                print(f"  {k.ljust(width)}  {json.dumps(v)}  [{' + '.join(srcs)}]")
         _warn_dangling_keys(projects, no_entry=matched_key is None)
         return
 
@@ -3488,8 +3557,13 @@ def _finish_merge(topic: str, prefix: str) -> None:
 
 
 def _finish_push(topic: str, remote: str, prefix: str) -> None:
-    """Push `topic` to `remote` and keep it locally (the `push` action)."""
-    push = subprocess.run(["git", "push", remote, topic], capture_output=True, text=True)
+    """Push `topic` to `remote` and keep it locally (the `push` action).
+
+    Uses `-u` so the local branch tracks `<remote>/<topic>`: the `push` action
+    exists for the open-a-PR flow, where you'll want a later bare `git push` /
+    `git pull` on that branch to just work.
+    """
+    push = subprocess.run(["git", "push", "-u", remote, topic], capture_output=True, text=True)
     if push.returncode != 0:
         detail = push.stderr.strip() or push.stdout.strip()
         print(

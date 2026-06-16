@@ -855,10 +855,22 @@ Behavior à la `git config`:
   flag never appeared). `--mount` values are validated (exist + is-dir) *before*
   persisting, so a typo can't be pinned; the final entry is also re-validated so
   an unloadable entry is never written.
-- **Bare `yolo config`** is **read-only**: prints the entry that currently
-  applies (or "no entry for &lt;key&gt;") plus the projects.json path, and flags
-  dangling keys. There is no scaffold/template behavior (and no
-  `YOLO_INIT_DEFAULTS` anymore — built-in defaults live only in argparse).
+- **Bare `yolo config`** is **read-only**: prints the **complete effective
+  config that would apply here** — the global `~/.yolo.json` values that aren't
+  overridden, merged with this project's entry — not just the project entry,
+  with **per-key provenance** (`_effective_config`). Each line is `key value
+  [source]`, where `source` is `~/.yolo.json` or `projects.json` (or
+  `~/.yolo.json + projects.json` for a concat key — `mounts`/`ports`/`prompts`/
+  `secrets` — that both layers contribute to). Values are shown **raw** (paths
+  un-expanded, so you see what's written), and an explicit `null` is skipped
+  (it means "leave at the built-in default"). With nothing configured it prints
+  `built-in defaults` (plus `(no project entry)`); it also prints the
+  projects.json path and flags dangling keys. The merge mirrors
+  `load_yolo_config`'s precedence but **doesn't** validate via `_parse_yolo_dict`
+  (so an entry with a bad key still displays — fix it here with `--unset`), add
+  the worktree overlay (that's `yolo config TOPIC`), or include built-in
+  defaults. There is no scaffold/template behavior (and no `YOLO_INIT_DEFAULTS`
+  anymore — built-in defaults live only in argparse).
 - **Editing flags beyond whole-key sets** (all `config`-only, repeatable;
   applied by `_apply_config_edits`, the helper shared by the project and
   `--global` paths): **`--unset KEY`** deletes a key entirely (any *present*
@@ -964,9 +976,12 @@ gracefully outside one — there's just no repo slug to label/find by).
     failure (conflicts, dirty tree, unrelated histories) is **aborted** (`git
     merge --abort`) and the branch is **kept** — the worktree is already gone but
     the commits live on in the branch.
-  - **`push`** (`_finish_push`) — `git push <remote> TOPIC` to the
+  - **`push`** (`_finish_push`) — `git push -u <remote> TOPIC` to the
     **`--finish-remote`** (config key `finish-remote`, default `origin`) and keep
-    the branch **locally**. A push failure keeps the branch locally too.
+    the branch **locally**. The `-u` sets up tracking (`<remote>/TOPIC`) since
+    this action is for the open-a-PR flow, where a later bare `git push`/`git
+    pull` on the branch should just work. A push failure keeps the branch
+    locally too.
   - **`keep`** — leave the branch entirely alone (just clean up the worktree),
     with the `_branch_status_note` appended.
 

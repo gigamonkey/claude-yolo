@@ -3,6 +3,20 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **Bare `yolo config` now shows the complete *effective* config**, not just the
+  project entry: the global `~/.yolo.json` values that aren't overridden, merged
+  with this project's entry, each line annotated with where the value comes from
+  (`~/.yolo.json`, `projects.json`, or both for a concat key like `mounts`). So
+  you can see at a glance what's inherited versus pinned, instead of only the
+  project's own overrides.
+
+- **`yolo finish --finish-action push` now pushes with `-u`**, so the local
+  branch tracks `<remote>/<topic>`. The `push` action is for the open-a-PR flow,
+  where a later bare `git push`/`git pull` on the branch should just work;
+  previously it left the branch with no upstream.
+
 ## v0.15.0 — 2026-06-16
 
 - **New `secret` verb family + `--secret` flag (`secrets` config key) — store
