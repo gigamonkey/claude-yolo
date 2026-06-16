@@ -252,7 +252,11 @@ exactly like `.credentials.json`, and are reclaimed by the run-dir GC (Part 2).
 Note this is necessarily the "persistent" category: a **single-file bind mount is a
 mountpoint and can't be unlinked from inside** (`EBUSY`), so the ephemeral self-
 delete trick only ever applied to the dir-mounted env secrets. File-target secrets
-rely on the GC alone.
+rely on the GC alone. **Both halves confirmed 2026-06-16** via
+`probes/mount-delete-probe.sh`: (A) deleting a file inside a bind-mounted *directory*
+propagates to the host (so ephemeral env-secret delete works), and (B) a single-file
+bind mount is un-deletable from inside (so file-target secrets are inherently
+keep-for-session + GC).
 
 ### Threat model (be explicit)
 
@@ -407,19 +411,18 @@ matters in-container.
   sole grant. The global `secrets` list in `~/.yolo.json` is the "inject everywhere"
   escape hatch, opted into once.
 
-- **Access prompts:** **probe before deciding** — write a secret via yolo's
-  `security add-generic-password` path and confirm that reading it with
-  `security find-generic-password -w` at launch does *not* raise a GUI prompt in the
-  normal unlocked-login-keychain case (a `*-probe.sh`, like the token investigation).
-  Default to **no special ACL** (`-A`/`-T` only if the probe shows a prompt). This is
-  an **implementation prerequisite**, not a runtime decision.
+- **Access prompts:** **no special ACL needed — confirmed 2026-06-16** via
+  `probes/keychain-prompt-probe.sh`: a secret written with `add-generic-password -U`
+  (no `-A`/`-T`) and read back with `find-generic-password -w` raised **no GUI
+  prompt** on the host (login keychain unlocked). So `secret set` adds with yolo's
+  normal flags and launch reads them silently, exactly like the OAuth token path.
 
 - **`--clipboard` hygiene:** **do nothing** — after `pbpaste`, the clipboard is left
   untouched (not cleared, no warning); its contents are the user's business.
 
 ## Open questions
 
-None outstanding — all resolved above. Remaining pre-implementation work is the
-**access-prompt probe** (listed under *Decisions*) and the **delete-propagation
-probe** (Part 2 — confirm a delete inside a shared dir reaches the host on the actual
-engine). Both are empirical checks, not design choices.
+None — all design decisions resolved above, and **both empirical probes have passed**
+(2026-06-16): the keychain access-prompt probe (no GUI prompt, no special ACL needed)
+and the bind-mount delete-propagation probe (dir-content delete propagates;
+single-file mount un-deletable). The plan is ready to implement.
