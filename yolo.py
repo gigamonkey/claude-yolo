@@ -1053,7 +1053,12 @@ def _warn_secret_file_target(target: str, cwd: pathlib.Path) -> None:
 
 
 def _stage_secrets(
-    specs: list[str], project_key: str | None, run_dir: pathlib.Path, cwd: pathlib.Path
+    specs: list[str],
+    project_key: str | None,
+    run_dir: pathlib.Path,
+    cwd: pathlib.Path,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[list[str], bool]:
     """Stage configured secrets into the run dir; return (docker `-v` args, have_env).
 
@@ -1061,16 +1066,36 @@ def _stage_secrets(
     bind-mounted rw at /run/secrets (the baked loader exports them; rw lets it
     delete an ephemeral one). File-target secrets are each staged and bind-mounted
     read-only at their container path. Both stage chmod-600 files in the run dir, so
-    no value ever touches the docker-run argv. `have_env` reports whether any
-    env-target secret was staged (so the caller knows to source the loader in the
-    claude launch wrapper). Exits if a referenced secret isn't in the keychain.
+    no value ever touches the docker-run argv. `extra_env` carries non-secret-store
+    env values that ride the *same* file transport — the Anthropic OAuth token,
+    which would otherwise sit on the docker-run argv (and so `docker inspect`, host
+    `ps`, tmux's retained pane command); staged non-ephemeral so a `docker exec`'d
+    `yolo shell` can re-read it. `have_env` reports whether any env value was staged
+    (so the caller knows to source the loader in the claude launch wrapper). Exits
+    if a referenced keychain secret isn't found.
     """
     resolved = _resolve_secret_specs(specs)
-    if not resolved:
+    extra_env = extra_env or {}
+    if not resolved and not extra_env:
         return [], False
     args: list[str] = []
     env_dir = run_dir / "secrets"
     have_env = False
+
+    def stage_env(name: str, value: str, ephemeral: bool = False) -> None:
+        nonlocal have_env
+        if not have_env:
+            env_dir.mkdir(parents=True, exist_ok=True)
+            env_dir.chmod(0o700)
+            have_env = True
+        _write_run_file(env_dir, name, value.encode())
+        if ephemeral:
+            _write_run_file(env_dir, f"{name}.ephemeral", b"")
+
+    # The token first, so a user secret that deliberately reuses its env name
+    # (odd, but their call) overwrites it rather than the reverse.
+    for name, value in extra_env.items():
+        stage_env(name, value)
     for idx, (name, kind, target, ephemeral) in enumerate(resolved):
         value = _resolve_secret_value(name, project_key)
         if value is None:
@@ -1079,13 +1104,7 @@ def _stage_secrets(
                 f"`yolo secret set {name}` (add --project for project scope)."
             )
         if kind == "env":
-            if not have_env:
-                env_dir.mkdir(parents=True, exist_ok=True)
-                env_dir.chmod(0o700)
-                have_env = True
-            _write_run_file(env_dir, target, value.encode())
-            if ephemeral:
-                _write_run_file(env_dir, f"{target}.ephemeral", b"")
+            stage_env(target, value, ephemeral)
         else:  # file
             _warn_secret_file_target(target, cwd)
             staged = _write_run_file(run_dir, f"secret-file-{idx}", value.encode())
@@ -1093,10 +1112,6 @@ def _stage_secrets(
     if have_env:
         args += ["-v", f"{env_dir}:{_SECRETS_CONTAINER_DIR}:rw"]
     return args, have_env
-
-
-def _secret_scope_label(scope: str) -> str:
-    return "project" if scope == "project" else "global"
 
 
 def do_secret(parsed, home: pathlib.Path, cwd: pathlib.Path) -> None:
@@ -3212,8 +3227,17 @@ def launch_container(
     #     snapshots (and the host keychain) share one refresh boundary — the access
     #     token's expiry — and whoever refreshes first there breaks every other
     #     holder, host login included.
+    token_env: dict[str, str] = {}
     if parsed.auth == "oauth-token":
-        args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
+        # Deliver the token through the /run/secrets file transport (staged below),
+        # NOT `-e`: an `-e NAME=value` lands on the host docker-run argv (which yolo
+        # prints, and which shows in host `ps`), in `docker inspect`'s Config.Env,
+        # and in tmux's retained pane command. A chmod-600 run-dir file + the loader
+        # keeps it off all three. (It still ends up in claude's *in-container*
+        # process environ — unavoidable, since claude reads CLAUDE_CODE_OAUTH_TOKEN
+        # from there — but that's inside claude's own trust boundary; claude holds
+        # the token regardless.)
+        token_env["CLAUDE_CODE_OAUTH_TOKEN"] = ensure_oauth_token(config_dir)
         args += ["-v", f"{_masking_credfile(run_dir)}:/home/claude/.claude/.credentials.json"]
     elif parsed.auth == "bedrock":
         # (the container name's -{profile} suffix was applied up front, with the run dir.)
@@ -3230,18 +3254,18 @@ def launch_container(
         credfile = extract_credentials(config_dir, run_dir)
         args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
 
-    # Secrets (--secret / `secrets` config): stage chmod-600 files in the run dir
-    # and bind-mount them — env targets via the rw /run/secrets loader dir, file
-    # targets read-only at their path. No secret value ever reaches the docker-run
-    # argv. The project key (for project-scope resolution) is the main repo root,
-    # which _project_key derives from the host process cwd regardless of any
-    # worktree retargeting of `cwd`.
-    have_env_secrets = False
-    if parsed.secrets:
-        secret_args, have_env_secrets = _stage_secrets(
-            parsed.secrets, _project_key(cwd), run_dir, cwd
-        )
-        args += secret_args
+    # Secrets (--secret / `secrets` config) + the OAuth token (token_env): stage
+    # chmod-600 files in the run dir and bind-mount them — env targets via the rw
+    # /run/secrets loader dir, file targets read-only at their path. No value ever
+    # reaches the docker-run argv. The project key (for project-scope resolution of
+    # user secrets) is the main repo root, which _project_key derives from the host
+    # process cwd regardless of any worktree retargeting of `cwd`; the token needs
+    # no project key, so skip the git call when there are no user secrets.
+    project_key = _project_key(cwd) if parsed.secrets else None
+    secret_args, have_env_secrets = _stage_secrets(
+        parsed.secrets, project_key, run_dir, cwd, extra_env=token_env
+    )
+    args += secret_args
 
     # Labels let the verbs (shell/finish/list) find this container later, regardless
     # of the name suffixes above. yolo.cwd is stamped on every launch so a plain
@@ -3278,15 +3302,16 @@ def launch_container(
     image_tag = _build_image(parsed, cwd)
 
     # For a claude launch (entrypoint is None → the image's `claude
-    # --dangerously-skip-permissions` ENTRYPOINT) with env-target secrets and/or
-    # --yolorc, drop into bash to source the secrets loader (which exports each
-    # /run/secrets file) and then the rc, before exec'ing the reconstructed claude
-    # command. claude isn't a shell, so it never reads .bashrc (where `yolo shell`
-    # gets these) — the wrapper is how a claude session picks them up. `source`
-    # (not run) so the exports reach claude's env; the loader runs *before* the rc
-    # so an rc can use the exported values; a nonzero rc warns but doesn't block.
-    # The claude args are passed positionally to "$@" so the --settings JSON and
-    # OAuth token need no re-quoting.
+    # --dangerously-skip-permissions` ENTRYPOINT) with env values to load —
+    # env-target secrets, the OAuth token in oauth-token mode (the default, so this
+    # is the common path), and/or --yolorc — drop into bash to source the secrets
+    # loader (which exports each /run/secrets file, the token included) and then the
+    # rc, before exec'ing the reconstructed claude command. claude isn't a shell, so
+    # it never reads .bashrc (where `yolo shell` gets these) — the wrapper is how a
+    # claude session picks them up. `source` (not run) so the exports reach claude's
+    # env; the loader runs *before* the rc so an rc can use the exported values; a
+    # nonzero rc warns but doesn't block. The claude args are passed positionally to
+    # "$@" so the --settings JSON needs no re-quoting.
     if (yolorc_host or have_env_secrets) and entrypoint is None:
         entrypoint = "/bin/bash"
         command = [

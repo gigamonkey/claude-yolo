@@ -370,13 +370,21 @@ options](#configuration) below compose with whichever you pick.
 ### `oauth-token` (default)
 
 Authenticates with a long-lived token from `claude setup-token` — a **one-year
-token that is never rotated and never written back** — forwarded into the
+token that is never rotated and never written back** — delivered into the
 container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable, with no
 `.credentials.json` mount. Because nothing ever rewrites it, **any number of
 concurrent containers (plus the host on its own keychain login) can use it at once**
 with no interference, for as long as each session runs. That's why it's the
 default: there is no refresh boundary to cross, so nothing depends on when your
 sessions happen to run, how long they last, or how many run at once.
+
+The token is **not** put on the `docker run` command line (`-e
+CLAUDE_CODE_OAUTH_TOKEN=…`). It rides the same private file transport as injected
+[secrets](#secrets---secret-nametarget-repeatable) — staged in a chmod-600 file,
+bind-mounted at `/run/secrets`, and exported inside the container by a small baked
+loader — so the token stays out of `docker inspect`, host `ps`, and tmux's saved
+pane command. (It still ends up in Claude's own process environment inside the
+container, which is unavoidable and harmless — that's where Claude reads it from.)
 
 The first launch per config directory has no cached token, so yolo offers to mint
 one: it explains what's about to happen, asks for confirmation, then runs the
@@ -689,15 +697,19 @@ yolo --secret GH_TOKEN --secret DEPLOY_KEY:~/.ssh/id_ed25519
 yolo config --add-secret GH_TOKEN     # persist for this project
 ```
 
-**No secret value ever reaches the `docker run` command line** (and so never
-`docker inspect`, `/proc/1/environ`, or tmux's saved pane command — the exposure
-the forwarded Anthropic token still has). Env-target secrets are written to
-chmod-600 files in a private per-session directory bind-mounted at `/run/secrets`
-and exported by a small loader yolo bakes into the image (sourced before your
-`yolorc`, so an rc can use the values — e.g. `echo "$GH_TOKEN" | gh auth login
---with-token`). File-target secrets are bind-mounted read-only at their path.
-Either way the staged files live under `$TMPDIR` (excluded from Time Machine and
-synced folders) and are reclaimed when the container exits.
+**No secret value ever reaches the `docker run` command line** — and so never
+`docker inspect`'s env, host `ps`, or tmux's saved pane command. Env-target
+secrets are written to chmod-600 files in a private per-session directory
+bind-mounted at `/run/secrets` and exported by a small loader yolo bakes into the
+image (sourced before your `yolorc`, so an rc can use the values — e.g. `echo
+"$GH_TOKEN" | gh auth login --with-token`). File-target secrets are bind-mounted
+read-only at their path. Either way the staged files live under `$TMPDIR`
+(excluded from Time Machine and synced folders) and are reclaimed when the
+container exits. (An env-target value does end up in Claude's own process
+environment inside the container — unavoidable for an env var, and within the
+session's trust boundary; a file target avoids even that.) The default
+`oauth-token` auth mode delivers the Anthropic token through this very same
+transport, for the same reason.
 
 The keychain buys **encrypted-at-rest storage and no plaintext secrets dotfile**
 — it does not make the secret invisible to Claude. Anything you inject, Claude

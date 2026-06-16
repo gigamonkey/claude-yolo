@@ -23,11 +23,21 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   var `NAME`; `NAME:ENVNAME` → renamed env var; `NAME:/path` or `NAME:~/path` →
   a file bind-mounted at that container path (`~` is the *container* home,
   `/home/claude`). A trailing `!` on an env target makes it ephemeral (deleted
-  right after it's read). **No secret value ever reaches the docker-run argv**
-  (and so not `docker inspect`, `/proc/1/environ`, or tmux's retained pane
-  command): env-target secrets transit a private `/run/secrets` file mount read
+  right after it's read). **No secret value ever reaches the docker-run argv** —
+  and so not `docker inspect`'s `Config.Env`, host `ps`, or tmux's retained pane
+  command: env-target secrets transit a private `/run/secrets` file mount read
   by a baked loader (sourced from the claude launch wrapper and `.bashrc`),
   file-target secrets a read-only bind mount.
+
+- **The Anthropic OAuth token no longer rides the docker command line.** In the
+  default `oauth-token` auth mode, `CLAUDE_CODE_OAUTH_TOKEN` was passed with
+  `-e`, which put it on the host docker-run argv (yolo even printed it), in
+  `docker inspect`'s `Config.Env`, and in tmux's retained pane command. It now
+  reuses the same `/run/secrets` file transport as `--secret`, so it's off all
+  three. (It still appears in claude's in-container process environment — inherent
+  to delivering it as an env var, and inside the session's own trust boundary.) A
+  side effect: every `oauth-token` claude launch is now started through the bash
+  wrapper that sources the secrets loader.
 
 - **Temp-file cleanup hardening.** yolo previously left a credential file in
   `$TMPDIR` on every launch (`extract_credentials`/`_masking_credfile` used

@@ -135,7 +135,11 @@ def test_tmux_outside_creates_session_and_attaches(cy, run_cli, tmux, dirs):
     assert run_cmd[:2] == ["docker", "run"]
     settings = run_cmd[run_cmd.index("--settings") + 1]
     assert '"sandbox":{"enabled":false}' in settings  # survived the shlex round trip
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in run_cmd
+    # the OAuth token rides /run/secrets, so it's NOT in the tmux pane command
+    # (the retained-command exposure this transport exists to avoid)
+    assert "sk-ant-oat-TESTTOKEN" not in cmd
+    assert not any("CLAUDE_CODE_OAUTH_TOKEN" in a for a in run_cmd)
+    assert any(a.endswith(":/run/secrets:rw") for a in run_cmd)
 
     # outside tmux, the invoking terminal becomes the client, on the new window
     assert argv == ["tmux", "select-window", "-t", "@10", ";", "attach-session", "-t", "=yolo"]

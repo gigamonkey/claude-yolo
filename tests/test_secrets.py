@@ -347,7 +347,11 @@ def test_launch_env_rename_and_ephemeral(cy, run_cli, monkeypatch, dirs):
 def test_launch_file_secret_mounts_ro_at_path(cy, run_cli, monkeypatch, dirs):
     home, work = dirs
     _stub_secret_values(cy, monkeypatch, {"DEPLOY_KEY": "PRIVATEKEY"})
-    argv = run_cli(["--secret", "DEPLOY_KEY:~/.ssh/id_ed25519"], home=home, cwd=work)
+    # --auth keychain so the oauth token doesn't add its own /run/secrets mount —
+    # this isolates the file-target path (no env-target secret here).
+    argv = run_cli(
+        ["--auth", "keychain", "--secret", "DEPLOY_KEY:~/.ssh/id_ed25519"], home=home, cwd=work
+    )
     mounts = mount_values(argv)
     assert any(m.endswith(":/home/claude/.ssh/id_ed25519:ro") for m in mounts), mounts
     # no /run/secrets mount, since there's no env-target secret
@@ -371,8 +375,47 @@ def test_launch_warns_on_host_visible_file_target(cy, run_cli, monkeypatch, dirs
 
 
 def test_launch_no_secrets_no_run_secrets_mount(cy, run_cli, dirs):
+    # --auth keychain: with no user secrets and no oauth token, nothing rides
+    # /run/secrets (the default oauth-token mode mounts it for the token).
+    home, work = dirs
+    argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
+    assert not any("/run/secrets" in m for m in mount_values(argv))
+
+
+# --- the Anthropic OAuth token rides the same transport ----------------------
+
+
+def test_oauth_token_staged_via_run_secrets_not_argv(cy, run_cli, dirs):
+    # Default (oauth-token) mode delivers CLAUDE_CODE_OAUTH_TOKEN through the
+    # /run/secrets file transport instead of -e, so it's off the docker-run argv
+    # (and thus docker inspect / host ps / tmux pane command).
     home, work = dirs
     argv = run_cli([], home=home, cwd=work)
+    assert not any("CLAUDE_CODE_OAUTH_TOKEN" in a for a in argv)
+    assert "sk-ant-oat-TESTTOKEN" not in " ".join(argv)
+    assert any(m.endswith(":/run/secrets:rw") for m in mount_values(argv))
+    token_file = home / ".claude-yolo-run" / "work" / "secrets" / "CLAUDE_CODE_OAUTH_TOKEN"
+    assert token_file.read_text() == "sk-ant-oat-TESTTOKEN"
+    assert oct(token_file.stat().st_mode)[-3:] == "600"
+    # claude is launched through the loader-sourcing wrapper
+    assert "--entrypoint" in argv and "/etc/yolo/load-secrets.sh" in " ".join(argv)
+
+
+def test_oauth_token_coexists_with_user_secret_in_run_secrets(cy, run_cli, monkeypatch, dirs):
+    home, work = dirs
+    _stub_secret_values(cy, monkeypatch, {"GH_TOKEN": "ghs_x"})
+    run_cli(["--secret", "GH_TOKEN"], home=home, cwd=work)
+    secrets_dir = home / ".claude-yolo-run" / "work" / "secrets"
+    # both the token and the user secret share the one /run/secrets dir
+    assert (secrets_dir / "CLAUDE_CODE_OAUTH_TOKEN").read_text() == "sk-ant-oat-TESTTOKEN"
+    assert (secrets_dir / "GH_TOKEN").read_text() == "ghs_x"
+
+
+def test_keychain_auth_keeps_token_off_run_secrets(cy, run_cli, dirs):
+    # keychain mode has no env token, so nothing is staged for it.
+    home, work = dirs
+    argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
+    assert not (home / ".claude-yolo-run" / "work" / "secrets").exists()
     assert not any("/run/secrets" in m for m in mount_values(argv))
 
 

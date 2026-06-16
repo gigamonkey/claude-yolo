@@ -64,7 +64,8 @@ def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo):
     assert "auth-fix" in git(r, "branch", "--list", "auth-fix").stdout
     # labelled and named
     assert worktree_label(argv) == "auth-fix"
-    assert claude_command(cy, argv)[:2] == ["--name", "auth-fix"]
+    cmd = claude_command(cy, argv)
+    assert cmd[cmd.index("--name") + 1] == "auth-fix"
 
 
 def test_start_errors_if_topic_exists(cy, run_cli, repo):
@@ -109,7 +110,7 @@ def test_resume_new_starts_named_fresh_session(cy, run_cli, repo):
     run_cli(["start", "topic"], home=home, cwd=r)
     argv = run_cli(["resume", "topic", "--new"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
-    assert cmd[:2] == ["--name", "topic"]
+    assert cmd[cmd.index("--name") + 1] == "topic"
     assert "--continue" not in cmd
 
 
@@ -653,9 +654,7 @@ def test_list_all_merged_judged_per_repo(cy, run_cli, repo, tmp_path, capsys):
     run_cli(["list", "--all"], home=home, cwd=r)
     out = capsys.readouterr().out
     # STATUS is the 3rd column under --all (REPO TOPIC STATUS DIRECTORY)
-    status = next(
-        line.split()[2] for line in out.splitlines()[1:] if line.split()[1] == "done"
-    )
+    status = next(line.split()[2] for line in out.splitlines()[1:] if line.split()[1] == "done")
     assert status == "merged"
 
 

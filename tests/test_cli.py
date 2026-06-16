@@ -40,6 +40,25 @@ def claude_args(cy, argv):
     return argv[i + 1 :]
 
 
+def assert_token_via_run_secrets(home, argv, flag_values, token="sk-ant-oat-TESTTOKEN"):
+    """Assert the OAuth token rides the /run/secrets file transport, not the argv.
+
+    oauth-token mode no longer passes `-e CLAUDE_CODE_OAUTH_TOKEN=…` (that would
+    leak it into the docker-run argv / `docker inspect` / tmux pane command). The
+    token is staged as a chmod-600 run-dir file and mounted at /run/secrets, where
+    the baked loader exports it. Returns nothing; raises on mismatch.
+    """
+    mounts = flag_values(argv, "-v")
+    assert any(m.endswith(":/run/secrets:rw") for m in mounts), mounts
+    # the value never appears anywhere on the argv
+    assert not any("CLAUDE_CODE_OAUTH_TOKEN" in a for a in argv), argv
+    assert token not in " ".join(argv)
+    staged = (
+        home / ".claude-yolo-run" / container_name(argv) / "secrets" / "CLAUDE_CODE_OAUTH_TOKEN"
+    )
+    assert staged.read_text() == token
+
+
 # --- default run ------------------------------------------------------------
 
 
@@ -52,9 +71,10 @@ def test_default_run_assembles_expected_mounts(cy, run_cli, flag_values, dirs):
     assert container_name(argv) == "work"
     assert f"{home}/.claude:/home/claude/.claude" in mounts
     assert f"{home}/.claude.json:/home/claude/.claude.json" in mounts
-    # the default auth mode is oauth-token: a forwarded env token, no mounted
-    # keychain-credentials snapshot (that mode is unsafe for concurrent sessions)
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    # the default auth mode is oauth-token: the token rides /run/secrets (not -e,
+    # so it stays off the argv / docker inspect), no mounted keychain-credentials
+    # snapshot (that mode is unsafe for concurrent sessions)
+    assert_token_via_run_secrets(home, argv, flag_values)
     # the only .credentials.json overlay is the throwaway mask, never the keychain
     # snapshot — so a stale host creds file can't shadow the env token
     assert cred_overlays(mounts) == [MASK_CREDFILE]
@@ -158,7 +178,7 @@ def test_aws_flag_without_bedrock_warns(cy, run_cli, flag_values, dirs, capsys):
     argv = run_cli(["--aws-profile", "prod"], home=home, cwd=work)
     assert "ignored without --auth bedrock" in capsys.readouterr().err
     # still a normal (default oauth-token) run
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert_token_via_run_secrets(home, argv, flag_values)
 
 
 # --- auth: oauth-token ------------------------------------------------------
@@ -168,8 +188,7 @@ def test_oauth_token_forwards_env_and_skips_keychain(cy, run_cli, flag_values, d
     home, work = dirs
     argv = run_cli(["--auth", "oauth-token"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
-    envs = flag_values(argv, "-e")
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    assert_token_via_run_secrets(home, argv, flag_values)
     # no rotating keychain creds mounted in this mode — just the throwaway mask
     assert cred_overlays(mounts) == [MASK_CREDFILE]
     # the config dir / claude.json are still mounted (auth is orthogonal to them)
@@ -216,9 +235,8 @@ def test_oauth_token_composes_with_config_dir(cy, run_cli, flag_values, tmp_path
         d.mkdir()
     argv = run_cli(["--auth", "oauth-token", "--config-dir", str(cfg)], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
-    envs = flag_values(argv, "-e")
     assert f"{cfg}:/home/claude/.claude" in mounts
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in envs
+    assert_token_via_run_secrets(home, argv, flag_values)
     assert cred_overlays(mounts) == [MASK_CREDFILE]
 
 
@@ -226,7 +244,7 @@ def test_oauth_token_via_yolo_json(cy, run_cli, flag_values, dirs):
     home, work = dirs
     (home / ".yolo.json").write_text(json.dumps({"auth": "oauth-token"}))
     argv = run_cli([], home=home, cwd=work)
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert_token_via_run_secrets(home, argv, flag_values)
     assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
 
 
@@ -354,7 +372,7 @@ def test_project_entry_provides_defaults(cy, run_cli, flag_values, dirs):
     home, work = dirs
     write_projects(home, {str(work): {"auth": "oauth-token"}})
     argv = run_cli([], home=home, cwd=work)
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert_token_via_run_secrets(home, argv, flag_values)
 
 
 def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsys):
@@ -363,7 +381,7 @@ def test_in_directory_yolo_json_is_ignored(cy, run_cli, flag_values, dirs, capsy
     argv = run_cli([], home=home, cwd=work)
     # the in-directory file no longer configures anything: still a default
     # oauth-token run, not the keychain run the file asks for
-    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TESTTOKEN" in flag_values(argv, "-e")
+    assert_token_via_run_secrets(home, argv, flag_values)
     assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
     assert "no longer read" in capsys.readouterr().err
 
@@ -684,7 +702,7 @@ def test_start_worktree_mounts_shared_git_and_names_session(
     assert f"{git}:{git}" in mounts  # shared .git mounted
     assert container_name(argv) == "repo-feat"
     cargs = claude_args(cy, argv)
-    assert cargs[:2] == ["--name", "feat"]  # session named
+    assert cargs[cargs.index("--name") + 1] == "feat"  # session named
 
 
 # --- custom Dockerfile (--dockerfile) + content-addressed tag ----------------

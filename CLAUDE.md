@@ -188,9 +188,9 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    macOS keychain via the `security` CLI, into a chmod-600 file **in the
    per-session run dir** (`$TMPDIR/claude-yolo-run/<container>/`; see the run-dir
    section) that gets bind-mounted to `.credentials.json`. In the default
-   oauth-token mode this
-   step is replaced by forwarding `CLAUDE_CODE_OAUTH_TOKEN` (see the oauth-token
-   section). Service name is `Claude Code-credentials` by default,
+   oauth-token mode this step is replaced by staging the
+   `CLAUDE_CODE_OAUTH_TOKEN` into `/run/secrets` (the env-secret file transport,
+   not `-e` — see the oauth-token section). Service name is `Claude Code-credentials` by default,
    or `Claude Code-credentials-{hash8}` for a non-default config dir, where
    `hash8` is the first 8 hex chars of the SHA-256 of the resolved config path.
    This mirrors how Claude Code itself names keychain entries — if that scheme
@@ -284,11 +284,15 @@ on top of whichever auth is chosen:
   inside). Concat/dedup mirrors mounts/ports (exact-dup specs deduped; on a
   target collision — same env name or mount path — the higher layer wins; a secret
   needed both ways is two specs). **No secret value ever reaches the docker-run
-  argv** (`docker inspect`, `/proc/1/environ`, tmux's retained pane command): env
-  secrets transit a private `/run/secrets` file mount consumed by a baked loader,
-  file secrets a read-only bind mount. The opt-in gate is the same as
+  argv** — and so not `docker inspect`'s `Config.Env`, not host `ps`, not tmux's
+  retained pane command: env secrets transit a private `/run/secrets` file mount
+  consumed by a baked loader, file secrets a read-only bind mount. (An env-target
+  value *does* end up in the consuming process's in-container `/proc/<pid>/environ`
+  — unavoidable for an env var the tool reads — but that's inside the session's own
+  trust boundary; a file target avoids even that.) The opt-in gate is the same as
   `--yolorc`/`--dockerfile` — the *key* is host-side (Claude can't grant its next
-  session a new secret). See [Secrets](#secrets).
+  session a new secret). See [Secrets](#secrets). The Anthropic OAuth token rides
+  this same env transport in oauth-token mode (see that section).
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -377,11 +381,16 @@ The three `--auth` values (the (c) block in `launch_container`):
 
 - **`oauth-token`** (default) → authenticate with a long-lived
   `CLAUDE_CODE_OAUTH_TOKEN` env var; **skips keychain extraction and the login
-  check**, adding `-e CLAUDE_CODE_OAUTH_TOKEN=…` and overlaying a throwaway `{}`
-  `.credentials.json` (`_masking_credfile`) so a stale host creds file can't
-  shadow the env token under Claude Code 2.1.x (see the precedence caveat below).
-  It's the default because it has no refresh boundary, so it's safe regardless
-  of session timing or concurrency. See
+  check**. The token is delivered through the **secrets file transport**
+  (`_stage_secrets`' `extra_env`), *not* `-e`: staged as a chmod-600
+  `<run-dir>/secrets/CLAUDE_CODE_OAUTH_TOKEN` file, mounted at `/run/secrets`, and
+  exported by the baked loader in the launch wrapper — so the token stays off the
+  docker-run argv, `docker inspect`, host `ps`, and tmux's pane command. (This is
+  why every oauth-token claude launch is bash-wrapped.) It also overlays a
+  throwaway `{}` `.credentials.json` (`_masking_credfile`) so a stale host creds
+  file can't shadow the env token under Claude Code 2.1.x (see the precedence
+  caveat below). It's the default because it has no refresh boundary, so it's safe
+  regardless of session timing or concurrency. See
   [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token-the-default) below.
 - **`keychain`** → `ensure_logged_in` + `extract_credentials`, mounting
   the rotating keychain creds at `.credentials.json`. The only mode that runs the
@@ -427,11 +436,15 @@ is *not* a safe fix.
 family** for containers: `claude setup-token` mints a **one-year token that is
 never rotated and never written back**. Because nothing ever rewrites it, any
 number of concurrent containers — and the host on its own keychain creds — can use
-it simultaneously with no interference. It's delivered purely as the
-`CLAUDE_CODE_OAUTH_TOKEN` env var. This is why it became the default in 0.6.0:
-keychain mode was an attractive nuisance — fine in a quick test, with breakage
-governed by an invisible refresh boundary rather than anything the user can see
-or control.
+it simultaneously with no interference. It reaches the container as the
+`CLAUDE_CODE_OAUTH_TOKEN` env var — but **delivered via the secrets file transport,
+not `-e`** (`launch_container` resolves it with `ensure_oauth_token`, hands it to
+`_stage_secrets` as `extra_env`, and the baked loader exports it from a chmod-600
+`/run/secrets` file in the launch wrapper), so the token stays off the docker-run
+argv / `docker inspect` / host `ps` / tmux's retained pane command. This is why it
+became the default in 0.6.0: keychain mode was an attractive nuisance — fine in a
+quick test, with breakage governed by an invisible refresh boundary rather than
+anything the user can see or control.
 
 **Precedence caveat (the env var does *not* reliably out-rank a file).** It was
 once true (probed 2026-06-09) that the env token out-ranked any
@@ -493,7 +506,11 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 - **Caveat:** this *does* put a bearer token inside the container env (a shift from
   the "secret never enters the container" SSH-agent philosophy), but it's a scoped,
   inference-only token — and no worse than the mounted refresh-token snapshot,
-  which it replaces. Requires a Pro/Max/Team/Enterprise plan.
+  which it replaces. The token reaches the container's env via the `/run/secrets`
+  file transport, not `-e`, so it's no longer on the host docker-run argv /
+  `docker inspect` / tmux pane command (it does still appear in claude's
+  in-container `/proc/<pid>/environ` — inherent to an env var, and inside the
+  session's own trust boundary). Requires a Pro/Max/Team/Enterprise plan.
 
 ### Token bookkeeping: registry, expiry warning, `tokens` / `forget-token`
 
@@ -646,7 +663,11 @@ host-side, so Claude can't grant its next session a new secret). The global
 
 Both read from the keychain and stage **chmod-600 files in the per-session run dir**
 (see [run dir](#temp-file-cleanup--the-per-session-run-dir) below); in neither case
-does the value touch the docker-run argv.
+does the value touch the docker-run argv (so not `docker inspect`'s `Config.Env`,
+host `ps`, or tmux's pane command — the host-side surfaces an `-e` would leak it
+into). An env-target value still lands in the consuming process's in-container
+`/proc/<pid>/environ` — that's inherent to delivering an env var, and it's inside
+the session's own trust boundary.
 
 - **Env-target secrets** — *file transport, env by convention*. Each is written to
   `<run-dir>/secrets/<ENVNAME>` (file name = env var name, **no trailing newline**);
@@ -659,10 +680,14 @@ does the value touch the docker-run argv.
   shell` exec'd into the same container. The loader is **sourced from two places**
   (claude never runs `.bashrc`): the **claude launch wrapper** (extended from the
   `--yolorc` wrapper — sources the loader, then the rc, then `exec "$@"`; triggered
-  by env secrets *or* a yolorc) and the baked **`.bashrc`** (for `yolo shell`,
-  sentinel-guarded by `YOLO_SECRETS_SOURCED`, before the `YOLO_RC` line so an rc can
-  use the values). No secrets configured → no `/run/secrets` mount, loader is a
-  no-op.
+  by env secrets, the OAuth token, *or* a yolorc) and the baked **`.bashrc`** (for
+  `yolo shell`, sentinel-guarded by `YOLO_SECRETS_SOURCED`, before the `YOLO_RC`
+  line so an rc can use the values). Nothing to load → no `/run/secrets` mount,
+  loader is a no-op. **The Anthropic OAuth token is delivered through this exact
+  path** in oauth-token mode (`_stage_secrets`' `extra_env`): staged as
+  `<run-dir>/secrets/CLAUDE_CODE_OAUTH_TOKEN`, non-ephemeral (so a `docker exec`'d
+  `yolo shell` re-reads it), which is why every oauth-token claude launch is now
+  wrapped. See [Auth — oauth-token](#long-lived-oauth-token---auth-oauth-token-the-default).
 
 - **File-target secrets** — each staged value is bind-mounted **read-only** at its
   container path. **Not** placed in `/run/secrets` (the loader ignores them) and
@@ -1068,9 +1093,11 @@ Implementation shape:
   (the `-{config}`/`-{profile}` suffixes, up front) and **GCs + creates the
   per-session run dir** (keyed by that name; see the run-dir section), then
   assembles mounts (cwd + the extra `--mount` dirs), ssh-agent block, the
-  credential/config/auth blocks (staging creds into the run dir), the **secret
-  mounts** (`_stage_secrets`: the rw `/run/secrets` mount for env targets, a ro
-  mount per file target), labels, `--entrypoint` override, then hands the finished
+  credential/config/auth blocks (staging creds into the run dir; oauth-token mode
+  hands the token to `_stage_secrets` as `extra_env` rather than `-e`), the
+  **secret mounts** (`_stage_secrets`: the rw `/run/secrets` mount for env targets
+  + the token, a ro mount per file target), labels, `--entrypoint` override, then
+  hands the finished
   argv to `_dispatch_launch` (the run-it-here vs run-it-in-tmux seam — see the tmux
   section). It takes `container_base`,
   `command` (args after the image), optional `entrypoint`, and the resolved
@@ -1192,11 +1219,13 @@ Details that matter:
   (`ensure_oauth_token` consent/mint, `ensure_logged_in`) run in the invoking
   terminal — only the finished `docker run` argv moves into the window. The
   terminal verbs never touch tmux.
-- Caveat (accepted for now): the window command string — including
-  `CLAUDE_CODE_OAUTH_TOKEN` — is retained in tmux server state
-  (`#{pane_start_command}`). Not a new exposure class (the exec'd argv is
-  visible in `ps` for the container's lifetime either way); an `--env-file`
-  hardening would fix both and is a possible follow-up.
+- The window command string is retained in tmux server state
+  (`#{pane_start_command}`), but it **no longer contains any secret**: the OAuth
+  token (and every `--secret`) now rides the `/run/secrets` file transport rather
+  than `-e`/the argv, so the retained command — like `docker inspect` and host
+  `ps` — is secret-free. (This is the hardening the old "`--env-file` follow-up"
+  note anticipated; the file+loader approach goes further than `--env-file`, which
+  would still populate `docker inspect`'s `Config.Env`.)
 - All tmux commands go through the `_tmux()` wrapper — the test seam
   (`tests/test_tmux.py` fakes the server there and asserts on exact argv
   sequences).
@@ -1451,7 +1480,12 @@ env-rename + ephemeral marker file, file → per-path ro mount, the missing-secr
 exit, the host-visible-path warning, and that no value ever reaches the argv); the
 `secrets` config-layer concatenation; the `config` verb `--add-secret`/
 `--remove-secret` edits + spec validation + the replace-conflict guard; the
-`--project`/`--clipboard`/extra-args verb gating; and the docker-ps-scoped GC
+`--project`/`--clipboard`/extra-args verb gating; the **OAuth-token-via-/run/secrets**
+delivery (staged file + rw mount + wrapper, token off the argv, coexisting with a
+user secret, and absent under `--auth keychain`); and the docker-ps-scoped GC
 (parallel-safety) + the `_session_run_dir` 700 mode + the credential/mask
-run-dir retrofit (chmod 600, in the run dir).
-Keep them green when changing flags or mounts.
+run-dir retrofit (chmod 600, in the run dir). `test_cli.py`'s
+`assert_token_via_run_secrets` helper is the shared check that oauth-token mode
+keeps the token off the argv and stages it under `/run/secrets`; `test_tmux.py`
+asserts the same for the retained pane command. Keep them green when changing
+flags or mounts.

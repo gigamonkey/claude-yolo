@@ -102,8 +102,11 @@ def test_missing_yolorc_exits(cy, run_cli, dirs, tmp_path):
 
 
 def test_no_yolorc_leaves_launch_unwrapped(cy, run_cli, flag_values, dirs):
+    # Use --auth keychain so there are no env values to load: oauth-token (the
+    # default) now wraps the launch to source the token via /run/secrets, so the
+    # "unwrapped" baseline only exists when nothing needs the loader.
     home, work = dirs
-    argv = run_cli([], home=home, cwd=work)
+    argv = run_cli(["--auth", "keychain"], home=home, cwd=work)
     assert entrypoint(argv) is None  # the image's claude ENTRYPOINT
     assert all(not e.startswith("YOLO_RC=") for e in flag_values(argv, "-e"))
     assert all(cy._YOLORC_CONTAINER_PATH not in v for v in flag_values(argv, "-v"))
