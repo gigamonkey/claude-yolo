@@ -742,6 +742,31 @@ def test_missing_dockerfile_path_exits(cy, run_cli, dirs, tmp_path):
     assert "dockerfile" in str(exc.value)
 
 
+def test_warns_on_unconfigured_dockerfile_yolo(cy, run_cli, dirs, capsys):
+    # A Dockerfile.yolo in the session dir with no `dockerfile` config is a
+    # silent no-op (the feature is opt-in) — nudge instead.
+    home, work = dirs
+    (work / "Dockerfile.yolo").write_text("FROM ubuntu:24.04\nARG HOST_UID\n")
+    run_cli([], home=home, cwd=work)
+    err = capsys.readouterr().err
+    assert "Dockerfile.yolo" in err and "no `dockerfile` config" in err
+
+
+def test_no_dockerfile_yolo_warning_when_configured(cy, run_cli, dirs, capsys):
+    # When the file IS wired up (relative path resolves against the cwd), it's
+    # used, not ignored — so no warning.
+    home, work = dirs
+    (work / "Dockerfile.yolo").write_text("FROM ubuntu:24.04\nARG HOST_UID\n")
+    run_cli(["--dockerfile", "Dockerfile.yolo"], home=home, cwd=work)
+    assert "no `dockerfile` config" not in capsys.readouterr().err
+
+
+def test_no_dockerfile_yolo_warning_when_absent(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    run_cli([], home=home, cwd=work)
+    assert "Dockerfile.yolo" not in capsys.readouterr().err
+
+
 def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
     # build_docker_image is stubbed in run_cli, so exercise the real builder
     # directly: it must tag with the content-addressed tag and pass the host UID

@@ -4585,8 +4585,21 @@ def main():
     # `dockerfile` config path can't break `list`/`finish`/`config`. Resolved
     # against the now-final `cwd` (the worktree dir in worktree mode), so a
     # relative path points at the session's own copy — matching _build_image.
-    if parsed.dockerfile and not _resolve_dockerfile(parsed.dockerfile, cwd).is_file():
-        sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
+    if parsed.dockerfile:
+        if not _resolve_dockerfile(parsed.dockerfile, cwd).is_file():
+            sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
+    elif (cwd / "Dockerfile.yolo").is_file():
+        # An unconfigured Dockerfile.yolo sitting in the session dir is almost
+        # always one someone meant to use — the feature is opt-in via the config
+        # key, so without it yolo silently builds the default image and ignores
+        # the file. Nudge (launch-only, like the checks above), rather than let it
+        # be silently inert.
+        print(
+            f"warning: {cwd / 'Dockerfile.yolo'} exists but no `dockerfile` config is set, "
+            "so it's ignored and the built-in image is used. Enable it with "
+            "`yolo config --dockerfile ./Dockerfile.yolo` (or pass --dockerfile).",
+            file=sys.stderr,
+        )
 
     # A --yolorc rc file must exist and be a readable file, resolved against the
     # final cwd (the worktree dir in worktree mode) so a relative path points at

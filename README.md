@@ -764,6 +764,13 @@ Each distinct Dockerfile gets its own content-addressed image tag
 (`claude-yolo:<hash>`), so projects with different images — and parallel sessions
 — never clobber each other's build.
 
+The feature is **opt-in** — yolo only uses a custom Dockerfile when the
+`dockerfile` key (or `--dockerfile`) points at one. So if you just drop a
+`Dockerfile.yolo` in the project and forget to wire it up, it's silently
+ignored and you get the default image. To catch that, a launch **warns** when a
+`Dockerfile.yolo` is present in the session directory but no `dockerfile` config
+is set, pointing you at `yolo config --dockerfile ./Dockerfile.yolo`.
+
 **Is a custom Dockerfile safe?** Mostly yes, and it's worth understanding why,
 since the file usually lives in your project directory, where Claude could edit
 it between runs. The short version is that a Dockerfile changes *what's in the

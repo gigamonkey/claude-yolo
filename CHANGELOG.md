@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **A launch now warns about an unconfigured `Dockerfile.yolo`.** The custom-image
+  feature is opt-in via the `dockerfile` config key, so a `Dockerfile.yolo` left
+  sitting in the session dir without that key was silently ignored (yolo built
+  the default image). yolo now warns when `cwd/Dockerfile.yolo` exists but no
+  `dockerfile` is configured, pointing at `yolo config --dockerfile
+  ./Dockerfile.yolo`.
+
 - **Bare `yolo config` now shows the complete *effective* config**, not just the
   project entry: the global `~/.yolo.json` values that aren't overridden, merged
   with this project's entry, each line annotated with where the value comes from

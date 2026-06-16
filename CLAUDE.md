@@ -331,7 +331,13 @@ on top of whichever auth is chosen:
   unless the image runs as `claude` — yolo passes no `-u`, so the image's final
   `USER` is the runtime user, and an image left on `USER root` would write
   host files as root. `yolo dockerfile` (`do_dockerfile`) prints the default as a
-  starting point. **Caveat:** a `dockerfile` pointing at a file *inside*
+  starting point. Because the feature is opt-in, a `Dockerfile.yolo` sitting
+  **unconfigured** in the session dir (the worktree dir in worktree mode, else
+  the launch cwd) would otherwise be a silent no-op — yolo builds the default
+  image and ignores it — so a launch **warns** (launch-only, beside the
+  dockerfile-exists check) when `cwd/Dockerfile.yolo` is present but no
+  `dockerfile` key is set, pointing at `yolo config --dockerfile
+  ./Dockerfile.yolo`. **Caveat:** a `dockerfile` pointing at a file *inside*
   the bind-mounted working tree (e.g. `./Dockerfile.yolo`) is editable by Claude
   between runs, so Claude could alter the next image build. The *key* still lives
   in host-side `projects.json` (Claude can't add it), only the referenced file is
