@@ -50,10 +50,14 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "build_docker_image", lambda *a, **k: None)
         monkeypatch.setattr(cy, "_verify_image_user", lambda tag: None)
         monkeypatch.setattr(cy, "ensure_logged_in", lambda c: None)
-        monkeypatch.setattr(cy, "extract_credentials", lambda c: creds_path)
-        monkeypatch.setattr(cy, "_masking_credfile", lambda: MASK_CREDFILE)
+        monkeypatch.setattr(cy, "extract_credentials", lambda c, d: creds_path)
+        monkeypatch.setattr(cy, "_masking_credfile", lambda d: MASK_CREDFILE)
         monkeypatch.setattr(cy, "ensure_oauth_token", lambda c: "sk-ant-oat-TESTTOKEN")
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
+        # The per-session run dir + docker-ps GC touch real $TMPDIR / docker; keep
+        # them inside the controlled tmp HOME and skip the GC's `docker ps` call.
+        monkeypatch.setattr(cy, "_run_dir", lambda: pathlib.Path(home) / ".claude-yolo-run")
+        monkeypatch.setattr(cy, "_gc_run_dir", lambda: None)
         monkeypatch.setattr(cy.sys, "argv", ["yolo", *argv])
 
         captured = {}

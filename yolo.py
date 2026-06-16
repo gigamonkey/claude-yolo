@@ -7,6 +7,7 @@
 import argparse
 import datetime
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -74,6 +75,24 @@ RUN useradd -m -s /bin/bash --uid ${HOST_UID} -G root claude
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
 
+# Secrets loader: sourced (not run) at session start to export each file in the
+# per-session /run/secrets bind mount as an env var (file name = env var name).
+# A no-op when nothing is mounted there (no secrets configured). Files are kept
+# for the session by default; a sibling `<name>.ephemeral` marker makes the
+# loader delete the value right after exporting it (the rw mount allows that).
+# `return 0` is valid because the script is always *sourced*, never executed.
+# Written with printf (not a heredoc) so it doesn't depend on BuildKit; the single
+# quotes keep the build shell from expanding $f / $(...).
+RUN mkdir -p /etc/yolo && printf '%s\\n' \
+  '[ -d /run/secrets ] || return 0' \
+  'for f in /run/secrets/*; do' \
+  '  case "$f" in *.ephemeral) continue ;; esac' \
+  '  [ -f "$f" ] || continue' \
+  '  export "$(basename "$f")=$(cat "$f")"' \
+  '  if [ -f "$f.ephemeral" ]; then rm -f "$f" "$f.ephemeral"; fi' \
+  'done' \
+  > /etc/yolo/load-secrets.sh
+
 USER claude
 # Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
 # install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken
@@ -83,6 +102,12 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # (see _ps1_env_args): flags any bash as a yolo shell and shows where it is.
 # Appended last so it wins over the distro default PS1.
 RUN echo 'if [ -n "$YOLO_PS1" ]; then PS1="$YOLO_PS1"; fi' >> /home/claude/.bashrc
+# Source the secrets loader once per interactive shell tree, so `yolo shell` (fresh
+# or docker exec'd) gets the same exported secrets a claude launch does. Before the
+# --yolorc line below so an rc can use the exported values. The sentinel keeps
+# nested subshells from re-running it; claude launches source it via the launch
+# wrapper (claude isn't a shell, so .bashrc never runs for it).
+RUN echo 'if [ -z "$YOLO_SECRETS_SOURCED" ] && [ -f /etc/yolo/load-secrets.sh ]; then export YOLO_SECRETS_SOURCED=1; . /etc/yolo/load-secrets.sh; fi' >> /home/claude/.bashrc
 # Source the --yolorc file (mounted at $YOLO_RC) once per interactive shell tree,
 # so `yolo shell` gets the same per-session setup claude launches do. The sentinel
 # keeps nested subshells from re-running it. claude launches don't read .bashrc;
@@ -279,7 +304,7 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
     return tag
 
 
-def extract_credentials(config_dir: str | None) -> str:
+def extract_credentials(config_dir: str | None, run_dir: pathlib.Path) -> str:
     """Extract Claude API credentials from the macOS keychain via the `security` CLI.
 
     Claude Code stores OAuth credentials in the keychain under a service name of
@@ -288,8 +313,12 @@ def extract_credentials(config_dir: str | None) -> str:
     SHA-256 of the resolved config directory path — this makes the keychain entry name
     stable and unique per directory without embedding the full path.
 
-    Returns the path of a temporary file containing the credentials JSON,
-    chmod 600, ready to bind-mount into the container.
+    Returns the path of a file (chmod 600) in the per-session `run_dir` containing
+    the credentials JSON, ready to bind-mount into the container. The file lives in
+    the run dir — not a bare $TMPDIR NamedTemporaryFile — so the docker-ps GC
+    (`_gc_run_dir`) reclaims it once the container is gone; the credentials must
+    outlive yolo's own process (it execvp's into docker), so nothing here can unlink
+    it synchronously.
     """
     if config_dir:
         config_path = pathlib.Path(config_dir).resolve()
@@ -303,20 +332,13 @@ def extract_credentials(config_dir: str | None) -> str:
         capture_output=True,
     )
 
-    tmp = tempfile.NamedTemporaryFile(prefix="claude-credentials-", suffix=".json", delete=False)
-    tmp.write(result.stdout)
-    tmp.close()
-
-    credpath = pathlib.Path(tmp.name)
-    if credpath.stat().st_size == 0:
+    if not result.stdout:
         print(f"Failed to extract credentials from keychain service '{service}'", file=sys.stderr)
         sys.exit(1)
-    credpath.chmod(0o600)
-
-    return tmp.name
+    return _write_run_file(run_dir, "credentials.json", result.stdout)
 
 
-def _masking_credfile() -> str:
+def _masking_credfile(run_dir: pathlib.Path) -> str:
     """Create a throwaway `.credentials.json` to overlay in non-keychain auth modes.
 
     On macOS the host's Claude Code keeps its OAuth credentials in the Keychain, so
@@ -331,17 +353,11 @@ def _masking_credfile() -> str:
     path in the oauth-token/bedrock modes both masks any pre-existing stale host file
     and captures the container's own credential writes in a temp file that never
     persists back to ~/.claude. It mirrors what keychain mode already does at the same
-    path, where the overlay is the freshly-extracted creds. Returns the temp file
-    path, chmod 600, ready to bind-mount.
+    path, where the overlay is the freshly-extracted creds. Returns a file path
+    (chmod 600) in the per-session `run_dir`, ready to bind-mount — reclaimed by the
+    docker-ps GC like the real extracted creds (it must outlive yolo's own process).
     """
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="claude-credentials-mask-", suffix=".json", delete=False
-    )
-    tmp.write(b"{}")
-    tmp.close()
-    credpath = pathlib.Path(tmp.name)
-    credpath.chmod(0o600)
-    return tmp.name
+    return _write_run_file(run_dir, "credentials-mask.json", b"{}")
 
 
 def _is_logged_in(env: dict) -> bool:
@@ -749,6 +765,435 @@ def ensure_oauth_token(config_dir: str | None) -> str:
     return generate_oauth_token(config_dir)
 
 
+# --- Per-session run dir + docker-ps GC (temp-file cleanup hardening) -----------
+#
+# Every launch stages chmod-600 files that must be bind-mounted for the *entire*
+# container lifetime: the keychain credentials snapshot / throwaway mask, and any
+# injected secrets. yolo execvp's into docker, replacing its own process, so there
+# is no finally/atexit to delete them — cleanup has to happen out-of-band.
+#
+# Each session gets its own dir, keyed by the container name: <run-dir>/<container>/
+# (mode 700, files 600). At launch we GC any <run-dir>/<name>/ whose container is
+# NOT in `docker ps` (crashed/finished sessions) — never a blanket wipe, which
+# would nuke a concurrently-running session's still-mounted files. The run dir
+# lives under $TMPDIR (a per-user dir, mode 700, excluded from Time Machine and not
+# in synced folders like Dropbox/iCloud), so a session-long plaintext secret file
+# isn't copied off the machine.
+_RUN_DIR_NAME = "claude-yolo-run"
+
+
+def _run_dir() -> pathlib.Path:
+    """The root run dir: a yolo-owned subdir of $TMPDIR (mode 700)."""
+    return pathlib.Path(tempfile.gettempdir()) / _RUN_DIR_NAME
+
+
+def _session_run_dir(container: str) -> pathlib.Path:
+    """The per-container run dir, created mode 700. Keyed by the docker --name."""
+    root = _run_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    d = root / container
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    return d
+
+
+def _running_container_names() -> set[str]:
+    """Names of all running docker containers (for the run-dir GC). {} on trouble."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return set(result.stdout.split())
+
+
+def _gc_run_dir() -> None:
+    """Remove run-dir subdirs whose container is no longer running.
+
+    Crash-proof and parallel-safe: a `kill -9`'d session's dir is collected on the
+    next launch (its container is gone from `docker ps`), while a concurrently
+    running session's dir — its container still listed — is left untouched. This is
+    the guarantee that backs the staged credential/secret files regardless of how a
+    session ended; it deliberately never blanket-wipes the run dir.
+    """
+    root = _run_dir()
+    if not root.is_dir():
+        return
+    running = _running_container_names()
+    for child in root.iterdir():
+        if child.is_dir() and child.name not in running:
+            shutil.rmtree(child, ignore_errors=True)
+
+
+def _write_run_file(run_dir: pathlib.Path, name: str, data: bytes) -> str:
+    """Write `data` to <run_dir>/<name>, chmod 600 from creation; return the path.
+
+    O_CREAT|0o600 sets the mode atomically at open, so the file is never briefly
+    world-readable (a plain write-then-chmod has that window).
+    """
+    path = pathlib.Path(run_dir) / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    path.chmod(0o600)  # in case the file pre-existed with a looser mode
+    return str(path)
+
+
+# --- Secrets: keychain-backed values injected into a session ---------------------
+#
+# Arbitrary user secrets (PATs, API keys, SSH keys, …) stored in the macOS keychain
+# and injected into a session's container as env vars (file transport) or mounted
+# files — never as `-e NAME=value`, which would leak the value into the docker-run
+# argv, `docker inspect`, /proc/1/environ and tmux's retained pane command. Two
+# storage scopes: global (`claude-yolo-secret-{name}`) and project
+# (`claude-yolo-secret-{project-hash8}-{name}`); at injection a name resolves
+# project-first, then global. A side registry (secrets.json) enumerates them and
+# maps a hashed service back to its project, exactly as tokens.json does for tokens.
+SECRET_KC_PREFIX = "claude-yolo-secret"
+_SECRETS_CONTAINER_DIR = "/run/secrets"
+_CONTAINER_HOME = "/home/claude"
+# A secret NAME must be a shell identifier: it becomes an env var name in-container.
+_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _valid_secret_name(name: str) -> bool:
+    return bool(_SECRET_NAME_RE.match(name))
+
+
+def _project_hash8(project_key: str) -> str:
+    """First 8 hex of SHA-256 of the project key — the per-project service suffix."""
+    return hashlib.sha256(project_key.encode()).hexdigest()[:8]
+
+
+def _secret_service(name: str, scope: str, project_key: str | None = None) -> str:
+    """Keychain service name for a (scope, name) secret.
+
+    global → `claude-yolo-secret-{name}`; project →
+    `claude-yolo-secret-{project-hash8}-{name}` (the same hashing idiom as the
+    per-config-dir OAuth token service). The hash is one-way, so the registry is
+    what maps a project service back to its project key.
+    """
+    if scope == "project":
+        if project_key is None:
+            raise ValueError("project scope needs a project key")
+        return f"{SECRET_KC_PREFIX}-{_project_hash8(project_key)}-{name}"
+    return f"{SECRET_KC_PREFIX}-{name}"
+
+
+def _secrets_file() -> pathlib.Path:
+    return pathlib.Path.home() / ".claude-yolo" / "secrets.json"
+
+
+def _read_secrets_file() -> dict:
+    """~/.claude-yolo/secrets.json as {service: entry}; {} if absent.
+
+    Non-secret metadata only (scope, project key, name, timestamps) — the keychain
+    holds the values. Host-side only and never mounted, like tokens.json.
+    """
+    path = _secrets_file()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"{path}: cannot read secrets registry: {e}")
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        sys.exit(f"{path}: must be a JSON object mapping service names to entries")
+    return raw
+
+
+def _write_secret_entry(service: str, scope: str, name: str, project_key: str | None) -> None:
+    """Upsert a secret's registry row (preserving its original `created` time)."""
+    secrets = _read_secrets_file()
+    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    created = secrets.get(service, {}).get("created", now)
+    secrets[service] = {
+        "scope": scope,
+        "name": name,
+        "project_key": project_key,
+        "created": created,
+        "modified": now,
+    }
+    path = _secrets_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(secrets, indent=2) + "\n")
+
+
+def _remove_secret_entry(service: str) -> dict | None:
+    """Drop a service from the secrets registry; return the removed entry, if any."""
+    secrets = _read_secrets_file()
+    entry = secrets.pop(service, None)
+    if entry is not None:
+        _secrets_file().write_text(json.dumps(secrets, indent=2) + "\n")
+    return entry
+
+
+def _read_secret_value(service: str) -> str | None:
+    """The secret value stored under `service`, or None if absent.
+
+    `security ... -w` appends a single newline to the password it prints; strip
+    exactly that one (not arbitrary trailing whitespace, which could corrupt a
+    value that legitimately ends in newlines).
+    """
+    result = subprocess.run(
+        ["security", "find-generic-password", "-s", service, "-w"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    out = result.stdout
+    return out[:-1] if out.endswith("\n") else out
+
+
+def _store_secret_value(service: str, value: str) -> None:
+    """Upsert a secret value into the keychain (-U), like _store_oauth_token."""
+    subprocess.run(
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-a",
+            os.environ.get("USER", "claude-yolo"),
+            "-s",
+            service,
+            "-w",
+            value,
+        ],
+        check=True,
+    )
+
+
+def _strip_one_newline(value: str) -> str:
+    """Drop a single trailing newline (the one a shell/echo or paste tends to add)."""
+    if value.endswith("\r\n"):
+        return value[:-2]
+    if value.endswith("\n"):
+        return value[:-1]
+    return value
+
+
+def _parse_secret_spec(spec: str) -> tuple[str, str, str, bool]:
+    """One --secret / `secrets` spec, `NAME[:TARGET][!]` -> (name, kind, target, ephemeral).
+
+    The injection target is discriminated by TARGET's first character: one that
+    starts with `/` or `~` is a file mount path (with `~` expanded to the *container*
+    home, /home/claude — NOT the host $HOME), anything else is an env var name. With
+    no TARGET the secret injects as an env var named NAME. A trailing `!` marks the
+    secret ephemeral (deleted right after the loader exports it); only env targets
+    can be ephemeral (a single-file bind mount can't be unlinked from inside).
+    """
+    ephemeral = spec.endswith("!")
+    if ephemeral:
+        spec = spec[:-1]
+    name, sep, target = spec.partition(":")
+    if not _valid_secret_name(name):
+        sys.exit(
+            f"secret: invalid name {name!r} (must be a shell identifier, [A-Za-z_][A-Za-z0-9_]*)"
+        )
+    if not sep:
+        return name, "env", name, ephemeral
+    if target.startswith(("/", "~")):
+        if ephemeral:
+            sys.exit(
+                f"secret {name!r}: a file-target secret can't be ephemeral "
+                "(a single-file bind mount can't be deleted from inside the container)."
+            )
+        path = _CONTAINER_HOME + target[1:] if target.startswith("~") else target
+        return name, "file", path, False
+    if not _valid_secret_name(target):
+        sys.exit(f"secret {name!r}: invalid env target {target!r} (must be a shell identifier)")
+    return name, "env", target, ephemeral
+
+
+def _resolve_secret_specs(specs: list[str]) -> list[tuple[str, str, str, bool]]:
+    """Parse + dedupe merged secret specs into (name, kind, target, ephemeral) tuples.
+
+    Keyed by (kind, target), lowest-precedence first (like _resolve_mounts/ports),
+    so an exact-duplicate spec collapses and a target collision (two specs hitting
+    the same env var name or mount path) is won by the later — higher — layer.
+    """
+    out: dict[tuple[str, str], tuple[str, bool]] = {}
+    for spec in specs:
+        name, kind, target, ephemeral = _parse_secret_spec(spec)
+        out[(kind, target)] = (name, ephemeral)
+    return [(name, kind, target, eph) for (kind, target), (name, eph) in out.items()]
+
+
+def _resolve_secret_value(name: str, project_key: str | None) -> str | None:
+    """A stored secret value for `name`, resolved most-specific-first (project, global)."""
+    if project_key:
+        svc = _secret_service(name, "project", project_key)
+        if _keychain_has(svc):
+            return _read_secret_value(svc)
+    svc = _secret_service(name, "global")
+    if _keychain_has(svc):
+        return _read_secret_value(svc)
+    return None
+
+
+def _warn_secret_file_target(target: str, cwd: pathlib.Path) -> None:
+    """Warn when a file-target lands in a host-visible mount (the cwd or ~/.claude).
+
+    Such a path writes the plaintext secret into the bind-mounted working tree or
+    the mounted config dir rather than a private container-only location.
+    """
+    danger = [f"{_CONTAINER_HOME}/.claude/", f"{cwd}/", str(cwd)]
+    if any(target == d or target.startswith(d) for d in danger):
+        print(
+            f"warning: secret file target {target} is under a host-visible bind mount "
+            "(the working tree or ~/.claude); the plaintext secret will be visible on "
+            "the host. Prefer a private path like ~/.config or /tmp.",
+            file=sys.stderr,
+        )
+
+
+def _stage_secrets(
+    specs: list[str], project_key: str | None, run_dir: pathlib.Path, cwd: pathlib.Path
+) -> tuple[list[str], bool]:
+    """Stage configured secrets into the run dir; return (docker `-v` args, have_env).
+
+    Env-target secrets are written to <run-dir>/secrets/<ENVNAME> and the dir is
+    bind-mounted rw at /run/secrets (the baked loader exports them; rw lets it
+    delete an ephemeral one). File-target secrets are each staged and bind-mounted
+    read-only at their container path. Both stage chmod-600 files in the run dir, so
+    no value ever touches the docker-run argv. `have_env` reports whether any
+    env-target secret was staged (so the caller knows to source the loader in the
+    claude launch wrapper). Exits if a referenced secret isn't in the keychain.
+    """
+    resolved = _resolve_secret_specs(specs)
+    if not resolved:
+        return [], False
+    args: list[str] = []
+    env_dir = run_dir / "secrets"
+    have_env = False
+    for idx, (name, kind, target, ephemeral) in enumerate(resolved):
+        value = _resolve_secret_value(name, project_key)
+        if value is None:
+            sys.exit(
+                f"secret {name!r} is not in the keychain; store it with "
+                f"`yolo secret set {name}` (add --project for project scope)."
+            )
+        if kind == "env":
+            if not have_env:
+                env_dir.mkdir(parents=True, exist_ok=True)
+                env_dir.chmod(0o700)
+                have_env = True
+            _write_run_file(env_dir, target, value.encode())
+            if ephemeral:
+                _write_run_file(env_dir, f"{target}.ephemeral", b"")
+        else:  # file
+            _warn_secret_file_target(target, cwd)
+            staged = _write_run_file(run_dir, f"secret-file-{idx}", value.encode())
+            args += ["-v", f"{staged}:{target}:ro"]
+    if have_env:
+        args += ["-v", f"{env_dir}:{_SECRETS_CONTAINER_DIR}:rw"]
+    return args, have_env
+
+
+def _secret_scope_label(scope: str) -> str:
+    return "project" if scope == "project" else "global"
+
+
+def do_secret(parsed, home: pathlib.Path, cwd: pathlib.Path) -> None:
+    """`secret` verb: set/list/rm keychain-backed secrets. Terminal (no container).
+
+    The subcommand is the TOPIC (`set`/`list`/`rm`); the secret NAME, when needed,
+    is the first trailing positional. Storage scope is global by default or the
+    current project with --project.
+    """
+    sub = parsed.topic
+    names = parsed.extra_args
+    if sub == "set":
+        if len(names) != 1:
+            sys.exit("usage: yolo secret set NAME [--project] [--clipboard]")
+        do_secret_set(names[0], parsed.project, parsed.clipboard, cwd)
+    elif sub == "rm":
+        if len(names) != 1:
+            sys.exit("usage: yolo secret rm NAME [--project]")
+        do_secret_rm(names[0], parsed.project, cwd)
+    elif sub == "list":
+        if names:
+            sys.exit("usage: yolo secret list [--all]")
+        do_secret_list(cwd, all_projects=parsed.all_repos)
+    else:
+        sys.exit("`secret` needs a subcommand: set, list, or rm (e.g. `yolo secret set GH_TOKEN`).")
+
+
+def do_secret_set(name: str, project: bool, clipboard: bool, cwd: pathlib.Path) -> None:
+    """Store a secret value in the keychain + registry (never via the CLI argv).
+
+    The value comes from --clipboard (pbpaste), stdin when piped, or a hidden
+    interactive prompt — never a command-line argument (that would leak it into
+    shell history and the process argv visible in `ps`).
+    """
+    if not _valid_secret_name(name):
+        sys.exit(
+            f"invalid secret name {name!r} (must be a shell identifier, [A-Za-z_][A-Za-z0-9_]*)."
+        )
+    scope = "project" if project else "global"
+    project_key = _project_key(cwd) if project else None
+    if clipboard:
+        try:
+            result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+        except FileNotFoundError:
+            sys.exit("--clipboard needs the macOS `pbpaste` command, which wasn't found.")
+        if result.returncode != 0:
+            sys.exit("--clipboard: `pbpaste` failed.")
+        value = _strip_one_newline(result.stdout)
+    elif not sys.stdin.isatty():
+        value = _strip_one_newline(sys.stdin.read())
+    else:
+        value = getpass.getpass(f"Value for secret {name} (input hidden): ")
+    if not value:
+        sys.exit("refusing to store an empty secret value.")
+    service = _secret_service(name, scope, project_key)
+    _store_secret_value(service, value)
+    _write_secret_entry(service, scope, name, project_key)
+    where = f"project ({project_key})" if project else "global"
+    print(f"Stored secret {name!r} at {where} scope (keychain service '{service}').")
+
+
+def do_secret_rm(name: str, project: bool, cwd: pathlib.Path) -> None:
+    """Delete a secret's keychain item + registry row at the given scope."""
+    scope = "project" if project else "global"
+    project_key = _project_key(cwd) if project else None
+    service = _secret_service(name, scope, project_key)
+    entry = _remove_secret_entry(service)
+    deleted = _keychain_delete(service)
+    where = f"project ({project_key})" if project else "global"
+    if not deleted and entry is None:
+        sys.exit(f"no {where}-scope secret {name!r} (keychain service '{service}').")
+    print(f"Removed secret {name!r} at {where} scope.")
+
+
+def do_secret_list(cwd: pathlib.Path, *, all_projects: bool) -> None:
+    """List secrets from the registry: global + the current project's (or --all)."""
+    secrets = _read_secrets_file()
+    if not secrets:
+        print(f"No secrets recorded. (yolo records them in {_secrets_file()}.)")
+        return
+    this_project = _project_key(cwd)
+    rows = []
+    for service, entry in sorted(secrets.items()):
+        scope = entry.get("scope", "global")
+        project_key = entry.get("project_key")
+        if not all_projects and scope == "project" and project_key != this_project:
+            continue
+        scope_label = "global" if scope == "global" else f"project:{project_key}"
+        created = (entry.get("created") or "")[:10] or "?"
+        status = "ok" if _keychain_has(service) else "stale (not in keychain)"
+        rows.append((entry.get("name", "?"), scope_label, created, status))
+    if not rows:
+        print("No secrets for this project or at global scope.")
+        return
+    _print_table(("NAME", "SCOPE", "CREATED", "STATUS"), rows)
+
+
 def git_identity_args() -> list[str]:
     """Forward the host's git identity into the container as docker `-e` args.
 
@@ -901,6 +1346,7 @@ YOLO_KEYS = {
     "prompts": ("prompts", "list"),
     "mounts": ("mounts", "list"),
     "ports": ("ports", "list"),
+    "secrets": ("secrets", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
     "tmux": ("tmux", "bool"),
     "tmux_session": ("tmux_session", "str"),
@@ -908,7 +1354,7 @@ YOLO_KEYS = {
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("prompts", "mounts", "ports")
+_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -1341,6 +1787,11 @@ def _apply_config_edits(
             "--port replaces the whole `ports` list; "
             "don't combine it with --add-port/--remove-port."
         )
+    if "secrets" in explicit and (parsed.add_secrets or parsed.remove_secrets):
+        sys.exit(
+            "--secret replaces the whole `secrets` list; "
+            "don't combine it with --add-secret/--remove-secret."
+        )
     unsets = [u.replace("_", "-") for u in parsed.unsets]
     for u in unsets:
         if u in explicit:
@@ -1351,11 +1802,15 @@ def _apply_config_edits(
         sys.exit("can't combine --unset prompts with --add-prompt/--remove-prompt.")
     if "ports" in unsets and (parsed.add_ports or parsed.remove_ports):
         sys.exit("can't combine --unset ports with --add-port/--remove-port.")
+    if "secrets" in unsets and (parsed.add_secrets or parsed.remove_secrets):
+        sys.exit("can't combine --unset secrets with --add-secret/--remove-secret.")
 
     for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
     for spec in [*explicit.get("ports", []), *parsed.add_ports]:
         _parse_port_spec(spec)  # likewise: a malformed port spec can't be pinned
+    for spec in [*explicit.get("secrets", []), *parsed.add_secrets]:
+        _parse_secret_spec(spec)  # likewise: a malformed secret spec can't be pinned
     df = explicit.get("dockerfile")
     if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
         sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
@@ -1420,6 +1875,21 @@ def _apply_config_edits(
             ports.append(add)
         if ports:
             entry["ports"] = ports
+
+    if parsed.add_secrets or parsed.remove_secrets:
+        # Secret specs are opaque strings (like prompts), so add/remove match the
+        # exact spec rather than a parsed target — a name needed both as env and
+        # file is two distinct specs.
+        secrets = _take_list_key(entry, "secrets", where)
+        for rm in parsed.remove_secrets:
+            if rm not in secrets:
+                sys.exit(f"--remove-secret {rm!r}: no such secret in {where}.")
+            secrets.remove(rm)
+        for add in parsed.add_secrets:
+            if add not in secrets:  # exact dup -> no-op, so re-runs are idempotent
+                secrets.append(add)
+        if secrets:
+            entry["secrets"] = secrets
 
     return entry
 
@@ -1501,6 +1971,8 @@ def do_config(
         or parsed.remove_prompts
         or parsed.add_ports
         or parsed.remove_ports
+        or parsed.add_secrets
+        or parsed.remove_secrets
         or parsed.unsets
     )
 
@@ -1714,6 +2186,7 @@ PARSER.add_argument(
         "setup-token",
         "tokens",
         "forget-token",
+        "secret",
     ],
     help="Optional subcommand. start/resume/shell/browse take an *optional* TOPIC: "
     "with a TOPIC they act on a git worktree of that name (start creates it, the "
@@ -1742,7 +2215,15 @@ PARSER.add_argument(
     "topic",
     nargs="?",
     help="Worktree/branch name. Required for finish and rebase; optional for "
-    "start/resume/shell (omit it to act on the current directory).",
+    "start/resume/shell (omit it to act on the current directory). For the "
+    "`secret` verb this is the subcommand (set/list/rm) instead.",
+)
+PARSER.add_argument(
+    "extra_args",
+    nargs="*",
+    metavar="ARGS",
+    help="Trailing positionals. Used by `secret set NAME` / `secret rm NAME` for "
+    "the secret name; not accepted by other verbs.",
 )
 PARSER.add_argument(
     "--base",
@@ -1839,6 +2320,25 @@ PARSER.add_argument(
     help="For `config`: remove a container port's entry from the stored `ports` "
     "list (any HOST: prefix is ignored). Errors if the port isn't listed. "
     "Repeatable.",
+)
+PARSER.add_argument(
+    "--add-secret",
+    dest="add_secrets",
+    action="append",
+    default=[],
+    metavar="NAME[:TARGET]",
+    help="For `config`: add one secret spec to the stored `secrets` list (no-op if "
+    "already present), leaving the rest alone — unlike --secret, which replaces the "
+    "whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-secret",
+    dest="remove_secrets",
+    action="append",
+    default=[],
+    metavar="NAME[:TARGET]",
+    help="For `config`: remove an exact secret spec from the stored `secrets` list. "
+    "Errors if not present. Repeatable.",
 )
 PARSER.add_argument(
     "--add-prompt",
@@ -2016,6 +2516,33 @@ PARSER.add_argument(
     "stable host port instead. Repeatable; also settable as `ports` in config, "
     "where the lists concatenate across the layers and the CLI. With the "
     "`browse` verb: which forwarded container port to open.",
+)
+PARSER.add_argument(
+    "--secret",
+    dest="secrets",
+    action="append",
+    default=[],
+    metavar="NAME[:TARGET]",
+    help="Inject a keychain-stored secret (set with `yolo secret set`) into the "
+    "session. Bare NAME -> env var NAME; NAME:ENVNAME -> env var ENVNAME; "
+    "NAME:/path or NAME:~/path -> mounted file at that container path (~ is the "
+    "container home /home/claude). A trailing ! on an env target makes it ephemeral "
+    "(deleted right after it's exported). Repeatable; also settable as `secrets` in "
+    "config, where the lists concatenate across the layers and the CLI. The value "
+    "never enters the docker-run argv — env secrets transit a private /run/secrets "
+    "file mount, file secrets a read-only bind mount.",
+)
+PARSER.add_argument(
+    "--project",
+    action="store_true",
+    help="For `secret set`/`secret rm`: act on this project's scope (keyed to the "
+    "main repo root) instead of the global scope.",
+)
+PARSER.add_argument(
+    "--clipboard",
+    action="store_true",
+    help="For `secret set`: read the value from the macOS clipboard (pbpaste) "
+    "instead of stdin / an interactive prompt.",
 )
 PARSER.add_argument(
     "--print",
@@ -2503,9 +3030,7 @@ def _init_submodules(cwd: pathlib.Path) -> None:
     if not (cwd / ".gitmodules").is_file():
         return
     print("Populating git submodules (--submodules)…", file=sys.stderr)
-    result = subprocess.run(
-        ["git", "-C", str(cwd), "submodule", "update", "--init", "--recursive"]
-    )
+    result = subprocess.run(["git", "-C", str(cwd), "submodule", "update", "--init", "--recursive"])
     if result.returncode != 0:
         print(
             "warning: `git submodule update --init --recursive` failed; continuing "
@@ -2539,7 +3064,23 @@ def launch_container(
     is the resolved (dir, mode) list from --mount / the `mounts` config key;
     `ports` the resolved (host-or-None, container) pairs from --port / `ports`.
     """
+    # Finalize the container name up front (the -{config}/-{profile} suffixes the
+    # auth/config blocks below would otherwise tack on), because the per-session
+    # run dir is keyed by the *final* name so the docker-ps GC can match it.
+    config_dir = parsed.config_dir
     container = container_base
+    if config_dir:
+        container = f"{container}-{pathlib.Path(config_dir).resolve().name}"
+    if parsed.auth == "bedrock":
+        container = f"{container}-{parsed.aws_profile or 'bedrock'}"
+
+    # Reclaim leftover run dirs of finished sessions, then make this session's dir
+    # (mode 700). It holds the chmod-600 credential/secret files bind-mounted for
+    # the container's lifetime; yolo execvp's into docker, so the GC — not a
+    # finally/atexit — is what cleans them up once the container is gone.
+    _gc_run_dir()
+    run_dir = _session_run_dir(container)
+
     args = [
         "-w",
         str(cwd),
@@ -2627,10 +3168,8 @@ def launch_container(
 
     # (a) Config dir. Always mounted at /home/claude/.claude (= the claude user's
     # $HOME/.claude, i.e. Claude Code's default), so no CLAUDE_CONFIG_DIR is needed.
-    config_dir = parsed.config_dir
+    # (The container name's -{config} suffix was applied up front, with the run dir.)
     if config_dir:
-        configpath = pathlib.Path(config_dir).resolve()
-        container = f"{container}-{configpath.name}"
         args += ["-v", f"{config_dir}:/home/claude/.claude"]
         host_claude_dir = config_dir
     else:
@@ -2675,9 +3214,9 @@ def launch_container(
     #     holder, host login included.
     if parsed.auth == "oauth-token":
         args += ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={ensure_oauth_token(config_dir)}"]
-        args += ["-v", f"{_masking_credfile()}:/home/claude/.claude/.credentials.json"]
+        args += ["-v", f"{_masking_credfile(run_dir)}:/home/claude/.claude/.credentials.json"]
     elif parsed.auth == "bedrock":
-        container = f"{container}-{parsed.aws_profile or 'bedrock'}"
+        # (the container name's -{profile} suffix was applied up front, with the run dir.)
         args += ["-v", f"{home}/.aws:/home/claude/.aws:ro"]
         args += ["-e", "CLAUDE_CODE_USE_BEDROCK=1"]
         if parsed.aws_profile:
@@ -2685,11 +3224,24 @@ def launch_container(
         args += ["-e", f"AWS_REGION={parsed.aws_region or 'us-east-1'}"]
         if parsed.bedrock_model:
             args += ["-e", f"BEDROCK_MODEL_ID={parsed.bedrock_model}"]
-        args += ["-v", f"{_masking_credfile()}:/home/claude/.claude/.credentials.json"]
+        args += ["-v", f"{_masking_credfile(run_dir)}:/home/claude/.claude/.credentials.json"]
     else:  # keychain
         ensure_logged_in(config_dir)
-        credfile = extract_credentials(config_dir)
+        credfile = extract_credentials(config_dir, run_dir)
         args += ["-v", f"{credfile}:/home/claude/.claude/.credentials.json"]
+
+    # Secrets (--secret / `secrets` config): stage chmod-600 files in the run dir
+    # and bind-mount them — env targets via the rw /run/secrets loader dir, file
+    # targets read-only at their path. No secret value ever reaches the docker-run
+    # argv. The project key (for project-scope resolution) is the main repo root,
+    # which _project_key derives from the host process cwd regardless of any
+    # worktree retargeting of `cwd`.
+    have_env_secrets = False
+    if parsed.secrets:
+        secret_args, have_env_secrets = _stage_secrets(
+            parsed.secrets, _project_key(cwd), run_dir, cwd
+        )
+        args += secret_args
 
     # Labels let the verbs (shell/finish/list) find this container later, regardless
     # of the name suffixes above. yolo.cwd is stamped on every launch so a plain
@@ -2726,16 +3278,20 @@ def launch_container(
     image_tag = _build_image(parsed, cwd)
 
     # For a claude launch (entrypoint is None → the image's `claude
-    # --dangerously-skip-permissions` ENTRYPOINT) with --yolorc, drop into bash to
-    # source the rc first, then exec the reconstructed claude command. `source`
-    # (not run) so the rc's `export`s reach claude's env; a nonzero rc warns but
-    # doesn't block the session. The claude args are passed positionally to "$@"
-    # so the --settings JSON and OAuth token need no re-quoting. `shell` launches
-    # (entrypoint already /bin/bash) source the rc via .bashrc instead.
-    if yolorc_host and entrypoint is None:
+    # --dangerously-skip-permissions` ENTRYPOINT) with env-target secrets and/or
+    # --yolorc, drop into bash to source the secrets loader (which exports each
+    # /run/secrets file) and then the rc, before exec'ing the reconstructed claude
+    # command. claude isn't a shell, so it never reads .bashrc (where `yolo shell`
+    # gets these) — the wrapper is how a claude session picks them up. `source`
+    # (not run) so the exports reach claude's env; the loader runs *before* the rc
+    # so an rc can use the exported values; a nonzero rc warns but doesn't block.
+    # The claude args are passed positionally to "$@" so the --settings JSON and
+    # OAuth token need no re-quoting.
+    if (yolorc_host or have_env_secrets) and entrypoint is None:
         entrypoint = "/bin/bash"
         command = [
             "-c",
+            "[ -f /etc/yolo/load-secrets.sh ] && . /etc/yolo/load-secrets.sh; "
             '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '
             'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; exec "$@"',
             "yolo-rc",
@@ -2943,6 +3499,7 @@ def _branch_merged(branch: str, base: str, cwd: pathlib.Path | None = None) -> b
     another repo (used by `list --all`, where each worktree's branch lives in its
     own repo, not the current one).
     """
+
     def run(args):
         return subprocess.run(
             ["git", *(["-C", str(cwd)] if cwd else []), *args],
@@ -3671,8 +4228,13 @@ def main():
         "rebase",
         "dir",
         "config",
+        "secret",
     ):
         sys.exit(f"unexpected argument: {topic!r}")
+    # Only `secret` consumes trailing positionals (the secret NAME); for any other
+    # verb they're a mistake.
+    if parsed.extra_args and verb != "secret":
+        sys.exit(f"unexpected argument: {parsed.extra_args[0]!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
     if parsed.new and not topic:
@@ -3688,8 +4250,12 @@ def main():
         sys.exit("--force only applies to `finish` and `rebase`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
-    if parsed.all_repos and verb != "list":
-        sys.exit("--all only applies to `list`.")
+    if parsed.all_repos and verb not in ("list", "secret"):
+        sys.exit("--all only applies to `list` and `secret list`.")
+    if parsed.project and verb != "secret":
+        sys.exit("--project only applies to `secret set`/`secret rm`.")
+    if parsed.clipboard and verb != "secret":
+        sys.exit("--clipboard only applies to `secret set`.")
     if parsed.print_url and verb != "browse":
         sys.exit("--print/-n only applies to `browse`.")
     if parsed.custom and verb != "dockerfile":
@@ -3704,6 +4270,8 @@ def main():
         ("--remove-prompt", parsed.remove_prompts),
         ("--add-port", parsed.add_ports),
         ("--remove-port", parsed.remove_ports),
+        ("--add-secret", parsed.add_secrets),
+        ("--remove-secret", parsed.remove_secrets),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
@@ -3722,6 +4290,13 @@ def main():
     # stderr, but keeping it out entirely is cleaner for `cd $(yolo dir TOPIC)`).
     if verb == "dir":
         do_dir(topic, home, cwd)
+        return
+
+    # `secret` manages keychain-backed secrets and launches no container; it needs
+    # no yolo config (the project key comes from git), so dispatch it before the
+    # config load to keep its output clean.
+    if verb == "secret":
+        do_secret(parsed, home, cwd)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

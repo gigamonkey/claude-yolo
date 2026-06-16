@@ -35,6 +35,15 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
 ./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
 ./yolo.py forget-token             # delete this config dir's token (local only)
+./yolo.py secret set GH_TOKEN      # store a secret in the keychain (stdin/prompt)
+./yolo.py secret set GH_TOKEN --clipboard   # ...read the value from the clipboard
+./yolo.py secret set DB_PW --project        # ...at project scope (not global)
+./yolo.py secret list              # list global + this project's secrets
+./yolo.py secret list --all        # ...across every project
+./yolo.py secret rm GH_TOKEN       # delete a secret (keychain + registry)
+./yolo.py --secret GH_TOKEN        # inject secret GH_TOKEN as env var $GH_TOKEN
+./yolo.py --secret DB_PW:PGPASSWORD # ...as env var $PGPASSWORD (renamed)
+./yolo.py --secret KEY:~/.ssh/id_ed25519  # ...mounted as a file at that path
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py                          # == `yolo start`: fresh session in the cwd
 ./yolo.py resume                   # continue most recent session in this dir
@@ -63,8 +72,9 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
 (`config`/`start`/`resume`/`shell`/`browse`/`finish`/`rebase`/`list`/`ps`/`dir`/
-`dockerfile`/`setup-token`/`tokens`/`forget-token`) and its `TOPIC`; see [Workflow
-verbs](#workflow-verbs).
+`dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
+`secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
+trailing positional); see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
 `~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
@@ -175,8 +185,10 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    `claude` is missing/too old for `auth`, it returns True and defers to the
    empty-file check in `extract_credentials`.
 4. **Extracts credentials** (`extract_credentials`; keychain mode only) from the
-   macOS keychain via the `security` CLI, into a chmod-600 temp file that gets
-   bind-mounted to `.credentials.json`. In the default oauth-token mode this
+   macOS keychain via the `security` CLI, into a chmod-600 file **in the
+   per-session run dir** (`$TMPDIR/claude-yolo-run/<container>/`; see the run-dir
+   section) that gets bind-mounted to `.credentials.json`. In the default
+   oauth-token mode this
    step is replaced by forwarding `CLAUDE_CODE_OAUTH_TOKEN` (see the oauth-token
    section). Service name is `Claude Code-credentials` by default,
    or `Claude Code-credentials-{hash8}` for a non-default config dir, where
@@ -259,6 +271,24 @@ on top of whichever auth is chosen:
   (loopback-bound servers are unreachable through docker's forward) and that
   the user opens them with `yolo browse`. Like mounts, mappings are fixed at
   `docker run` time and resolved only on launch paths.
+- **`--secret NAME[:TARGET]`** (repeatable; `secrets` in config) → inject a
+  keychain-stored secret (set with `yolo secret set`) into the session. A
+  **list/concat dest like `mounts`/`ports`** — accumulates across the global /
+  project / worktree layers and the CLI. The spec's TARGET picks the mechanism by
+  its first character (`/` or `~` → file, else env): bare **`NAME`** → env var
+  `NAME`; **`NAME:ENVNAME`** → env var renamed to `ENVNAME`; **`NAME:/abs`** or
+  **`NAME:~/path`** → bind-mounted file at that **container** path (`~` →
+  `/home/claude`, *not* the host `$HOME`). A trailing **`!`** on an env target
+  makes it **ephemeral** (the loader deletes it right after exporting; a file
+  target can't be ephemeral — a single-file bind mount can't be unlinked from
+  inside). Concat/dedup mirrors mounts/ports (exact-dup specs deduped; on a
+  target collision — same env name or mount path — the higher layer wins; a secret
+  needed both ways is two specs). **No secret value ever reaches the docker-run
+  argv** (`docker inspect`, `/proc/1/environ`, tmux's retained pane command): env
+  secrets transit a private `/run/secrets` file mount consumed by a baked loader,
+  file secrets a read-only bind mount. The opt-in gate is the same as
+  `--yolorc`/`--dockerfile` — the *key* is host-side (Claude can't grant its next
+  session a new secret). See [Secrets](#secrets).
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -513,6 +543,169 @@ reported multi-day revocation lag — claude-code issues #34198/#48373/#59378/
   config-dir-must-exist check so a token for an already-deleted config dir can
   still be forgotten (`_oauth_service` only hashes the resolved path).
 
+## Secrets
+
+Arbitrary user secrets (PATs, API keys, SSH keys, …) stored in the **macOS
+keychain** and injected into a session's container as **env vars** or **mounted
+files** — never a plaintext secrets dotfile on the host, never a value on the
+docker-run argv. The keychain buys *encrypted-at-rest storage + no plaintext
+file*; it does **not** buy in-container secrecy — Claude and any code in the
+`--dangerously-skip-permissions` container can read whatever is injected. That's
+inherent and acceptable *because injection is opt-in per project* (see the gate
+below). This first-classes what was already doable by hand with `--mount` a token
+file + `--yolorc gh auth login --with-token`.
+
+### Storage scheme — global + project scope
+
+Two storage scopes: **global** and **project** (deliberately *not* config-dir —
+that's the Claude-account axis — and *not* worktree — too ephemeral to store a
+value in). At injection a referenced name resolves **most-specific-first: project,
+then global** (`_resolve_secret_value`). A worktree session shares its main repo's
+project scope, since the project key is the main repo root (`_project_key` follows
+the shared `.git`).
+
+- **Keychain service per (scope, name)** (`_secret_service`): global →
+  `claude-yolo-secret-{name}`; project → `claude-yolo-secret-{project-hash8}-{name}`
+  where `project-hash8` is the first 8 hex of the SHA-256 of the project key — the
+  same hashing idiom as the per-config-dir token service. Upserted with
+  `add-generic-password -U`, mirroring `_store_oauth_token`. (As with the token,
+  the value passes through the `security` subprocess argv briefly — the same
+  trade-off the token path already makes; it's never on *yolo's* own argv.)
+
+- **Registry** `~/.claude-yolo/secrets.json` (`_read_secrets_file` /
+  `_write_secret_entry` / `_remove_secret_entry`): keyed by service → `{scope,
+  name, project_key, created, modified}`, **never the value**, host-side only,
+  never mounted — same safety property as `tokens.json` / `projects.json`. It's
+  what enumerates secrets across scopes and maps a hashed service back to its
+  project (the hash is one-way). A re-set preserves the original `created` stamp.
+
+This stored-value scope is **independent of** the *injection* scope: which
+sessions get a secret is controlled by which config layer (global / project /
+worktree) names it in the `secrets` key. The config layer decides *whether* a name
+is injected here; the storage scope decides *which value* that name resolves to.
+
+### Verbs (`secret set/list/rm`, mirroring the token verbs)
+
+Dispatched before the config load (needs no yolo config; the project key comes from
+git). The subcommand is the TOPIC, the secret NAME a trailing positional
+(`do_secret` validates the shape).
+
+- **`yolo secret set NAME [--project] [--clipboard]`** (`do_secret_set`) —
+  keychain upsert + registry entry, **global by default** or **project scope** with
+  `--project`. The value is **never a CLI argument** (that would leak it into shell
+  history and the process argv visible in `ps`). Three input sources: **stdin** when
+  piped (`... | yolo secret set NAME`), an **interactive no-echo prompt**
+  (`getpass`) on a TTY, or **`--clipboard`** (`pbpaste`, for the just-copied-from-a-
+  web-page case; the clipboard is left as-is). A single trailing newline is stripped
+  (so `echo … |` works). **NAME is validated as a shell identifier**
+  (`[A-Za-z_][A-Za-z0-9_]*`) — it becomes an env var name in-container. Empty value
+  refused.
+
+- **`yolo secret list [--all]`** (`do_secret_list`) — registry-backed table
+  (NAME / SCOPE / CREATED / STATUS reconciled against the keychain via
+  `_keychain_has`, like `yolo tokens`). Shows global + the current project's
+  secrets; **`--all`** spans every project (the cross-project counterpart, like
+  `list --all`).
+
+- **`yolo secret rm NAME [--project]`** (`do_secret_rm`) — delete the keychain item
+  (`_keychain_delete`) + registry row at the given scope.
+
+### Config key — `secrets`, a spec list (name → target)
+
+All secrets live in the keychain; the **config decides which a session gets and
+how each is injected**. `secrets` (and the repeatable `--secret` CLI flag) is a
+**list/concat dest** in `_CONCAT_DESTS`, accumulating across the layers and the
+CLI. Each entry is a spec `NAME[:TARGET][!]`, parsed by `_parse_secret_spec` →
+`(name, kind, target, ephemeral)`:
+
+- **`NAME`** → env var `NAME`. **`NAME:ENVNAME`** (TARGET is an identifier) → env
+  var renamed to `ENVNAME`. **`NAME:/abs`** or **`NAME:~/path`** (TARGET starts
+  with `/` or `~`) → file mounted at that **container** path; `~` expands to the
+  container home `/home/claude` (substituted explicitly — *not* via
+  `os.path.expanduser`, which would wrongly hit the host `$HOME`). A trailing **`!`**
+  marks an env target **ephemeral** (file targets reject it — `EBUSY` on a
+  single-file mountpoint).
+
+- **Concat/dedup** (`_resolve_secret_specs`): keyed by `(kind, target)`,
+  lowest-precedence first, so exact dups collapse and a target collision (two specs
+  hitting the same env name or mount path) is won by the higher layer.
+
+- **Validation** at launch only (like mount/port resolution): the secret must exist
+  in the keychain (else a pointed exit pointing at `yolo secret set`); a file target
+  under the cwd / `~/.claude` mounts **warns** (`_warn_secret_file_target`) — it'd
+  land plaintext in the host-visible tree. `--add-secret` / `--remove-secret` edit
+  the stored list element-wise (modeled on prompts: exact-spec match), with the
+  usual `--secret`-replaces-the-whole-list conflict guard.
+
+This is the **opt-in gate**: a secret in the keychain is injected only where a
+config layer names it (same trust model as `--yolorc`/`--dockerfile` — the *key* is
+host-side, so Claude can't grant its next session a new secret). The global
+`secrets` list in `~/.yolo.json` is the "inject everywhere" escape hatch.
+
+### Injection at launch — two mechanisms (`_stage_secrets`)
+
+Both read from the keychain and stage **chmod-600 files in the per-session run dir**
+(see [run dir](#temp-file-cleanup--the-per-session-run-dir) below); in neither case
+does the value touch the docker-run argv.
+
+- **Env-target secrets** — *file transport, env by convention*. Each is written to
+  `<run-dir>/secrets/<ENVNAME>` (file name = env var name, **no trailing newline**);
+  the dir is bind-mounted **rw** at `/run/secrets`. A **baked loader**
+  `/etc/yolo/load-secrets.sh` (in `DEFAULT_DOCKERFILE`, written with `printf` so it
+  doesn't need BuildKit) loops the dir and `export`s each file; an ephemeral secret
+  has a sibling `<NAME>.ephemeral` marker that makes the loader `rm` it right after
+  export (why the mount is rw). **Kept by default** — the GC reclaims the rest; the
+  rationale is that blanket self-delete would empty `/run/secrets` for a later `yolo
+  shell` exec'd into the same container. The loader is **sourced from two places**
+  (claude never runs `.bashrc`): the **claude launch wrapper** (extended from the
+  `--yolorc` wrapper — sources the loader, then the rc, then `exec "$@"`; triggered
+  by env secrets *or* a yolorc) and the baked **`.bashrc`** (for `yolo shell`,
+  sentinel-guarded by `YOLO_SECRETS_SOURCED`, before the `YOLO_RC` line so an rc can
+  use the values). No secrets configured → no `/run/secrets` mount, loader is a
+  no-op.
+
+- **File-target secrets** — each staged value is bind-mounted **read-only** at its
+  container path. **Not** placed in `/run/secrets` (the loader ignores them) and
+  **not** self-deleted: a single-file bind mount can't be unlinked from inside, so
+  they persist for the session like `.credentials.json` and rely on the GC. (Both
+  facts confirmed 2026-06-16 via `probes/mount-delete-probe.sh`.)
+
+## Temp-file cleanup & the per-session run dir
+
+A bind-mounted credential/secret file must exist for the **entire container
+lifetime**, and yolo `os.execvp`s into docker (`_dispatch_launch`) — its process is
+*replaced*, so there's no `finally`/`atexit` to delete anything. Cleanup is
+therefore **out-of-band and parallel-safe**:
+
+- **Per-session run dir**, keyed by the (final, suffix-laden) container name:
+  `<run-dir>/<container>/` (`_session_run_dir`, mode **700**; files **chmod 600**,
+  written via `_write_run_file` with `O_CREAT|0o600` so they're never briefly
+  world-readable). Holds the staged secrets (`secrets/` subdir for env targets) plus
+  the credential snapshot / throwaway mask.
+
+- **Location: a `$TMPDIR` subdir** `claude-yolo-run/` (`_run_dir`, via
+  `tempfile.gettempdir()`). Chosen because the macOS per-user temp dir is mode 700,
+  **excluded from Time Machine, and not in synced folders** (Dropbox/iCloud), so a
+  session-long plaintext secret isn't copied off the machine. (`$TMPDIR` resolves
+  host-side; the files are bind-mounted to fixed container paths, so the opaque host
+  path never matters in-container.)
+
+- **GC at launch** (`_gc_run_dir`, called early in `launch_container`): removes only
+  `<run-dir>/<dir>/` whose container is **not in `docker ps`**
+  (`_running_container_names`) — crash/leftover sessions. **Never a blanket wipe**,
+  which would nuke a *concurrently running* session's still-mounted files. Stays
+  crash-proof (a `kill -9`'d session's dir is collected next launch, its container
+  gone). Same start-of-launch philosophy as the `.yolo-status/<slug>.state` reset.
+
+- **Retrofit:** `extract_credentials` / `_masking_credfile` now take the run dir and
+  write into it (was `NamedTemporaryFile(delete=False)` in `$TMPDIR`, which leaked a
+  file per launch forever), so they're collected by the same GC.
+
+Rejected: *parent-waits-and-cleans* (drop `execvp`, `subprocess.run` + `finally`) —
+works only for the non-tmux foreground case and forces yolo to own TTY/signal/
+exit-code propagation for an interactive `-it` session, exactly what `execvp`
+avoids. *tmpfs / FIFO / stdin* — none can carry a host *value* into a bind mount.
+
 ## Host-side config: `~/.yolo.json` + `~/.claude-yolo/projects.json` + per-worktree overlay
 
 Config supplies defaults for most flags; `load_yolo_config` applies them via
@@ -565,8 +758,8 @@ migration path; `~/.yolo.json` itself is exempt from the walk.
 
 Precedence overall: `~/.yolo.json` < `projects.json` entry < worktree overlay <
 CLI flags. Per key the higher layer **overrides**, except `prompts`, `mounts`,
-and `ports` (`_CONCAT_DESTS`), which **concatenate** across the layers and then
-the CLI values (those lists accumulate; everything else replaces).
+`ports`, and `secrets` (`_CONCAT_DESTS`), which **concatenate** across the layers
+and then the CLI values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `dockerfile`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
@@ -579,7 +772,8 @@ bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `prompts` (string or list of strings; the pre-0.7 name
 `append-system-prompt` draws a pointed rename error),
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
-`[HOST:]CONTAINER`), `require-project-entry`, `tmux`, `tmux-session`.
+`[HOST:]CONTAINER`), `secrets` (string or list, `NAME[:TARGET][!]`),
+`require-project-entry`, `tmux`, `tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
 (CLI-only by design); any of them in a config file is a hard error (not in
@@ -658,9 +852,13 @@ Behavior à la `git config`:
   same-container-port element (so a `HOST:` pin can be added/dropped); remove
   matches by container port (`_port_container`: `HOST:` stripped, deliberately
   unvalidated so a malformed spec is removable).
+  **`--add-secret NAME[:TARGET]` / `--remove-secret NAME[:TARGET]`** do the same for
+  `secrets`, but modeled on `prompts` (the spec is an opaque string): add validates
+  via `_parse_secret_spec` and dedups by **exact spec** (a name needed both env and
+  file is two distinct specs); remove matches the exact spec.
   Contradictory instructions in one call (set + `--unset` of the same key,
   `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`,
-  `--port` with `--add/--remove-port`)
+  `--port` with `--add/--remove-port`, `--secret` with `--add/--remove-secret`)
   are errors, not silently ordered; sets apply first, then unsets, then list
   edits.
 - **`yolo config --global`** targets the flat `~/.yolo.json` instead of the
@@ -849,9 +1047,10 @@ Implementation shape:
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first
-  (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, and `dir`, which prints a
-  path, are dispatched right after `config` — before that re-parse — since they
-  need no config at all; `dir` in particular keeps its stdout free of the config
+  (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, `dir`, which prints a
+  path, and `secret`, which manages the keychain, are dispatched right after
+  `config` — before that re-parse — since they need no yolo config at all; `dir`
+  in particular keeps its stdout free of the config
   provenance note). The other
   terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `rebase`,
   `setup-token`,
@@ -865,10 +1064,15 @@ Implementation shape:
   port specs are resolved only on these paths, so a stale mount path or
   malformed port spec can't break `list`/`finish`/`config`.
 - **`launch_container`** is the single assembly path shared by every launch
-  (extracted from the old inline `main`): mounts (cwd + the extra `--mount`
-  dirs), ssh-agent block, the credential/config blocks, labels, `--entrypoint`
-  override, then hands the finished argv to `_dispatch_launch` (the run-it-here
-  vs run-it-in-tmux seam — see the tmux section). It takes `container_base`,
+  (extracted from the old inline `main`): it first finalizes the container name
+  (the `-{config}`/`-{profile}` suffixes, up front) and **GCs + creates the
+  per-session run dir** (keyed by that name; see the run-dir section), then
+  assembles mounts (cwd + the extra `--mount` dirs), ssh-agent block, the
+  credential/config/auth blocks (staging creds into the run dir), the **secret
+  mounts** (`_stage_secrets`: the rw `/run/secrets` mount for env targets, a ro
+  mount per file target), labels, `--entrypoint` override, then hands the finished
+  argv to `_dispatch_launch` (the run-it-here vs run-it-in-tmux seam — see the tmux
+  section). It takes `container_base`,
   `command` (args after the image), optional `entrypoint`, and the resolved
   `mounts`/`ports`. For claude sessions (`entrypoint is None`) it also creates
   `<config-dir>/.yolo-status/` and **deletes the stale `<cwd-slug>.state` file**
@@ -911,11 +1115,12 @@ Implementation shape:
   (resume, worktree-only), `--force` (`finish` and `rebase` — skips the
   uncommitted-changes guard for the former, the not-confirmed-idle running
   container for the latter),
-  `--resume`/`-r` (resume), `--watch` (ps), `--all` (list), `--print`/`-n`
+  `--resume`/`-r` (resume), `--watch` (ps), `--all` (`list` and `secret list`),
+  `--project`/`--clipboard` (`secret`), `--print`/`-n`
   (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
-  `--add-port`/`--remove-port`.
+  `--add-port`/`--remove-port`, `--add-secret`/`--remove-secret`.
   Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
   `--new` without a `TOPIC`, or `--new` with `-r` all error). (`--port` is the
   exception: a launch flag that doubles as `browse`'s selection.)
@@ -1156,7 +1361,8 @@ from the path also pins the tests to the source file regardless of any installed
 `yolo`. They
 never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
-`ensure_oauth_token`, `git_identity_args`, and `os.execvp`, then asserts on the
+`ensure_oauth_token`, `git_identity_args`, and `os.execvp` (and points `_run_dir`
+at the test home + no-ops the docker-ps `_gc_run_dir`), then asserts on the
 captured `docker run` argv. `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
@@ -1230,4 +1436,22 @@ claude-launch source wrapper (bash entrypoint, reconstructed `claude
 --dangerously-skip-permissions … "$@"`) vs the `.bashrc` path a `yolo shell` uses
 (not command-wrapped), the missing-file guard, the unwrapped default launch, the
 baked `.bashrc` sourcing line, and the `config` verb persist/validate.
+`test_secrets.py` covers the secrets feature and the run-dir GC (keychain /
+`pbpaste` / input sources stubbed like `test_tokens.py`): `_parse_secret_spec` for
+both targets + the `/`-or-`~` discriminator + `~`→`/home/claude` expansion (and
+that it does *not* use the host `$HOME`) + the ephemeral `!` marker (and that a
+file target rejects it) + the collision/dedup rule; the scope-aware
+`_secret_service` naming; the `secrets.json` registry (read/write/remove, created
+preserved, malformed-file error); the verbs (`set` via clipboard/stdin/prompt +
+NAME validation + empty-value refusal + project-scope keying, `rm`, `list`'s
+global+project filter / `--all` / stale marking, the `set` dispatch routing the
+NAME through `main`); the launch wiring (env → the rw `/run/secrets` mount + the
+loader-sourcing wrapper + the staged chmod-600 file with no trailing newline,
+env-rename + ephemeral marker file, file → per-path ro mount, the missing-secret
+exit, the host-visible-path warning, and that no value ever reaches the argv); the
+`secrets` config-layer concatenation; the `config` verb `--add-secret`/
+`--remove-secret` edits + spec validation + the replace-conflict guard; the
+`--project`/`--clipboard`/extra-args verb gating; and the docker-ps-scoped GC
+(parallel-safety) + the `_session_run_dir` 700 mode + the credential/mask
+run-dir retrofit (chmod 600, in the run dir).
 Keep them green when changing flags or mounts.
