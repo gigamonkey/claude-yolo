@@ -189,6 +189,90 @@ def test_finish_deletes_merged_branch(cy, run_cli, repo):
     assert "topic" not in git(r, "branch", "--list", "topic").stdout  # branch deleted
 
 
+def test_finish_removes_worktree_with_submodule(cy, run_cli, repo, tmp_path):
+    """git refuses to `worktree remove` a tree with submodules; finish falls back."""
+    r, home = repo
+    # a tiny repo to embed as a submodule
+    sub = _make_repo(tmp_path, "sub-origin")
+    git(
+        r,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(sub),
+        "sub",
+    )
+    git(r, "commit", "-qm", "add submodule")
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    # populate the submodule in the worktree — git only refuses removal once it's
+    # actually checked out (an empty gitlink dir removes fine)
+    git(
+        wt,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+    )
+    assert (wt / "sub" / "README").exists()
+    # sanity: plain `git worktree remove` would die on the submodule
+    bare = subprocess.run(
+        ["git", "-C", str(r), "worktree", "remove", str(wt)],
+        capture_output=True,
+        text=True,
+    )
+    assert bare.returncode != 0 and "submodule" in bare.stderr.lower()
+    # finish must still clear it (via the rmtree + prune fallback)
+    run_cli(["finish", "topic"], home=home, cwd=r)
+    assert not wt.exists()
+    assert "topic" not in git(r, "branch", "--list", "topic").stdout  # merged -> deleted
+    # no stale admin entry left behind
+    assert "topic" not in git(r, "worktree", "list").stdout
+
+
+# --- submodule population (--submodules) ------------------------------------
+
+
+def _add_submodule(repo_dir, tmp_path, home):
+    """Embed a tiny file-protocol submodule at `sub` in `repo_dir` and commit it."""
+    sub = _make_repo(tmp_path, "sub-origin")
+    git(repo_dir, "-c", "protocol.file.allow=always", "submodule", "add", str(sub), "sub")
+    git(repo_dir, "commit", "-qm", "add submodule")
+    # `_init_submodules` runs git under HOME=home (set by run_cli), and the clone
+    # subprocess submodule-update spawns reads protocol.file.allow from there, not
+    # the superproject config. Allow file:// for the test (real submodules are
+    # https/ssh, so this is test-only plumbing).
+    (home / ".gitconfig").write_text('[protocol "file"]\n\tallow = always\n')
+
+
+def test_start_populates_submodules_when_enabled(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    _add_submodule(r, tmp_path, home)
+    run_cli(["start", "topic", "--submodules"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert (wt / "sub" / "README").exists()  # populated host-side before launch
+
+
+def test_start_skips_submodules_by_default(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    _add_submodule(r, tmp_path, home)
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert not (wt / "sub" / "README").exists()  # gitlink dir left empty
+
+
+def test_submodules_noop_without_gitmodules(cy, run_cli, repo):
+    # A plain repo (no .gitmodules) with --submodules must launch fine, not error.
+    r, home = repo
+    argv = run_cli(["start", "topic", "--submodules"], home=home, cwd=r)
+    assert argv is not None  # reached the docker-run assembly
+
+
+# --- finish (continued) -----------------------------------------------------
+
+
 def test_finish_keep_action_keeps_merged_branch(cy, run_cli, repo):
     r, home = repo
     # a fresh topic reads as merged; `keep` must leave it alone anyway

@@ -22,6 +22,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py --auth bedrock --config-dir ~/.claude-bdr # Bedrock + alternate config dir
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --ssh-agent              # forward the host ssh-agent (off by default)
+./yolo.py --submodules             # populate git submodules before launch (off by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
 ./yolo.py --dockerfile ./Dockerfile.yolo  # build the image from a custom Dockerfile
@@ -212,6 +213,19 @@ on top of whichever auth is chosen:
   clones of public repos still work (the rewrite would turn them into SSH URLs that
   can't auth without the agent), but in-container *authenticated* GitHub git auth
   won't. The rewrite is applied as run-time git config only under `--ssh-agent`.
+- **`--submodules` / `--no-submodules`** (default **off**; `submodules` in
+  config) → on every launch, populate the working dir's git submodules
+  (`_init_submodules`: `git submodule update --init --recursive`) just before
+  `docker run`. Run **host-side on purpose**: it uses the host's git credentials,
+  and when the submodule objects already live in the shared `.git/modules/<name>`
+  (a prior session cloned them — and `finish`'s removal doesn't delete that), the
+  checkout is **offline**, no fetch or auth needed, even with the in-container
+  ssh-agent off; the files land in the bind-mounted working dir so Claude sees
+  them. A **no-op** when the dir has no `.gitmodules` (a plain repo, or a non-repo
+  cwd), and **best-effort** — a failure (network/auth on a first-time clone) warns
+  but doesn't block the session. Off by default since most repos have none. Note
+  neither `git merge` nor `git worktree add` checks out submodule contents, so
+  without this you'd populate them by hand inside the container.
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
   host directories ("reference" dirs) at their **identical host paths**, like the
   cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would
@@ -527,7 +541,7 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `bedrock-model`, `claude-json`,
-`ssh-agent`, `base`, `finish-action` (one of
+`ssh-agent`, `submodules`, `base`, `finish-action` (one of
 `delete-if-merged`/`merge`/`push`/`keep` — validated against `FINISH_CHOICES` in
 `_parse_yolo_dict`, same as `auth`), `finish-remote`,
 `prompts` (string or list of strings; the pre-0.7 name
@@ -703,7 +717,15 @@ gracefully outside one — there's just no repo slug to label/find by).
 
   All actions still refuse if a container is running, or on uncommitted changes
   (unless `--force`), and all remove the worktree's `worktrees.json` overlay
-  entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`).
+  entry. Leaves transcripts (they self-expire via `cleanupPeriodDays`). The
+  removal goes through **`_remove_worktree`**, which handles git's refusal to
+  `worktree remove` a tree containing **populated submodules** ("working trees
+  containing submodules cannot be moved or removed" — an unconditional check that
+  `--force` doesn't bypass): on *that* stderr it falls back to the documented
+  manual workaround (`shutil.rmtree` the dir, then `git worktree prune` the stale
+  admin entry), the dirty guard having already run. Any *other* git failure
+  (e.g. a locked worktree) is surfaced verbatim — the rm fallback is scoped to
+  the submodule case only.
 - **`rebase TOPIC`** (`do_rebase`) — rebase a worktree's branch onto `base` (the
   same `--base`/`base` ref as `start`/`list`/`finish`, default `HEAD`). Resolves
   `base` to a concrete commit **in the main checkout** first (`git rev-parse` from
@@ -1107,7 +1129,8 @@ captured `docker run` argv. `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 the `finish-action`/`finish-remote` keys (parse, the `FINISH_CHOICES` validation,
-and `config`-verb persist), and the `config` verb; `test_cli.py` covers verb
+and `config`-verb persist), the `submodules` bool key (parse), and the `config`
+verb; `test_cli.py` covers verb
 dispatch and arg
 assembly across the credential/config axes, extra mounts, the guardrails, the
 `--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
@@ -1123,7 +1146,11 @@ tests locate the built image in the assembled argv by its
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects —
 including the four `--finish-action` behaviors (`keep`, `merge` and its
 conflict-abort/keep path, and `push` to a `--finish-remote` bare repo) alongside
-the default `delete-if-merged`, and the `rebase` verb (replaying a branch onto
+the default `delete-if-merged`, the submodule-removal fallback (a real populated
+submodule that plain `git worktree remove` refuses, which `finish` clears via
+the rmtree+prune path), the `--submodules` population on launch (a real
+file-protocol submodule checked out host-side when enabled, left empty by
+default, and a no-op without `.gitmodules`), and the `rebase` verb (replaying a branch onto
 the base's new commits, honouring `--base`; the required-topic/missing-worktree/
 dirty-tree refusals; and the session-aware running-container handling — a
 `waiting` session rebases through, `working`/unknown refuse, and `--force`

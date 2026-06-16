@@ -63,6 +63,11 @@ def test_parse_accepts_underscored_keys(cy, tmp_path):
     assert cy._parse_yolo_file(p) == {"aws_profile": "prod"}
 
 
+def test_parse_submodules_key(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"submodules": True})
+    assert cy._parse_yolo_file(p) == {"submodules": True}
+
+
 def test_parse_expands_user_in_path_keys(cy, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", "/home/someone")
     p = write(tmp_path / ".yolo.json", {"config-dir": "~/cfg"})

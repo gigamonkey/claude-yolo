@@ -5,6 +5,25 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## UNRELEASED
 
+- **New `--submodules` flag (`submodules` config key, default off)** populates a
+  session's git submodules — `git submodule update --init --recursive`, run
+  host-side just before launch — so they're checked out in the bind-mounted
+  working dir before Claude starts. Neither `git merge` nor `git worktree add`
+  checks out submodule contents, so without this you'd populate them by hand
+  inside each container. Run host-side on purpose: it uses the host's git
+  credentials, and when the objects already live in the shared `.git/modules`
+  (a prior session cloned them) the checkout is offline — no fetch or auth, even
+  with the in-container ssh-agent off. A no-op when there's no `.gitmodules`, and
+  best-effort (a failure warns but doesn't block the session).
+
+- **`yolo finish` now handles worktrees containing submodules.** git refuses to
+  `git worktree remove` a tree with populated submodules ("working trees
+  containing submodules cannot be moved or removed" — an unconditional check that
+  `--force` doesn't bypass), which left such worktrees un-finishable. `finish`
+  now falls back to the documented manual removal (delete the directory, then
+  `git worktree prune`) on that specific error, after its usual dirty-tree guard;
+  any other git failure is still surfaced verbatim.
+
 - **`yolo list --all`** lists every worktree under
   `~/.claude-yolo/worktrees` across all repos (with a leading REPO column), not
   just the current repo's — the cross-repo counterpart to a plain `list`. The

@@ -870,6 +870,7 @@ YOLO_KEYS = {
     "bedrock_model": ("bedrock_model", "str"),
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
+    "submodules": ("submodules", "bool"),
     "base": ("base", "str"),
     "finish_action": ("finish_action", "finish"),
     "finish_remote": ("finish_remote", "str"),
@@ -1924,6 +1925,15 @@ PARSER.add_argument(
     "GitHub git auth, which won't work without it.",
 )
 PARSER.add_argument(
+    "--submodules",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Before launch, populate git submodules in the session's working dir "
+    "(`git submodule update --init --recursive`, host-side). Off by default since "
+    "most repos have none; turn it on with --submodules (or `submodules: true` in "
+    "config). No-op when the dir has no .gitmodules.",
+)
+PARSER.add_argument(
     "--rebuild-image",
     action="store_true",
     default=False,
@@ -2434,6 +2444,31 @@ def _dispatch_launch(
     _launch_in_tmux(run_cmd, window_name, session=parsed.tmux_session, reuse_existing=reuse)
 
 
+def _init_submodules(cwd: pathlib.Path) -> None:
+    """Populate git submodules in `cwd` before launch (opt-in via --submodules).
+
+    Run host-side, on purpose: it uses the host's git credentials, and when the
+    submodule objects already live in the shared .git/modules/<name> (e.g. a prior
+    session cloned them) it checks out offline — no fetch, no auth needed — even
+    with the in-container ssh-agent off. The result lands in the bind-mounted
+    working dir, so Claude sees the files. A no-op when there's no .gitmodules (a
+    plain repo, or a cwd that isn't a git repo at all); best-effort, so a failure
+    (network/auth on a fresh clone) warns but doesn't block the session.
+    """
+    if not (cwd / ".gitmodules").is_file():
+        return
+    print("Populating git submodules (--submodules)…", file=sys.stderr)
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "submodule", "update", "--init", "--recursive"]
+    )
+    if result.returncode != 0:
+        print(
+            "warning: `git submodule update --init --recursive` failed; continuing "
+            "without populated submodules.",
+            file=sys.stderr,
+        )
+
+
 def launch_container(
     parsed,
     *,
@@ -2629,6 +2664,9 @@ def launch_container(
         status_dir.mkdir(parents=True, exist_ok=True)
         (status_dir / f"{_cwd_slug(cwd)}.state").unlink(missing_ok=True)
 
+    if parsed.submodules:
+        _init_submodules(cwd)
+
     image_tag = _build_image(parsed, cwd)
 
     entry = ["--entrypoint", entrypoint] if entrypoint else []
@@ -2658,6 +2696,27 @@ def launch_container(
         worktree_name=worktree_name,
         cwd=cwd,
     )
+
+
+def _remove_worktree(worktree: pathlib.Path, topic: str, force: bool) -> None:
+    """`git worktree remove` the worktree, falling back to manual removal.
+
+    git unconditionally refuses to remove a worktree containing populated
+    submodules ("working trees containing submodules cannot be moved or removed")
+    — the check predates the dirty/locked checks and `--force` doesn't bypass it.
+    In that one case we do the documented manual workaround: delete the directory
+    ourselves, then `git worktree prune` the now-stale admin entry. Our own dirty
+    guard has already run (or been waived by --force), so the rm is gated. Any
+    *other* git failure (e.g. a locked worktree) is surfaced verbatim, not forced.
+    """
+    remove = ["git", "worktree", "remove"] + (["--force"] if force else []) + [str(worktree)]
+    result = subprocess.run(remove, capture_output=True, text=True)
+    if result.returncode != 0:
+        if "submodule" not in result.stderr.lower():
+            sys.exit(result.stderr.strip() or f"failed to remove worktree '{topic}'.")
+        # Submodule case: git won't, so we do it by hand.
+        shutil.rmtree(worktree)
+    subprocess.run(["git", "worktree", "prune"])
 
 
 def do_finish(
@@ -2697,9 +2756,7 @@ def do_finish(
     if dirty and not force:
         sys.exit(f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force.")
 
-    remove = ["git", "worktree", "remove"] + (["--force"] if force else []) + [str(worktree)]
-    subprocess.run(remove, check=True)
-    subprocess.run(["git", "worktree", "prune"])
+    _remove_worktree(worktree, topic, force)
 
     # The worktree is gone, so its overlay config goes too (only finish removes it;
     # a manual `git worktree remove` would leave a stale entry that the next `start`
