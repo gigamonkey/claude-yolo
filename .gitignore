@@ -10,3 +10,7 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# Emacs autosave (#file#) and lock (.#file) files
+\#*\#
+.\#*
