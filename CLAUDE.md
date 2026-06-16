@@ -216,16 +216,19 @@ on top of whichever auth is chosen:
 - **`--submodules` / `--no-submodules`** (default **off**; `submodules` in
   config) → on every launch, populate the working dir's git submodules
   (`_init_submodules`: `git submodule update --init --recursive`) just before
-  `docker run`. Run **host-side on purpose**: it uses the host's git credentials,
-  and when the submodule objects already live in the shared `.git/modules/<name>`
-  (a prior session cloned them — and `finish`'s removal doesn't delete that), the
-  checkout is **offline**, no fetch or auth needed, even with the in-container
-  ssh-agent off; the files land in the bind-mounted working dir so Claude sees
-  them. A **no-op** when the dir has no `.gitmodules` (a plain repo, or a non-repo
-  cwd), and **best-effort** — a failure (network/auth on a first-time clone) warns
-  but doesn't block the session. Off by default since most repos have none. Note
-  neither `git merge` nor `git worktree add` checks out submodule contents, so
-  without this you'd populate them by hand inside the container.
+  `docker run`. Run **host-side on purpose**: it needs the host's git credentials
+  and network. git (2.53, tested) gives each worktree/checkout its **own**
+  submodule git dir — a new worktree clones the submodule **fresh from the
+  remote** rather than reusing the objects in a sibling worktree or the shared
+  `.git/modules/<name>` — so populating generally fetches; the host has the
+  creds/network for that, whereas an in-container clone of a private submodule
+  would fail with the ssh-agent off by default. The files land in the
+  bind-mounted working dir so Claude sees them. A **no-op** when the dir has no
+  `.gitmodules` (a plain repo, or a non-repo cwd), and **best-effort** — a failure
+  (network/auth) warns but doesn't block the session. Off by default since most
+  repos have none. Note neither `git merge` nor `git worktree add` checks out
+  submodule contents, so without this you'd populate them by hand inside the
+  container.
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
   host directories ("reference" dirs) at their **identical host paths**, like the
   cwd. **Read-only by default**; `:rw` opts in. The path must exist (docker would

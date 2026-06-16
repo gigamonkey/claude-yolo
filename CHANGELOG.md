@@ -10,11 +10,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   host-side just before launch — so they're checked out in the bind-mounted
   working dir before Claude starts. Neither `git merge` nor `git worktree add`
   checks out submodule contents, so without this you'd populate them by hand
-  inside each container. Run host-side on purpose: it uses the host's git
-  credentials, and when the objects already live in the shared `.git/modules`
-  (a prior session cloned them) the checkout is offline — no fetch or auth, even
-  with the in-container ssh-agent off. A no-op when there's no `.gitmodules`, and
-  best-effort (a failure warns but doesn't block the session).
+  inside each container. Run host-side on purpose: it needs the host's git
+  credentials and network. git (2.53, tested) gives each worktree its own
+  submodule git dir and clones fresh from the remote rather than reusing a
+  sibling worktree's or the shared `.git/modules` objects, so populating
+  generally fetches; the host has the creds/network for that, whereas an
+  in-container clone of a private submodule would fail with the ssh-agent off.
+  A no-op when there's no `.gitmodules`, and best-effort (a failure warns but
+  doesn't block the session).
 
 - **`yolo finish` now handles worktrees containing submodules.** git refuses to
   `git worktree remove` a tree with populated submodules ("working trees

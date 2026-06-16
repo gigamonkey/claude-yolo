@@ -2447,13 +2447,16 @@ def _dispatch_launch(
 def _init_submodules(cwd: pathlib.Path) -> None:
     """Populate git submodules in `cwd` before launch (opt-in via --submodules).
 
-    Run host-side, on purpose: it uses the host's git credentials, and when the
-    submodule objects already live in the shared .git/modules/<name> (e.g. a prior
-    session cloned them) it checks out offline — no fetch, no auth needed — even
-    with the in-container ssh-agent off. The result lands in the bind-mounted
-    working dir, so Claude sees the files. A no-op when there's no .gitmodules (a
-    plain repo, or a cwd that isn't a git repo at all); best-effort, so a failure
-    (network/auth on a fresh clone) warns but doesn't block the session.
+    Run host-side, on purpose: it needs the host's git credentials and network.
+    git (2.53, tested) gives each worktree/checkout its *own* submodule git dir —
+    a new worktree clones fresh from the remote rather than reusing the objects in
+    a sibling worktree or the shared .git/modules/<name> — so populating generally
+    fetches. The host has the creds/network for that; an in-container clone of a
+    private submodule would fail with the ssh-agent off by default. The files land
+    in the bind-mounted working dir, so Claude sees them. A no-op when there's no
+    .gitmodules (a plain repo, or a cwd that isn't a git repo at all); best-effort,
+    so a failure (network/auth, or a submodule already populated) warns but doesn't
+    block the session.
     """
     if not (cwd / ".gitmodules").is_file():
         return
