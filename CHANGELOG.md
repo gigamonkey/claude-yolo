@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.14.0 — 2026-06-16
 
 - **New `--yolorc PATH` flag (`yolorc` config key, default unset)** sources a
   shell file *inside* the container before the session starts — for per-session
