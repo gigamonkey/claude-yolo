@@ -3,6 +3,42 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **New `secret` verb family + `--secret` flag (`secrets` config key) — store
+  arbitrary secrets in the macOS keychain and inject them into a session.**
+  `yolo secret set NAME` stores a value (the value is never a CLI argument — it
+  comes from stdin when piped, a hidden interactive prompt, or `--clipboard` via
+  `pbpaste`), at **global scope** or, with `--project`, scoped to the current
+  repo. `yolo secret list` (`--all` spans every project) and `yolo secret rm`
+  round out the verbs, mirroring `tokens`/`forget-token`. Storage is the keychain
+  (encrypted at rest, no plaintext secrets dotfile) plus a host-side
+  `~/.claude-yolo/secrets.json` registry that's never mounted, exactly like
+  `tokens.json`. A name resolves project-scope first, then global.
+
+  Injection is opt-in per the host-side `secrets` config key / repeatable
+  `--secret` flag (a concat list like `mounts`/`ports`) — a stored secret is
+  injected only where a config layer names it, the same trust model as
+  `--yolorc`/`--dockerfile`. Each spec is `NAME[:TARGET][!]`: bare `NAME` → env
+  var `NAME`; `NAME:ENVNAME` → renamed env var; `NAME:/path` or `NAME:~/path` →
+  a file bind-mounted at that container path (`~` is the *container* home,
+  `/home/claude`). A trailing `!` on an env target makes it ephemeral (deleted
+  right after it's read). **No secret value ever reaches the docker-run argv**
+  (and so not `docker inspect`, `/proc/1/environ`, or tmux's retained pane
+  command): env-target secrets transit a private `/run/secrets` file mount read
+  by a baked loader (sourced from the claude launch wrapper and `.bashrc`),
+  file-target secrets a read-only bind mount.
+
+- **Temp-file cleanup hardening.** yolo previously left a credential file in
+  `$TMPDIR` on every launch (`extract_credentials`/`_masking_credfile` used
+  `NamedTemporaryFile(delete=False)` and `os.execvp` left no chance to unlink
+  it). Staged credential and secret files now live in a per-session run dir
+  under `$TMPDIR/claude-yolo-run/<container>/` (mode 700, files chmod 600 from
+  creation) — `$TMPDIR` because the macOS per-user temp dir is excluded from
+  Time Machine and synced folders. A GC at the start of each launch removes only
+  run dirs whose container is no longer in `docker ps`, so it's parallel-safe
+  (never touches a concurrently-running session's files) and crash-proof.
+
 ## v0.14.0 — 2026-06-16
 
 - **New `--yolorc PATH` flag (`yolorc` config key, default unset)** sources a

@@ -54,6 +54,11 @@ applies to:
 
 - **Credentials pasted into a session** — an API key or password you paste
   into the conversation is one Claude can use, container or no container.
+- **Injected secrets (`--secret`)** — a keychain-stored secret you inject into a
+  session is one Claude can read and use. The keychain buys encrypted-at-rest
+  storage and keeps the value off disk and out of the docker command line; it
+  does *not* sandbox the value once it's in the container. Inject only what the
+  session needs. See [`secrets`](#secrets---secret-nametarget-repeatable).
 - And of course the Anthropic credentials that every mode forwards, which
   Claude needs to run at all.
 
@@ -625,6 +630,80 @@ file can't put the skip-permissions container's server on your LAN (the raw
 `-- -p` passthrough is the escape hatch if you truly want that). In config, a
 string or list of specs; like `mounts`, the lists concatenate across the layers
 and the CLI (on a same-container-port conflict the higher layer wins).
+
+### `secrets` (`--secret NAME[:TARGET]`, repeatable)
+
+Keychain-stored secrets — PATs, API keys, SSH keys — injected into a session
+without ever writing a plaintext secrets file or putting the value on a command
+line. There are two halves: **storing** a secret (the `secret` verb) and
+**injecting** it (the `secrets` config key / `--secret` flag). Storing one does
+*not* inject it anywhere — injection is opt-in per project, the same trust model
+as [`dockerfile`](#dockerfile---dockerfile-path) and `yolorc` (the *key* lives in
+host-side config, which Claude can't edit from inside a container, so Claude can't
+grant its next session a new secret).
+
+**Storing — the `secret` verb.** Values live in the macOS keychain (encrypted at
+rest), with a host-side `~/.claude-yolo/secrets.json` registry that records
+non-secret metadata (name, scope, timestamps) and is never mounted — the same
+arrangement as the OAuth-token registry.
+
+```bash
+yolo secret set GH_TOKEN              # prompts (hidden), or reads piped stdin
+gh auth token | yolo secret set GH_TOKEN     # from a pipe
+yolo secret set GH_TOKEN --clipboard  # from the macOS clipboard (pbpaste)
+yolo secret set DB_PASSWORD --project # scoped to this repo, not global
+yolo secret list                      # global + this project's secrets
+yolo secret list --all                # across every project
+yolo secret rm GH_TOKEN               # delete (keychain + registry)
+```
+
+The value is **never passed as a command-line argument** (which would leak it
+into shell history and the process list) — it comes from stdin, a hidden prompt,
+or `--clipboard`. Secrets have two **storage scopes**: **global** (the default)
+and **project** (`--project`, keyed to the repo root). At injection a name
+resolves project-scope first, then global, so a project can override a global
+secret of the same name. The NAME must be a shell identifier
+(`[A-Za-z_][A-Za-z0-9_]*`) because it can become an env var name.
+
+**Injecting — the `secrets` key.** List the secrets a session should get; each is
+a spec `NAME[:TARGET]` whose TARGET picks how it's delivered:
+
+| Spec | Delivered as |
+| --- | --- |
+| `GH_TOKEN` | env var `$GH_TOKEN` |
+| `DB_PASSWORD:PGPASSWORD` | env var `$PGPASSWORD` (renamed) |
+| `DEPLOY_KEY:~/.ssh/id_ed25519` | a file at `/home/claude/.ssh/id_ed25519` |
+| `TOKEN:/etc/token` | a file at `/etc/token` |
+
+A TARGET that starts with `/` or `~` is a **file** path (and `~` is the
+*container* home, `/home/claude`, not your host home); anything else is an env
+var name. A trailing `!` on an env spec (`GH_TOKEN!`) makes it **ephemeral** —
+deleted the instant it's read, for the rare secret you don't want lingering in
+the session's environment for a later `yolo shell` to pick up. In config it's a
+string or list of specs; like `mounts`/`ports` the lists concatenate across the
+layers and the CLI (on a target collision — same env name or file path — the
+higher layer wins; a secret you want both ways is just two specs).
+
+```bash
+yolo --secret GH_TOKEN --secret DEPLOY_KEY:~/.ssh/id_ed25519
+yolo config --add-secret GH_TOKEN     # persist for this project
+```
+
+**No secret value ever reaches the `docker run` command line** (and so never
+`docker inspect`, `/proc/1/environ`, or tmux's saved pane command — the exposure
+the forwarded Anthropic token still has). Env-target secrets are written to
+chmod-600 files in a private per-session directory bind-mounted at `/run/secrets`
+and exported by a small loader yolo bakes into the image (sourced before your
+`yolorc`, so an rc can use the values — e.g. `echo "$GH_TOKEN" | gh auth login
+--with-token`). File-target secrets are bind-mounted read-only at their path.
+Either way the staged files live under `$TMPDIR` (excluded from Time Machine and
+synced folders) and are reclaimed when the container exits.
+
+The keychain buys **encrypted-at-rest storage and no plaintext secrets dotfile**
+— it does not make the secret invisible to Claude. Anything you inject, Claude
+(and any code in the skip-permissions container) can read; that's inherent, which
+is exactly why injection is opt-in per project. See also [What the container does
+and doesn't protect](#what-the-container-does-and-doesnt-protect).
 
 ### `dockerfile` (`--dockerfile PATH`)
 
