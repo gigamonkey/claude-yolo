@@ -882,6 +882,11 @@ A few flags are deliberately *not* config keys:
   image rebuild (useful when a baked-in tool such as Claude Code itself is
   stale).
 
+- **`--verbose` / `-v`** — print the full `docker run` command before launching.
+  It's hidden by default (it's long and rarely legible); this brings it back for
+  debugging. It contains no secrets — the OAuth token and any `--secret` are
+  passed via a file mount, not the command line.
+
 - **`--dangerously-allow-home`** — by default `yolo` **refuses to launch with the
   working directory at or above `$HOME`**, which would mount your whole home
   directory (including `~/.ssh` and `yolo`'s own config) read-write into a

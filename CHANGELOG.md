@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The assembled `docker run` command is no longer printed before launch.** It
+  was long and rarely legible. Pass **`--verbose`/`-v`** to bring it back for
+  debugging. (It carries no secrets — the OAuth token and any `--secret` ride a
+  file mount, not the argv.)
+
 - **A launch now warns about an unconfigured `Dockerfile.yolo`.** The custom-image
   feature is opt-in via the `dockerfile` config key, so a `Dockerfile.yolo` left
   sitting in the session dir without that key was silently ignored (yolo built

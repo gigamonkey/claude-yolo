@@ -2554,6 +2554,15 @@ PARSER.add_argument(
     help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
 )
 PARSER.add_argument(
+    "-v",
+    "--verbose",
+    action="store_true",
+    default=False,
+    dest="verbose",
+    help="Print the full `docker run` command before launching (off by default — "
+    "it's long and rarely legible).",
+)
+PARSER.add_argument(
     "--dockerfile",
     dest="dockerfile",
     default=None,
@@ -3409,10 +3418,16 @@ def launch_container(
         *command,
     ]
 
-    sep = "- " * 40
-    print(sep)
-    print(" ".join(run_cmd))
-    print(sep)
+    # The assembled `docker run` line is long and rarely legible, so it's hidden
+    # by default; --verbose (or -v) brings it back for debugging. It carries no
+    # secrets (the OAuth token and every --secret ride the /run/secrets file
+    # transport, not the argv), so printing it is a debugging convenience, not a
+    # leak.
+    if getattr(parsed, "verbose", False):
+        sep = "- " * 40
+        print(sep)
+        print(" ".join(run_cmd))
+        print(sep)
     _dispatch_launch(
         run_cmd,
         parsed,

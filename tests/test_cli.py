@@ -767,6 +767,16 @@ def test_no_dockerfile_yolo_warning_when_absent(cy, run_cli, dirs, capsys):
     assert "Dockerfile.yolo" not in capsys.readouterr().err
 
 
+def test_docker_command_hidden_unless_verbose(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    run_cli([], home=home, cwd=work)
+    assert "docker run" not in capsys.readouterr().out  # hidden by default
+    run_cli(["--verbose"], home=home, cwd=work)
+    assert "docker run" in capsys.readouterr().out
+    run_cli(["-v"], home=home, cwd=work)
+    assert "docker run" in capsys.readouterr().out  # short form too
+
+
 def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
     # build_docker_image is stubbed in run_cli, so exercise the real builder
     # directly: it must tag with the content-addressed tag and pass the host UID

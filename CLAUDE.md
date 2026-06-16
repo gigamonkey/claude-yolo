@@ -296,6 +296,12 @@ on top of whichever auth is chosen:
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
+- **`--verbose` / `-v`** (default off; CLI-only, not a config key) → print the
+  assembled `docker run` line before launching. It's hidden by default — long and
+  rarely legible — and carries no secrets (the OAuth token and every `--secret`
+  ride the `/run/secrets` file transport, not the argv), so it's purely a
+  debugging convenience. Gated where the old unconditional `print(" ".join(
+  run_cmd))` was, in `launch_container` just before `_dispatch_launch`.
 - **`--dockerfile PATH`** (default unset; `dockerfile` in config) → build the
   container image from this Dockerfile instead of the inline `DEFAULT_DOCKERFILE`.
   Override semantics (a single path, not a concat key); the path must exist and
