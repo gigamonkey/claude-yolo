@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.15.0 — 2026-06-16
 
 - **New `secret` verb family + `--secret` flag (`secrets` config key) — store
   arbitrary secrets in the macOS keychain and inject them into a session.**
