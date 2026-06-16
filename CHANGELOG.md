@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## UNRELEASED
+## v0.13.0 — 2026-06-16
 
 - **New `--submodules` flag (`submodules` config key, default off)** populates a
   session's git submodules — `git submodule update --init --recursive`, run
