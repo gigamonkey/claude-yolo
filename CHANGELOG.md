@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.16.0 — 2026-06-17
 
 - **New `stop` verb.** `yolo stop` stops the running session's container in the
   current directory; `yolo stop TOPIC` stops a worktree's. The container is found
