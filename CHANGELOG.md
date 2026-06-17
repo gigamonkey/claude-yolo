@@ -42,6 +42,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   your own `$SSH_AUTH_SOCK` on native Linux Docker; the per-session run dir prefers
   `$XDG_RUNTIME_DIR` on Linux.
 
+- **Version string** Drop the `g` prefix from the sha part of the version string
+  because it just looked like part of the SHA.
+
 ## v0.16.0 — 2026-06-17
 
 - **New `stop` verb.** `yolo stop` stops the running session's container in the
