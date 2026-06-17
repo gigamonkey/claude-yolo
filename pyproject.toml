@@ -3,12 +3,15 @@ name = "claude-yolo"
 version = "0.16.0"
 description = "Run Claude Code in an ephemeral Docker container (yolo mode)."
 requires-python = ">=3.10"
-dependencies = []
+# keyring is the cross-platform credential store (macOS Keychain / Secret Service /
+# Windows Credential Manager behind one API). Keep this in sync with the PEP 723
+# `dependencies` block at the top of yolo.py — both list the script's runtime deps.
+dependencies = ["keyring>=24"]
 
 # `yolo.py` works two ways from the same file:
 #   1. standalone — its PEP 723 header + shebang let `./yolo.py` self-run under uv;
 #   2. installed — the console script below puts a `yolo` executable on PATH via
-#      `uv tool install` / `pipx install` (no runtime deps are pulled in).
+#      `uv tool install` / `pipx install` (deps above are pulled into its venv).
 [project.scripts]
 yolo = "yolo:main"
 

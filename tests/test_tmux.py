@@ -250,7 +250,9 @@ def test_tmux_reuse_skips_image_build_and_warns(cy, run_cli, tmux, dirs, monkeyp
     home, work = dirs
     monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
     built = []
-    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    monkeypatch.setattr(
+        cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"
+    )
     tmux.has_session = True
     tmux.windows.append(("@3", "work"))  # matching window exists → focus it
     run_cli(["resume", "--tmux"], home=home, cwd=work)
@@ -263,7 +265,9 @@ def test_tmux_no_window_still_builds(cy, run_cli, tmux, dirs, monkeypatch):
     home, work = dirs
     monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
     built = []
-    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    monkeypatch.setattr(
+        cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"
+    )
     tmux.has_session = True
     run_cli(["resume", "--tmux"], home=home, cwd=work)
     assert built  # not short-circuited

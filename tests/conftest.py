@@ -28,6 +28,17 @@ def _load_module():
     return mod
 
 
+@pytest.fixture(autouse=True)
+def _force_file_credential_store(monkeypatch):
+    """Never touch a real OS keyring during tests.
+
+    Force the chmod-600 file fallback (the keyring backend would otherwise hit the
+    dev machine's actual Keychain/Secret Service). Tests that exercise the real
+    `_cred_*`/`_read_secret_value` paths should also point HOME at a tmp dir.
+    """
+    monkeypatch.setenv("YOLO_CREDENTIAL_STORE", "file")
+
+
 @pytest.fixture
 def cy():
     """A freshly-loaded yolo module (isolated global PARSER)."""

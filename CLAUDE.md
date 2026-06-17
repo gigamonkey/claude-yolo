@@ -2,17 +2,27 @@
 
 ## What this is
 
-`yolo.py` is a single-file Python script (no dependencies beyond the
-stdlib) that runs Claude Code inside an ephemeral Docker container with
-`--dangerously-skip-permissions`. Containing the blast radius of "yolo mode"
-is the whole point: Claude can run unattended inside the container without
-touching the host beyond the bind-mounted working directory.
+`yolo.py` is a single-file Python script that runs Claude Code inside an
+ephemeral Docker container with `--dangerously-skip-permissions`. Containing the
+blast radius of "yolo mode" is the whole point: Claude can run unattended inside
+the container without touching the host beyond the bind-mounted working directory.
 
-The script itself is **stdlib-only and standalone** — it ships as one PEP 723
-file with no runtime dependencies and is run directly. The repo *also* carries a
-small uv-managed dev setup (`pyproject.toml`, `tests/`) for linting and tests;
-that tooling is never needed to *run* the script, only to develop it (see
-**Development** below). Run it directly:
+The script is **a single file, runnable two ways** — standalone via its PEP 723
+header (`./yolo.py` self-runs under uv) or as an installed console script. Its one
+runtime dependency is **`keyring`** (the cross-platform credential store; see the
+auth/secrets sections), declared in *both* the PEP 723 `dependencies` block at the
+top of `yolo.py` and `pyproject.toml` — keep the two in sync. uv carries the dep in
+both run modes, so the single-file property is preserved. (The older "stdlib-only /
+zero runtime deps" goal was dropped when `keyring` was adopted for multiplatform
+support.) The repo *also* carries a small uv-managed dev setup (`pyproject.toml`,
+`tests/`) for linting and tests; that tooling is never needed to *run* the script,
+only to develop it (see **Development** below).
+
+**Host platforms:** macOS and Linux are fully supported; Windows is supported via
+WSL2 (which presents as Linux). Native Windows (no WSL) is out of scope. The
+*container* is always Linux regardless of host, so only the host-side glue —
+credential store, clipboard, ssh-agent socket, temp dir — varies by OS (gated
+through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 
 ```bash
 ./yolo.py                          # default: long-lived OAuth token (consent-prompted mint on first run)
@@ -35,7 +45,7 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
 ./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
 ./yolo.py forget-token             # delete this config dir's token (local only)
-./yolo.py secret set GH_TOKEN      # store a secret in the keychain (stdin/prompt)
+./yolo.py secret set GH_TOKEN      # store a secret in the credential store (stdin/prompt)
 ./yolo.py secret set GH_TOKEN --clipboard   # ...read the value from the clipboard
 ./yolo.py secret set DB_PW --project        # ...at project scope (not global)
 ./yolo.py secret list              # list global + this project's secrets
@@ -99,11 +109,12 @@ written with the `config` verb (see the config section below; an in-directory
 ```
 
 The shebang is `#!/usr/bin/env -S uv run --script` with a PEP 723 metadata block
-(`requires-python = ">=3.10"`, no dependencies), so the script self-runs under
-**uv**, which guarantees a Python ≥3.10 (the `str | None` annotations need it;
-macOS system `python3` is often 3.9). Running it therefore requires `uv` to be
-installed. It's still stdlib-only — uv just selects the interpreter. uv preserves
-the `--` separator, so docker-arg passthrough still works.
+(`requires-python = ">=3.10"`, `dependencies = ["keyring>=24"]`), so the script
+self-runs under **uv**, which guarantees a Python ≥3.10 (the `str | None`
+annotations need it; macOS system `python3` is often 3.9) and provisions the
+`keyring` dep into an ephemeral cached environment. Running it therefore requires
+`uv` to be installed. uv preserves the `--` separator, so docker-arg passthrough
+still works.
 
 `yolo.py` is dual-purpose — the *same file* is both the standalone PEP 723 script
 and an importable module with a `main()` entry point. So there are two ways to run
@@ -111,8 +122,8 @@ it from anywhere:
 
 - **Installed** (preferred): `uv tool install <repo-or-PyPI>` (or `pipx install`)
   builds the wheel and puts a `yolo` executable on PATH in its own isolated venv,
-  pulling in zero runtime deps. `uv tool upgrade claude-yolo` updates it. The
-  console-script wiring is `[project.scripts] yolo = "yolo:main"` in
+  resolving the `keyring` dep into that venv. `uv tool upgrade claude-yolo` updates
+  it. The console-script wiring is `[project.scripts] yolo = "yolo:main"` in
   `pyproject.toml`; the wheel ships only `yolo.py` (`[tool.hatch.build.targets.wheel]
   only-include`).
 - **Standalone**: `chmod +x yolo.py` and symlink it onto PATH
@@ -186,17 +197,19 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    `CLAUDE_CONFIG_DIR` so the check targets the right keychain entry. If host
    `claude` is missing/too old for `auth`, it returns True and defers to the
    empty-file check in `extract_credentials`.
-4. **Extracts credentials** (`extract_credentials`; keychain mode only) from the
-   macOS keychain via the `security` CLI, into a chmod-600 file **in the
-   per-session run dir** (`$TMPDIR/claude-yolo-run/<container>/`; see the run-dir
-   section) that gets bind-mounted to `.credentials.json`. In the default
-   oauth-token mode this step is replaced by staging the
-   `CLAUDE_CODE_OAUTH_TOKEN` into `/run/secrets` (the env-secret file transport,
-   not `-e` — see the oauth-token section). Service name is `Claude Code-credentials` by default,
-   or `Claude Code-credentials-{hash8}` for a non-default config dir, where
-   `hash8` is the first 8 hex chars of the SHA-256 of the resolved config path.
-   This mirrors how Claude Code itself names keychain entries — if that scheme
-   changes upstream, this breaks.
+4. **Extracts credentials** (`extract_credentials`; keychain mode only) from
+   wherever the *host's* Claude Code keeps them, into a chmod-600 file **in the
+   per-session run dir** (`<run-dir>/<container>/`; see the run-dir section) that
+   gets bind-mounted to `.credentials.json`. This is OS-specific because the host
+   store differs: on **macOS** it reads the login Keychain via the `security` CLI,
+   service `Claude Code-credentials` (or `Claude Code-credentials-{hash8}` for a
+   non-default config dir, hash8 = first 8 hex of the SHA-256 of the resolved
+   config path — mirrors Claude Code's own keychain naming, so an upstream scheme
+   change breaks it); on **Linux/other** Claude Code has no Keychain and stores
+   creds in a `.credentials.json` *file* in the config dir, which yolo simply
+   reads. In the default oauth-token mode this whole step is replaced by staging
+   the `CLAUDE_CODE_OAUTH_TOKEN` into `/run/secrets` (the env-secret file
+   transport, not `-e` — see the oauth-token section).
 5. **Assembles `docker run` args** and `os.execvp`s into docker (replacing the
    process, so it's interactive `-it --rm`). The args also forward the host git
    identity (`git_identity_args`) and the SSH agent (see gotchas).
@@ -480,10 +493,10 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
 
 - **Resolution order:** an explicit `CLAUDE_CODE_OAUTH_TOKEN` in the *host* env
   wins (for CI / self-managed tokens; it's global by nature) → else the
-  yolo-managed macOS keychain entry **for the active config dir** → else mint a
+  yolo-managed credential-store entry **for the active config dir** → else mint a
   fresh one interactively and cache it there. That last (auto-mint) step is
   **consent-prompted and gated on `sys.stdin.isatty()`**: interactively, yolo
-  explains what's about to be minted (1-year token, keychain storage,
+  explains what's about to be minted (1-year token, where it's stored,
   `forget-token` / the claude.ai revoke page) and asks `Proceed? [Y/n]` before
   running the flow — minting a year-long credential the user didn't explicitly
   ask for was the original argument against making this mode the default, so it
@@ -491,13 +504,13 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   *is* the consent). A non-interactive launch with no cached token (script/cron/
   no TTY) exits with guidance to run `yolo setup-token` or set the env var,
   rather than hanging on a browser flow nobody can drive.
-- **Per-config-dir, like the keychain creds.** The token is cached under
-  `claude-yolo-oauth-token` for the default config dir, or
-  `claude-yolo-oauth-token-{hash8}` for an alternate `--config-dir`, where `hash8`
-  is the first 8 hex chars of the SHA-256 of the resolved path (`_oauth_service`) —
-  the *same* hash Claude itself uses for its per-dir keychain entry. So each
-  config dir (≈ each account/profile) gets its own long-lived token instead of one
-  global token silently authenticating as the wrong account.
+- **Per-config-dir.** The token is cached under service `claude-yolo-oauth-token`
+  for the default config dir, or `claude-yolo-oauth-token-{hash8}` for an alternate
+  `--config-dir`, where `hash8` is the first 8 hex chars of the SHA-256 of the
+  resolved path (`_oauth_service`) — the *same* hash Claude itself uses for its
+  per-dir keychain entry. So each config dir (≈ each account/profile) gets its own
+  long-lived token instead of one global token silently authenticating as the
+  wrong account.
 - **`yolo setup-token`** (a terminal verb) forces a (re)generation —
   use it for first-time setup or when the year is up. Honours `--config-dir`
   (and a config-file `config-dir`), caching under that dir's service name, so it
@@ -512,11 +525,26 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   line break with the next line continuing in the token alphabet is treated as
   wrapped and rejected. If scraping fails (wrap detected, output shape changed),
   it falls back to prompting for a manual paste. The token is upserted into the
-  keychain with `security add-generic-password -U`.
-- **Storage rationale:** the keychain (not a dotfile) keeps the secret encrypted
-  at rest, consistent with how Claude Code stores its own creds, and it's
-  *extract-only* — never rotated, never written back — so none of the precedence/
-  rotation hazards of the mounted `.credentials.json` apply.
+  credential store (`_cred_set`). The pty path is Unix-only — `pty`/`termios`/
+  `fcntl` are imported lazily inside `generate_oauth_token` so the module still
+  imports on Windows (where minting would use the manual-paste fallback; not built,
+  as native Windows is out of scope — WSL2 gets the pty path).
+- **Storage — the credential store (`keyring`, with a file fallback).** The token
+  is stored via the `keyring` package's `CredentialStore` abstraction
+  (`_cred_get`/`_cred_set`/`_cred_delete`/`_cred_exists`, account = the login
+  name): the macOS Keychain, Secret Service (libsecret) on Linux, or the Windows
+  Credential Manager, all encrypted at rest. On a **headless** box with no Secret
+  Service / D-Bus session keyring selects its `fail` backend; yolo detects that
+  (`_keyring_available`) and falls back to a **chmod-600 file store** under
+  `~/.claude-yolo/credentials/` (one hashed-name `.cred` file per service). Force
+  the file store with `YOLO_CREDENTIAL_STORE=file` (used by the test suite, via a
+  conftest autouse fixture, so tests never touch a real keyring). Either way the
+  token is *extract-only* — never rotated, never written back — so none of the
+  precedence/rotation hazards of the mounted `.credentials.json` apply. Because
+  keyring exposes no per-item modification date (unlike the macOS keychain), the
+  **token-expiry estimate now reads its mint date solely from the `tokens.json`
+  registry** (`_token_minted`), and the old "re-minted outside yolo" reconciliation
+  in `yolo tokens` is gone.
 - **Caveat:** this *does* put a bearer token inside the container env (a shift from
   the "secret never enters the container" SSH-agent philosophy), but it's a scoped,
   inference-only token — and no worse than the mounted refresh-token snapshot,
@@ -536,36 +564,34 @@ reported multi-day revocation lag — claude-code issues #34198/#48373/#59378/
 #43801), yolo does its own bookkeeping:
 
 - **Registry** (`~/.claude-yolo/tokens.json`; `_read_tokens_file` /
-  `_write_token_entry` / `_remove_token_entry`): maps keychain **service name →
-  `{config_dir, minted}`**. Non-secret metadata, host-side only, never mounted
-  (same safety property as `projects.json`). Written by `_store_oauth_token`
-  (the single funnel both mint paths go through); a re-mint replaces the entry
-  and prints the *previous* mint timestamp, since the old token stays valid
-  server-side. It exists for what the keychain can't do: enumerate yolo's tokens
-  across config dirs, and map a service name back to its config dir (the hash8
-  is one-way — the mapping is recorded at mint time or lost). The **mint
-  timestamp is the practical point**: it's the only handle for identifying a
-  token on the claude.ai page.
+  `_write_token_entry` / `_remove_token_entry`): maps the credential-store
+  **service name → `{config_dir, minted}`**. Non-secret metadata, host-side only,
+  never mounted (same safety property as `projects.json`). Written by
+  `_store_oauth_token` (the single funnel both mint paths go through); a re-mint
+  replaces the entry and prints the *previous* mint timestamp, since the old token
+  stays valid server-side. It exists for what the store can't do: enumerate yolo's
+  tokens across config dirs, and map a service name back to its config dir (the
+  hash8 is one-way — the mapping is recorded at mint time or lost). The **mint
+  timestamp is the practical point**: it's the only handle for identifying a token
+  on the claude.ai page — *and*, since the move to keyring, the **sole** source for
+  the expiry estimate.
 - **Expiry warning** (`_warn_token_expiry`, called from `ensure_oauth_token` on
-  the cached-keychain-token path; skipped for env-supplied tokens, whose age is
+  the cached-token path; skipped for env-supplied tokens, whose age is
   unknowable): warns at launch when the token is past or within
-  `TOKEN_EXPIRY_WARN_DAYS` (7) of `mdat + TOKEN_LIFETIME_DAYS` (365 — an
-  *assumption*; the token is opaque and states no expiry). The date source is
-  the **keychain item's own `mdat`** (`_keychain_mdat`: `security
-  find-generic-password` *without* `-w` — attributes only, no secret read —
-  regex-parsed, falling back to `cdat`), not the registry: we upsert with
-  `add-generic-password -U`, so mdat = last mint, which can't drift and covers
-  tokens minted before the registry existed. Parse trouble → `None` → silently
-  no warning (it's advisory).
+  `TOKEN_EXPIRY_WARN_DAYS` (7) of `minted + TOKEN_LIFETIME_DAYS` (365 — an
+  *assumption*; the token is opaque and states no expiry). The date source is the
+  **registry's `minted` stamp** (`_token_minted`, reading `tokens.json`): keyring,
+  unlike the macOS keychain, exposes no per-item modification date, so the old
+  `_keychain_mdat` path is gone and the registry is authoritative. Missing/
+  unparseable entry → `None` → silently no warning (it's advisory).
 - **`yolo tokens`** (`do_tokens`, terminal verb, registry-only — needs no config
   dir): table of SERVICE / CONFIG DIR / MINTED / EXPIRES~ / STATUS. STATUS
-  reconciles against the keychain via `_keychain_has` (attributes-only
-  existence check): `stale (not in keychain)` for a deleted item,
-  `re-minted outside yolo` when keychain mdat disagrees with the registry mint
-  by > 1 day, else `ok`. Footer points at the claude.ai page and the
-  match-by-MINTED trick.
+  reconciles against the credential store via `_keychain_has`: `stale (not in
+  store)` for a deleted item, else `ok`. (The pre-keyring `re-minted outside yolo`
+  status is gone — it relied on the keychain mdat that keyring doesn't expose.)
+  Footer points at the claude.ai page and the match-by-MINTED trick.
 - **`yolo forget-token`** (`do_forget_token`, terminal verb): deletes the active
-  config dir's keychain entry (`_keychain_delete`) and registry row, then is
+  config dir's credential-store entry (`_keychain_delete`) and registry row, then is
   explicit that the token is only *forgotten*, not revoked — still valid
   server-side, revocable only at the claude.ai page, and probably impossible to
   identify there (reasons above, outside yolo's control). Named `forget-token`
@@ -576,11 +602,13 @@ reported multi-day revocation lag — claude-code issues #34198/#48373/#59378/
 
 ## Secrets
 
-Arbitrary user secrets (PATs, API keys, SSH keys, …) stored in the **macOS
-keychain** and injected into a session's container as **env vars** or **mounted
-files** — never a plaintext secrets dotfile on the host, never a value on the
-docker-run argv. The keychain buys *encrypted-at-rest storage + no plaintext
-file*; it does **not** buy in-container secrecy — Claude and any code in the
+Arbitrary user secrets (PATs, API keys, SSH keys, …) stored in the **credential
+store** (`keyring`, or the chmod-600 file fallback on headless boxes — same
+`_cred_*` abstraction as the OAuth token) and injected into a session's container
+as **env vars** or **mounted files** — never a plaintext secrets dotfile on the
+host, never a value on the docker-run argv. The store buys *encrypted-at-rest
+storage (when a real keyring backend is present) + no plaintext dotfile*; it does
+**not** buy in-container secrecy — Claude and any code in the
 `--dangerously-skip-permissions` container can read whatever is injected. That's
 inherent and acceptable *because injection is opt-in per project* (see the gate
 below). This first-classes what was already doable by hand with `--mount` a token
@@ -595,13 +623,13 @@ then global** (`_resolve_secret_value`). A worktree session shares its main repo
 project scope, since the project key is the main repo root (`_project_key` follows
 the shared `.git`).
 
-- **Keychain service per (scope, name)** (`_secret_service`): global →
+- **Store service per (scope, name)** (`_secret_service`): global →
   `claude-yolo-secret-{name}`; project → `claude-yolo-secret-{project-hash8}-{name}`
   where `project-hash8` is the first 8 hex of the SHA-256 of the project key — the
-  same hashing idiom as the per-config-dir token service. Upserted with
-  `add-generic-password -U`, mirroring `_store_oauth_token`. (As with the token,
-  the value passes through the `security` subprocess argv briefly — the same
-  trade-off the token path already makes; it's never on *yolo's* own argv.)
+  same hashing idiom as the per-config-dir token service. Upserted via `_cred_set`,
+  mirroring `_store_oauth_token`. (On the macOS-keychain backend the value passes
+  through keyring's Security-framework call, not *yolo's* own argv; on the file
+  backend it's written straight to the chmod-600 file.)
 
 - **Registry** `~/.claude-yolo/secrets.json` (`_read_secrets_file` /
   `_write_secret_entry` / `_remove_secret_entry`): keyed by service → `{scope,
@@ -622,28 +650,29 @@ git). The subcommand is the TOPIC, the secret NAME a trailing positional
 (`do_secret` validates the shape).
 
 - **`yolo secret set NAME [--project] [--clipboard]`** (`do_secret_set`) —
-  keychain upsert + registry entry, **global by default** or **project scope** with
+  store upsert + registry entry, **global by default** or **project scope** with
   `--project`. The value is **never a CLI argument** (that would leak it into shell
   history and the process argv visible in `ps`). Three input sources: **stdin** when
   piped (`... | yolo secret set NAME`), an **interactive no-echo prompt**
-  (`getpass`) on a TTY, or **`--clipboard`** (`pbpaste`, for the just-copied-from-a-
-  web-page case; the clipboard is left as-is). A single trailing newline is stripped
-  (so `echo … |` works). **NAME is validated as a shell identifier**
-  (`[A-Za-z_][A-Za-z0-9_]*`) — it becomes an env var name in-container. Empty value
-  refused.
+  (`getpass`) on a TTY, or **`--clipboard`** (`_read_clipboard`: the platform's
+  clipboard CLI — `pbpaste` on macOS, `Get-Clipboard` on Windows, `wl-paste`/
+  `xclip`/`xsel` on Linux — for the just-copied-from-a-web-page case; the clipboard
+  is left as-is). A single trailing newline is stripped (so `echo … |` works).
+  **NAME is validated as a shell identifier** (`[A-Za-z_][A-Za-z0-9_]*`) — it
+  becomes an env var name in-container. Empty value refused.
 
 - **`yolo secret list [--all]`** (`do_secret_list`) — registry-backed table
-  (NAME / SCOPE / CREATED / STATUS reconciled against the keychain via
+  (NAME / SCOPE / CREATED / STATUS reconciled against the store via
   `_keychain_has`, like `yolo tokens`). Shows global + the current project's
   secrets; **`--all`** spans every project (the cross-project counterpart, like
   `list --all`).
 
-- **`yolo secret rm NAME [--project]`** (`do_secret_rm`) — delete the keychain item
+- **`yolo secret rm NAME [--project]`** (`do_secret_rm`) — delete the stored value
   (`_keychain_delete`) + registry row at the given scope.
 
 ### Config key — `secrets`, a spec list (name → target)
 
-All secrets live in the keychain; the **config decides which a session gets and
+All secrets live in the credential store; the **config decides which a session gets and
 how each is injected**. `secrets` (and the repeatable `--secret` CLI flag) is a
 **list/concat dest** in `_CONCAT_DESTS`, accumulating across the layers and the
 CLI. Each entry is a spec `NAME[:TARGET][!]`, parsed by `_parse_secret_spec` →
@@ -662,20 +691,20 @@ CLI. Each entry is a spec `NAME[:TARGET][!]`, parsed by `_parse_secret_spec` →
   hitting the same env name or mount path) is won by the higher layer.
 
 - **Validation** at launch only (like mount/port resolution): the secret must exist
-  in the keychain (else a pointed exit pointing at `yolo secret set`); a file target
+  in the store (else a pointed exit pointing at `yolo secret set`); a file target
   under the cwd / `~/.claude` mounts **warns** (`_warn_secret_file_target`) — it'd
   land plaintext in the host-visible tree. `--add-secret` / `--remove-secret` edit
   the stored list element-wise (modeled on prompts: exact-spec match), with the
   usual `--secret`-replaces-the-whole-list conflict guard.
 
-This is the **opt-in gate**: a secret in the keychain is injected only where a
+This is the **opt-in gate**: a stored secret is injected only where a
 config layer names it (same trust model as `--yolorc`/`--dockerfile` — the *key* is
 host-side, so Claude can't grant its next session a new secret). The global
 `secrets` list in `~/.yolo.json` is the "inject everywhere" escape hatch.
 
 ### Injection at launch — two mechanisms (`_stage_secrets`)
 
-Both read from the keychain and stage **chmod-600 files in the per-session run dir**
+Both read from the credential store and stage **chmod-600 files in the per-session run dir**
 (see [run dir](#temp-file-cleanup--the-per-session-run-dir) below); in neither case
 does the value touch the docker-run argv (so not `docker inspect`'s `Config.Env`,
 host `ps`, or tmux's pane command — the host-side surfaces an `-e` would leak it
@@ -722,12 +751,14 @@ therefore **out-of-band and parallel-safe**:
   world-readable). Holds the staged secrets (`secrets/` subdir for env targets) plus
   the credential snapshot / throwaway mask.
 
-- **Location: a `$TMPDIR` subdir** `claude-yolo-run/` (`_run_dir`, via
-  `tempfile.gettempdir()`). Chosen because the macOS per-user temp dir is mode 700,
-  **excluded from Time Machine, and not in synced folders** (Dropbox/iCloud), so a
-  session-long plaintext secret isn't copied off the machine. (`$TMPDIR` resolves
-  host-side; the files are bind-mounted to fixed container paths, so the opaque host
-  path never matters in-container.)
+- **Location: a per-user temp subdir** `claude-yolo-run/` (`_run_dir`). On **Linux**
+  it prefers `$XDG_RUNTIME_DIR` when set (a per-user, mode-700 tmpfs); otherwise (and
+  always on macOS) it uses `tempfile.gettempdir()` — chosen because the macOS per-user
+  temp dir is mode 700, **excluded from Time Machine, and not in synced folders**
+  (Dropbox/iCloud), so a session-long plaintext secret isn't copied off the machine.
+  The per-container subdir is chmod-700 regardless of the root's mode. (The path
+  resolves host-side; the files are bind-mounted to fixed container paths, so the
+  opaque host path never matters in-container.)
 
 - **GC at launch** (`_gc_run_dir`, called early in `launch_container`): removes only
   `<run-dir>/<dir>/` whose container is **not in `docker ps`**
@@ -1119,7 +1150,7 @@ Implementation shape:
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first
   (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, `dir`, which prints a
-  path, `secret`, which manages the keychain, and `stop`, which `docker stop`s a
+  path, `secret`, which manages the credential store, and `stop`, which `docker stop`s a
   container, are dispatched right after
   `config` — before that re-parse — since they need no yolo config at all; `dir`
   in particular keeps its stdout free of the config
@@ -1348,20 +1379,25 @@ worktree session and so omits the resume flags.
 
 ## Conventions / gotchas
 
-- **macOS only as written; Docker Desktop or OrbStack as the engine.** Credential
-  extraction uses the macOS `security` CLI. SSH agent forwarding (off by default,
-  enabled with `--ssh-agent`) mounts the Docker engine's
-  `/run/host-services/ssh-auth.sock` (the VM-side socket the engine proxies to
-  the host agent — both Docker Desktop and OrbStack expose it at that path), NOT
-  the raw host `$SSH_AUTH_SOCK` — that socket's listener lives in the macOS kernel
-  and is unreachable from the container's Linux VM (the mounted inode is dead:
-  `connect()` → ECONNREFUSED). The host must have a running ssh-agent for
-  forwarding to work. The engine socket is mounted `srw-rw---- root:root`, so the
-  in-container `claude` user (uid = host uid, a non-root gid) can't `connect()` to
-  it by default — `connect()` needs write perm on the socket inode, and the user
-  is neither owner nor in group 0. Fix: `useradd -G root` puts `claude` in group 0,
-  granting the socket's group-rw. No real privilege added (the user already has
-  NOPASSWD sudo; the container is the sandbox).
+- **macOS + Linux hosts (Windows via WSL2); Docker Desktop, OrbStack, or native
+  Linux Docker as the engine.** The host-specific glue routes through the `_HOST`
+  helpers (credential store, clipboard, ssh-agent socket, temp dir). **SSH agent
+  forwarding** (off by default, enabled with `--ssh-agent`) picks its source socket
+  per host via `_ssh_agent_sock_source`:
+  - on **macOS / Windows** (Docker Desktop or OrbStack) it mounts the engine's
+    `/run/host-services/ssh-auth.sock` — the VM-side socket the engine proxies to
+    the host agent — NOT the raw host `$SSH_AUTH_SOCK`, whose listener lives in the
+    host kernel and is unreachable from the container's Linux VM (the mounted inode
+    is dead: `connect()` → ECONNREFUSED). That engine socket is `srw-rw---- root:root`,
+    so the in-container `claude` user (uid = host uid, a non-root gid) can't
+    `connect()` by default; `useradd -G root` puts it in group 0 for the socket's
+    group-rw. No real privilege added (the user already has NOPASSWD sudo; the
+    container is the sandbox).
+  - on **native Linux Docker** the engine shares the host kernel, so it mounts the
+    host's own `$SSH_AUTH_SOCK` directly — `connect()` works because the claude
+    user shares the host uid that owns the socket (no group-0 trick needed there).
+
+  Either way the host must have a running ssh-agent for forwarding to work.
 - **Under `--ssh-agent`, GitHub HTTPS git is rewritten to SSH so it reuses the
   agent.** When the agent is forwarded, the launch sets run-time git config via
   `GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf` /
@@ -1421,12 +1457,12 @@ worktree session and so omits the resume flags.
 
 ## Development
 
-`pyproject.toml` defines a **uv-managed project** with no runtime dependencies.
-Its `dev` dependency group carries the only deps — `ruff` and `pytest`. The
-project *is* packaged (hatchling build backend, `[project.scripts] yolo =
-"yolo:main"`, wheel ships only `yolo.py`) so it can `uv tool install`, but the
-runtime module stays stdlib-only — packaging adds no runtime dependency. `uv.lock`
-is committed; `.venv/`, `dist/`, and the tool caches are gitignored.
+`pyproject.toml` defines a **uv-managed project** whose one runtime dependency is
+`keyring` (kept in sync with the PEP 723 `dependencies` block in `yolo.py`). Its
+`dev` dependency group carries the tooling — `ruff` and `pytest`. The project *is*
+packaged (hatchling build backend, `[project.scripts] yolo = "yolo:main"`, wheel
+ships only `yolo.py`) so it can `uv tool install`. `uv.lock` is committed; `.venv/`,
+`dist/`, and the tool caches are gitignored.
 
 ```bash
 uv sync                 # create/refresh .venv with the dev tools
@@ -1509,9 +1545,16 @@ concat-key accumulation, `resume` flags *updating* the overlay (lists accumulate
 `--global`/`--init`/missing-worktree errors, and a relative `--dockerfile`
 validated against the worktree dir rather than the cwd), `finish` removing the
 entry, and a malformed-file error.
-`test_tokens.py` covers the token registry, the `_keychain_mdat` parsing and
-expiry warning, the implicit-mint consent prompt, and the `tokens` /
-`forget-token` verbs (the `security`-wrapping helpers stubbed).
+`test_tokens.py` covers the token registry, the registry-sourced expiry warning
+(`_token_minted`), the implicit-mint consent prompt, and the `tokens` /
+`forget-token` verbs (the credential-store wrapping helpers stubbed).
+`test_platform.py` covers the host-platform abstraction: the `_HOST`/`_is_*`
+helpers, `_open_url` routing through `webbrowser`, the credential store
+(file-fallback round-trip get/set/delete/exists + a faked keyring backend), the
+per-host `_ssh_agent_sock_source` selection, the cross-platform `_read_clipboard`
+command choice, and the `_run_dir` `$XDG_RUNTIME_DIR`/`$TMPDIR` location. A
+conftest autouse fixture forces `YOLO_CREDENTIAL_STORE=file` so no test ever
+touches a real keyring.
 `test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux
 server patched in at the `_tmux` seam (session creation + dashboard seeding,
 window command quoting, inside-vs-outside `$TMUX` focusing, the
@@ -1541,12 +1584,16 @@ claude-launch source wrapper (bash entrypoint, reconstructed `claude
 --dangerously-skip-permissions … "$@"`) vs the `.bashrc` path a `yolo shell` uses
 (not command-wrapped), the missing-file guard, the unwrapped default launch, the
 baked `.bashrc` sourcing line, and the `config` verb persist/validate.
-`test_secrets.py` covers the secrets feature and the run-dir GC (keychain /
-`pbpaste` / input sources stubbed like `test_tokens.py`): `_parse_secret_spec` for
+`test_secrets.py` covers the secrets feature and the run-dir GC (the credential
+store forced to the file fallback by conftest; clipboard / input sources stubbed
+like `test_tokens.py`): `_parse_secret_spec` for
 both targets + the `/`-or-`~` discriminator + `~`→`/home/claude` expansion (and
 that it does *not* use the host `$HOME`) + the ephemeral `!` marker (and that a
 file target rejects it) + the collision/dedup rule; the scope-aware
-`_secret_service` naming; the `secrets.json` registry (read/write/remove, created
+`_secret_service` naming; the credential-store round-trip (`_cred_*` /
+`_read_secret_value` byte-for-byte) and the OS-branched `extract_credentials`
+(macOS `security` vs the Linux `.credentials.json` file read); the `secrets.json`
+registry (read/write/remove, created
 preserved, malformed-file error); the verbs (`set` via clipboard/stdin/prompt +
 NAME validation + empty-value refusal + project-scope keying, `rm`, `list`'s
 global+project filter / `--all` / stale marking, the `set` dispatch routing the

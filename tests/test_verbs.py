@@ -155,7 +155,9 @@ def _stop_capture(cy, monkeypatch):
 def test_stop_stops_worktree_session(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cidabc123456")
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cidabc123456"
+    )
     stops = _stop_capture(cy, monkeypatch)
     run_cli(["stop", "topic"], home=home, cwd=r)
     assert stops == [["docker", "stop", "cidabc123456"]]
@@ -174,7 +176,9 @@ def test_stop_no_running_session_is_noop(cy, run_cli, repo, monkeypatch, capsys)
 def test_stop_refuses_working_session_without_force(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789")
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789"
+    )
     monkeypatch.setattr(cy, "_read_session_state", lambda path, now: "working 3s")
     stops = _stop_capture(cy, monkeypatch)
     with pytest.raises(SystemExit) as exc:
@@ -186,7 +190,9 @@ def test_stop_refuses_working_session_without_force(cy, run_cli, repo, monkeypat
 def test_stop_force_stops_working_session(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
-    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789")
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789"
+    )
     monkeypatch.setattr(cy, "_read_session_state", lambda path, now: "working 3s")
     stops = _stop_capture(cy, monkeypatch)
     run_cli(["stop", "topic", "--force"], home=home, cwd=r)
@@ -405,7 +411,9 @@ def test_finish_push_action_pushes_and_keeps(cy, run_cli, repo, tmp_path):
     assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept locally
     assert "refs/heads/topic" in git(r, "ls-remote", "upstream").stdout  # on the remote
     # -u set up tracking, so a later bare push/pull on the branch just works
-    assert git(r, "rev-parse", "--abbrev-ref", "topic@{upstream}").stdout.strip() == "upstream/topic"
+    assert (
+        git(r, "rev-parse", "--abbrev-ref", "topic@{upstream}").stdout.strip() == "upstream/topic"
+    )
 
 
 def test_finish_refuses_dirty_without_force(cy, run_cli, repo):

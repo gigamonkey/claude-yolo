@@ -1,18 +1,16 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = ["keyring>=24"]
 # ///
 
 import argparse
 import datetime
-import fcntl
 import getpass
 import hashlib
 import json
 import os
 import pathlib
-import pty
 import re
 import select
 import shlex
@@ -21,9 +19,54 @@ import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
-import tty
+import webbrowser
+
+# Unix-only modules (fcntl, pty, termios, tty) are imported lazily inside the few
+# functions that use them (the setup-token pty flow and the ps --watch picker) so
+# that simply importing yolo — for `--version`, the console-script entry point, or
+# the cross-platform launch paths — works on Windows, where those modules don't
+# exist. See generate_oauth_token and _ps_picker.
+
+# --- Host platform ---------------------------------------------------------------
+#
+# yolo runs on a macOS or Linux host (Windows is supported via WSL2, which presents
+# as Linux). The container is always Linux regardless of host, so only the host-side
+# glue — credential store, clipboard, ssh-agent socket, temp dir — varies by OS.
+_HOST = sys.platform
+
+
+def _is_macos() -> bool:
+    return _HOST == "darwin"
+
+
+def _is_linux() -> bool:
+    return _HOST.startswith("linux")
+
+
+def _is_windows() -> bool:
+    return _HOST in ("win32", "cygwin")
+
+
+# The Docker-Desktop / OrbStack VM-side ssh-agent socket (macOS, Windows, and
+# Docker Desktop on Linux all expose it here); the engine proxies it to the host.
+_DESKTOP_SSH_SOCK = "/run/host-services/ssh-auth.sock"
+
+
+def _ssh_agent_sock_source() -> str:
+    """Host path to bind-mount as the in-container ssh-agent socket.
+
+    macOS/Windows run the engine in a VM, so the host agent is reachable only via
+    the engine's proxy socket. Native Linux Docker shares the host kernel, so the
+    host's own $SSH_AUTH_SOCK works directly — preferred when set, else fall back
+    to the Desktop socket (covers Docker Desktop on Linux).
+    """
+    if _is_linux():
+        sock = os.environ.get("SSH_AUTH_SOCK")
+        if sock:
+            return sock
+    return _DESKTOP_SSH_SOCK
+
 
 # Image tag repo. The actual tag is content-addressed: claude-yolo:<hash8> where
 # hash8 derives from the Dockerfile text + host UID (see _image_tag). Each distinct
@@ -304,14 +347,128 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
     return tag
 
 
-def extract_credentials(config_dir: str | None, run_dir: pathlib.Path) -> str:
-    """Extract Claude API credentials from the macOS keychain via the `security` CLI.
+# --- Credential store -------------------------------------------------------------
+#
+# yolo-owned secrets — the long-lived OAuth token (_read/_store_oauth_token) and
+# user `secret`s (_read/_store_secret_value) — are stored via `keyring`, which
+# speaks the macOS Keychain, Secret Service (libsecret) on Linux, and the Windows
+# Credential Manager behind one API. On a headless box with no Secret Service /
+# D-Bus session keyring falls back to its `fail` backend; we detect that and use a
+# chmod-600 file store under ~/.claude-yolo/credentials instead (consistent with
+# the plaintext chmod-600 secret files yolo already stages in the run dir at
+# launch). The host *Claude Code* creds read by keychain auth mode are a separate
+# matter — see extract_credentials.
+_CRED_FILE_SUBDIR = "credentials"  # under ~/.claude-yolo
+_use_keyring_cache: bool | None = None
 
-    Claude Code stores OAuth credentials in the keychain under a service name of
-    "Claude Code-credentials" (default) or "Claude Code-credentials-{hash8}" when
-    multiple config directories are in use. The hash is the first 8 hex chars of the
-    SHA-256 of the resolved config directory path — this makes the keychain entry name
-    stable and unique per directory without embedding the full path.
+
+def _cred_account() -> str:
+    """Account/username for yolo's own keyring entries.
+
+    keyring needs a stable account for get() to match set(); reusing the login
+    name keeps any pre-existing macOS Keychain entries (created by older yolo via
+    `security ... -a $USER`) findable.
+    """
+    return os.environ.get("USER") or os.environ.get("USERNAME") or "claude-yolo"
+
+
+def _keyring_available() -> bool:
+    """Whether keyring has a real OS backend (not the headless `fail` backend).
+
+    Cached for the process. Set YOLO_CREDENTIAL_STORE=file to force the chmod-600
+    file fallback regardless (headless Linux servers, or hermetic tests).
+    """
+    global _use_keyring_cache
+    if _use_keyring_cache is None:
+        _use_keyring_cache = _detect_keyring()
+    return _use_keyring_cache
+
+
+def _detect_keyring() -> bool:
+    if os.environ.get("YOLO_CREDENTIAL_STORE", "").lower() == "file":
+        return False
+    try:
+        import keyring
+        from keyring.backends import fail
+    except Exception:
+        return False
+    try:
+        return not isinstance(keyring.get_keyring(), fail.Keyring)
+    except Exception:
+        return False
+
+
+def _cred_file_path(service: str) -> pathlib.Path:
+    """Per-service file in the file-store fallback (name hashed for fs-safety)."""
+    name = hashlib.sha256(service.encode()).hexdigest() + ".cred"
+    return pathlib.Path.home() / ".claude-yolo" / _CRED_FILE_SUBDIR / name
+
+
+def _cred_get(service: str) -> str | None:
+    """The stored value for `service`, or None. keyring or the file fallback."""
+    if _keyring_available():
+        import keyring
+
+        return keyring.get_password(service, _cred_account())
+    try:
+        return _cred_file_path(service).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _cred_set(service: str, value: str) -> None:
+    """Upsert `value` under `service`. keyring or a chmod-600 file."""
+    if _keyring_available():
+        import keyring
+
+        keyring.set_password(service, _cred_account(), value)
+        return
+    path = _cred_file_path(service)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(value)
+    path.chmod(0o600)
+
+
+def _cred_delete(service: str) -> bool:
+    """Delete `service`'s value; True if something was deleted."""
+    if _keyring_available():
+        import keyring
+
+        try:
+            keyring.delete_password(service, _cred_account())
+            return True
+        except Exception:
+            return False
+    try:
+        _cred_file_path(service).unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _cred_exists(service: str) -> bool:
+    """Whether a value is stored for `service`."""
+    if _keyring_available():
+        return _cred_get(service) is not None
+    return _cred_file_path(service).is_file()
+
+
+def extract_credentials(config_dir: str | None, run_dir: pathlib.Path) -> str:
+    """Snapshot the host's rotating Claude Code credentials into a mountable file.
+
+    Keychain auth mode reads the credentials the *host's* Claude Code manages —
+    which live in different places per OS:
+
+    - macOS: the login Keychain, under service "Claude Code-credentials" (default)
+      or "Claude Code-credentials-{hash8}" for an alternate config dir, where hash8
+      is the first 8 hex chars of the SHA-256 of the resolved config path. Read via
+      the `security` CLI (these are Claude-Code-owned items keyed by service alone,
+      so keyring — which needs the account — isn't the right tool here).
+    - Linux/other: a `.credentials.json` *file* in the config dir (Claude Code has
+      no Keychain there), so we just read that file.
 
     Returns the path of a file (chmod 600) in the per-session `run_dir` containing
     the credentials JSON, ready to bind-mount into the container. The file lives in
@@ -320,6 +477,14 @@ def extract_credentials(config_dir: str | None, run_dir: pathlib.Path) -> str:
     outlive yolo's own process (it execvp's into docker), so nothing here can unlink
     it synchronously.
     """
+    if not _is_macos():
+        base = pathlib.Path(config_dir).resolve() if config_dir else pathlib.Path.home() / ".claude"
+        src = base / ".credentials.json"
+        if not src.is_file():
+            print(f"Failed to find Claude Code credentials file at '{src}'", file=sys.stderr)
+            sys.exit(1)
+        return _write_run_file(run_dir, "credentials.json", src.read_bytes())
+
     if config_dir:
         config_path = pathlib.Path(config_dir).resolve()
         hash8 = hashlib.sha256(str(config_path).encode()).hexdigest()[:8]
@@ -479,35 +644,18 @@ def _oauth_service(config_dir: str | None) -> str:
 
 def _read_oauth_token(config_dir: str | None) -> str | None:
     """The cached yolo OAuth token for this config dir, or None."""
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", _oauth_service(config_dir), "-w"],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip() or None
+    val = _cred_get(_oauth_service(config_dir))
+    return val.strip() if val else None
 
 
 def _store_oauth_token(token: str, config_dir: str | None) -> None:
-    """Upsert the yolo OAuth token for this config dir into the keychain (-U).
+    """Upsert the yolo OAuth token for this config dir into the credential store.
 
     Also records the mint in ~/.claude-yolo/tokens.json (the registry). On a
     re-mint the old token stays valid server-side — there's no revocation API —
     so print its mint date: the only handle for finding it on the claude.ai page.
     """
-    subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            os.environ.get("USER", "claude-yolo"),
-            "-s",
-            _oauth_service(config_dir),
-            "-w",
-            token,
-        ],
-        check=True,
-    )
+    _cred_set(_oauth_service(config_dir), token)
     previous = _write_token_entry(config_dir)
     if previous and previous.get("minted"):
         print(
@@ -569,73 +717,33 @@ def _remove_token_entry(service: str) -> dict | None:
 
 
 def _keychain_has(service: str) -> bool:
-    """Whether a keychain item exists for `service` (attributes only, no secret)."""
-    try:
-        return (
-            subprocess.run(
-                ["security", "find-generic-password", "-s", service],
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-    except FileNotFoundError:
-        return False
+    """Whether the credential store holds a value for `service`."""
+    return _cred_exists(service)
 
 
 def _keychain_delete(service: str) -> bool:
-    """Delete the keychain item for `service`; True if something was deleted."""
-    try:
-        return (
-            subprocess.run(
-                ["security", "delete-generic-password", "-s", service],
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-    except FileNotFoundError:
-        return False
-
-
-_KC_DATE_RE = re.compile(r'"(?:mdat|cdat)".*?"(\d{14})[^"]*"')
-
-
-def _keychain_mdat(service: str) -> datetime.datetime | None:
-    """The last-modified time of a keychain item, or None.
-
-    We upsert tokens with `add-generic-password -U`, so the item's modification
-    date *is* the last mint time — the keychain timestamps every entry for free,
-    which makes this the drift-proof source for the expiry estimate (it survives
-    re-mints done outside yolo and predates the tokens.json registry). Attributes
-    print without `-w`, so no secret is read and no auth prompt fires. Returns
-    None on any trouble (missing item, parse change): the expiry warning is
-    advisory and just stays quiet.
-    """
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", service],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    # Attribute lines look like: "mdat"<timeb>=0x...  "20260610123456Z\000"
-    # Prefer mdat (last upsert); fall back to cdat.
-    dates = {m.group(0)[1:5]: m.group(1) for m in _KC_DATE_RE.finditer(result.stdout)}
-    stamp = dates.get("mdat") or dates.get("cdat")
-    if not stamp:
-        return None
-    try:
-        return datetime.datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(
-            tzinfo=datetime.timezone.utc
-        )
-    except ValueError:
-        return None
+    """Delete `service` from the credential store; True if something was deleted."""
+    return _cred_delete(service)
 
 
 def _token_expiry(minted: datetime.datetime) -> datetime.datetime:
     return minted + datetime.timedelta(days=TOKEN_LIFETIME_DAYS)
+
+
+def _token_minted(config_dir: str | None) -> datetime.datetime | None:
+    """The recorded mint time for this config dir's token (from tokens.json), or None.
+
+    The registry is the sole date source now that the store is keyring (which,
+    unlike the macOS keychain, exposes no per-item modification date). Quiet on a
+    missing/unparseable entry — the expiry warning is advisory.
+    """
+    entry = _read_tokens_file().get(_oauth_service(config_dir))
+    if not entry or not entry.get("minted"):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(entry["minted"]).astimezone(datetime.timezone.utc)
+    except ValueError:
+        return None
 
 
 def _warn_token_expiry(config_dir: str | None) -> None:
@@ -643,12 +751,12 @@ def _warn_token_expiry(config_dir: str | None) -> None:
 
     Without this, a token minted a year ago just starts 401ing inside containers
     with no hint from yolo. Estimate only (TOKEN_LIFETIME_DAYS); quiet when the
-    keychain date can't be read.
+    mint date isn't recorded in the registry.
     """
-    mdat = _keychain_mdat(_oauth_service(config_dir))
-    if mdat is None:
+    minted = _token_minted(config_dir)
+    if minted is None:
         return
-    expiry = _token_expiry(mdat)
+    expiry = _token_expiry(minted)
     now = datetime.datetime.now(datetime.timezone.utc)
     if expiry >= now + datetime.timedelta(days=TOKEN_EXPIRY_WARN_DAYS):
         return
@@ -656,7 +764,7 @@ def _warn_token_expiry(config_dir: str | None) -> None:
     state = f"expired around {when}" if expiry < now else f"expires around {when}"
     dir_label = config_dir or "~/.claude"
     print(
-        f"warning: the OAuth token for {dir_label} (minted {mdat.date().isoformat()}) "
+        f"warning: the OAuth token for {dir_label} (minted {minted.date().isoformat()}) "
         f"{state}. Re-mint with `yolo setup-token`; the old token can only be revoked "
         f"at {TOKEN_REVOKE_URL}.",
         file=sys.stderr,
@@ -672,7 +780,7 @@ def generate_oauth_token(config_dir: str | None) -> str:
     stdout *and* capture it, then scrape the token out. The pty path makes this
     robust to whether setup-token writes the token to stdout or the tty. If
     scraping fails (e.g. the token format changed), we fall back to asking the user
-    to paste what was printed. The token is cached in the macOS keychain under the
+    to paste what was printed. The token is cached in the credential store under the
     per-config-dir service name (`_oauth_service`) for reuse.
 
     Requires an interactive terminal (the OAuth flow needs a human to authorize in
@@ -688,6 +796,13 @@ def generate_oauth_token(config_dir: str | None) -> str:
         )
     if not shutil.which("claude"):
         sys.exit("`claude` not found on host; install Claude Code to run `setup-token`.")
+    # Unix-only; imported here so the module still imports on Windows (where minting
+    # would instead use the manual-paste fallback — not built, as native Windows is
+    # out of scope; WSL2 gets this pty path).
+    import fcntl
+    import pty
+    import termios
+
     print("Generating a long-lived (1-year) OAuth token via `claude setup-token`.")
     print("Authorize in the browser when prompted.\n", flush=True)
 
@@ -721,9 +836,8 @@ def generate_oauth_token(config_dir: str | None) -> str:
         sys.exit("That doesn't look like a valid OAuth token; aborting.")
 
     _store_oauth_token(token, config_dir)
-    print(
-        f"\nStored the OAuth token in the macOS keychain (service '{_oauth_service(config_dir)}')."
-    )
+    store = "keyring" if _keyring_available() else "file store (~/.claude-yolo/credentials)"
+    print(f"\nStored the OAuth token in the {store} (service '{_oauth_service(config_dir)}').")
     return token
 
 
@@ -750,9 +864,12 @@ def ensure_oauth_token(config_dir: str | None) -> str:
         return cached
     if sys.stdin.isatty():
         dir_label = config_dir or "~/.claude"
+        store = (
+            "your OS keyring" if _keyring_available() else "a chmod-600 file under ~/.claude-yolo"
+        )
         print(
             f"No OAuth token cached for {dir_label}. yolo will mint a 1-year Claude Code\n"
-            "token (browser authorization), stored encrypted in your macOS keychain.\n"
+            f"token (browser authorization), stored in {store}.\n"
             "It can later be removed locally with `yolo forget-token`; server-side\n"
             f"revocation is only possible at {TOKEN_REVOKE_URL}."
         )
@@ -775,15 +892,20 @@ def ensure_oauth_token(config_dir: str | None) -> str:
 # Each session gets its own dir, keyed by the container name: <run-dir>/<container>/
 # (mode 700, files 600). At launch we GC any <run-dir>/<name>/ whose container is
 # NOT in `docker ps` (crashed/finished sessions) — never a blanket wipe, which
-# would nuke a concurrently-running session's still-mounted files. The run dir
-# lives under $TMPDIR (a per-user dir, mode 700, excluded from Time Machine and not
-# in synced folders like Dropbox/iCloud), so a session-long plaintext secret file
-# isn't copied off the machine.
+# would nuke a concurrently-running session's still-mounted files. The root is
+# chosen to keep a session-long plaintext secret file off backup/sync paths:
+# on Linux $XDG_RUNTIME_DIR (a per-user, mode-700 tmpfs) when set, else $TMPDIR —
+# the macOS per-user temp dir, which is mode 700 and excluded from Time Machine and
+# synced folders like Dropbox/iCloud. We chmod the per-container dir 700 regardless.
 _RUN_DIR_NAME = "claude-yolo-run"
 
 
 def _run_dir() -> pathlib.Path:
-    """The root run dir: a yolo-owned subdir of $TMPDIR (mode 700)."""
+    """The root run dir: a yolo-owned subdir of a per-user temp location (mode 700)."""
+    if _is_linux():
+        xrd = os.environ.get("XDG_RUNTIME_DIR")
+        if xrd and os.path.isdir(xrd):
+            return pathlib.Path(xrd) / _RUN_DIR_NAME
     return pathlib.Path(tempfile.gettempdir()) / _RUN_DIR_NAME
 
 
@@ -935,37 +1057,16 @@ def _remove_secret_entry(service: str) -> dict | None:
 def _read_secret_value(service: str) -> str | None:
     """The secret value stored under `service`, or None if absent.
 
-    `security ... -w` appends a single newline to the password it prints; strip
-    exactly that one (not arbitrary trailing whitespace, which could corrupt a
-    value that legitimately ends in newlines).
+    The credential store (keyring or the file fallback) round-trips the value
+    byte-for-byte — no trailing-newline artifact to strip, unlike the old
+    `security ... -w` path.
     """
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", service, "-w"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    out = result.stdout
-    return out[:-1] if out.endswith("\n") else out
+    return _cred_get(service)
 
 
 def _store_secret_value(service: str, value: str) -> None:
-    """Upsert a secret value into the keychain (-U), like _store_oauth_token."""
-    subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            os.environ.get("USER", "claude-yolo"),
-            "-s",
-            service,
-            "-w",
-            value,
-        ],
-        check=True,
-    )
+    """Upsert a secret value into the credential store, like _store_oauth_token."""
+    _cred_set(service, value)
 
 
 def _strip_one_newline(value: str) -> str:
@@ -975,6 +1076,34 @@ def _strip_one_newline(value: str) -> str:
     if value.endswith("\n"):
         return value[:-1]
     return value
+
+
+def _read_clipboard() -> str:
+    """Return the host clipboard text, via the platform's CLI; exit if none works.
+
+    macOS `pbpaste`, Windows PowerShell `Get-Clipboard`, or on Linux whichever of
+    `wl-paste` (Wayland) / `xclip` / `xsel` is installed. The fallbacks for not
+    having one are the same as always — pipe the value on stdin, or use the hidden
+    prompt — so this only errors when `--clipboard` was explicitly asked for.
+    """
+    if _is_macos():
+        candidates = [["pbpaste"]]
+    elif _is_windows():
+        candidates = [["powershell", "-NoProfile", "-Command", "Get-Clipboard"]]
+    else:
+        candidates = [["wl-paste"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "-b"]]
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            continue
+        if result.returncode == 0:
+            return result.stdout
+    tools = " / ".join(c[0] for c in candidates)
+    sys.exit(
+        f"--clipboard: no working clipboard tool found (tried {tools}). "
+        "Pipe the value on stdin or omit --clipboard to be prompted."
+    )
 
 
 def _parse_secret_spec(spec: str) -> tuple[str, str, str, bool]:
@@ -1100,7 +1229,7 @@ def _stage_secrets(
         value = _resolve_secret_value(name, project_key)
         if value is None:
             sys.exit(
-                f"secret {name!r} is not in the keychain; store it with "
+                f"secret {name!r} is not in the credential store; store it with "
                 f"`yolo secret set {name}` (add --project for project scope)."
             )
         if kind == "env":
@@ -1140,11 +1269,11 @@ def do_secret(parsed, home: pathlib.Path, cwd: pathlib.Path) -> None:
 
 
 def do_secret_set(name: str, project: bool, clipboard: bool, cwd: pathlib.Path) -> None:
-    """Store a secret value in the keychain + registry (never via the CLI argv).
+    """Store a secret value in the credential store + registry (never via the CLI argv).
 
-    The value comes from --clipboard (pbpaste), stdin when piped, or a hidden
-    interactive prompt — never a command-line argument (that would leak it into
-    shell history and the process argv visible in `ps`).
+    The value comes from --clipboard, stdin when piped, or a hidden interactive
+    prompt — never a command-line argument (that would leak it into shell history
+    and the process argv visible in `ps`).
     """
     if not _valid_secret_name(name):
         sys.exit(
@@ -1153,13 +1282,7 @@ def do_secret_set(name: str, project: bool, clipboard: bool, cwd: pathlib.Path) 
     scope = "project" if project else "global"
     project_key = _project_key(cwd) if project else None
     if clipboard:
-        try:
-            result = subprocess.run(["pbpaste"], capture_output=True, text=True)
-        except FileNotFoundError:
-            sys.exit("--clipboard needs the macOS `pbpaste` command, which wasn't found.")
-        if result.returncode != 0:
-            sys.exit("--clipboard: `pbpaste` failed.")
-        value = _strip_one_newline(result.stdout)
+        value = _strip_one_newline(_read_clipboard())
     elif not sys.stdin.isatty():
         value = _strip_one_newline(sys.stdin.read())
     else:
@@ -1170,11 +1293,11 @@ def do_secret_set(name: str, project: bool, clipboard: bool, cwd: pathlib.Path) 
     _store_secret_value(service, value)
     _write_secret_entry(service, scope, name, project_key)
     where = f"project ({project_key})" if project else "global"
-    print(f"Stored secret {name!r} at {where} scope (keychain service '{service}').")
+    print(f"Stored secret {name!r} at {where} scope (service '{service}').")
 
 
 def do_secret_rm(name: str, project: bool, cwd: pathlib.Path) -> None:
-    """Delete a secret's keychain item + registry row at the given scope."""
+    """Delete a secret's stored value + registry row at the given scope."""
     scope = "project" if project else "global"
     project_key = _project_key(cwd) if project else None
     service = _secret_service(name, scope, project_key)
@@ -1182,7 +1305,7 @@ def do_secret_rm(name: str, project: bool, cwd: pathlib.Path) -> None:
     deleted = _keychain_delete(service)
     where = f"project ({project_key})" if project else "global"
     if not deleted and entry is None:
-        sys.exit(f"no {where}-scope secret {name!r} (keychain service '{service}').")
+        sys.exit(f"no {where}-scope secret {name!r} (service '{service}').")
     print(f"Removed secret {name!r} at {where} scope.")
 
 
@@ -2456,7 +2579,7 @@ PARSER.add_argument(
     "--config-dir",
     metavar="PATH",
     help="Config directory to mount at /home/claude/.claude "
-    "(default: ~/.claude). Credentials are pulled from the keychain entry "
+    "(default: ~/.claude). Credentials are pulled from the store entry "
     "for this directory.",
 )
 PARSER.add_argument(
@@ -2618,7 +2741,7 @@ PARSER.add_argument(
     action="append",
     default=[],
     metavar="NAME[:TARGET]",
-    help="Inject a keychain-stored secret (set with `yolo secret set`) into the "
+    help="Inject a stored secret (set with `yolo secret set`) into the "
     "session. Bare NAME -> env var NAME; NAME:ENVNAME -> env var ENVNAME; "
     "NAME:/path or NAME:~/path -> mounted file at that container path (~ is the "
     "container home /home/claude). A trailing ! on an env target makes it ephemeral "
@@ -2636,8 +2759,8 @@ PARSER.add_argument(
 PARSER.add_argument(
     "--clipboard",
     action="store_true",
-    help="For `secret set`: read the value from the macOS clipboard (pbpaste) "
-    "instead of stdin / an interactive prompt.",
+    help="For `secret set`: read the value from the system clipboard (pbpaste / "
+    "Get-Clipboard / wl-paste / xclip / xsel) instead of stdin / an interactive prompt.",
 )
 PARSER.add_argument(
     "--print",
@@ -3254,17 +3377,22 @@ def launch_container(
         args += ["-e", f"YOLO_RC={_YOLORC_CONTAINER_PATH}"]
 
     if parsed.ssh_agent:
-        # Forward the host ssh-agent via the Docker engine's magic socket. We canNOT bind-mount
-        # the raw host $SSH_AUTH_SOCK: that socket's listener lives in the macOS kernel, while
-        # the container runs in the engine's Linux VM (Docker Desktop or OrbStack), so the
-        # mounted inode is dead (connect() -> ECONNREFUSED). /run/host-services/ssh-auth.sock
-        # is a socket the VM itself listens on and proxies to the host agent — both Docker
-        # Desktop and OrbStack expose it at that path. It's mounted srw-rw----
-        # root:root, so the claude user must be in group 0 to connect (see the useradd line).
+        # Forward the host ssh-agent. The source socket differs by host:
+        #   - macOS / Windows (Docker Desktop or OrbStack): the raw host
+        #     $SSH_AUTH_SOCK can't be bind-mounted — its listener lives in the host
+        #     kernel while the container runs in the engine's Linux VM, so the
+        #     mounted inode is dead (connect() -> ECONNREFUSED). The engine instead
+        #     exposes /run/host-services/ssh-auth.sock, a VM-side socket it proxies
+        #     to the host agent. That socket is srw-rw---- root:root, so the claude
+        #     user must be in group 0 to connect (see the useradd line).
+        #   - native Linux Docker: the engine shares the host kernel, so the host's
+        #     own $SSH_AUTH_SOCK can be bind-mounted directly and connect()s fine
+        #     (owned by the host user, whose uid the claude user shares).
         # --no-ssh-agent skips all of this.
+        ssh_sock = _ssh_agent_sock_source()
         args += [
             "-v",
-            "/run/host-services/ssh-auth.sock:/run/ssh-agent",
+            f"{ssh_sock}:/run/ssh-agent",
             "-e",
             "SSH_AUTH_SOCK=/run/ssh-agent",
             # Mount host known_hosts so SSH host key verification succeeds
@@ -3319,7 +3447,9 @@ def launch_container(
     # Claude Code 2.1.x, shadows the OAuth-token env var → /login. The auth block below
     # overlays that path for this run (keychain with real creds; oauth-token/bedrock
     # with a throwaway), so it's masked here regardless; warn so the user can delete it.
-    if (pathlib.Path(host_claude_dir) / ".credentials.json").exists():
+    # Only on macOS: on a Linux host that file IS the legitimate credential store, so
+    # its presence is expected, not stale (the overlay still masks it for the session).
+    if _is_macos() and (pathlib.Path(host_claude_dir) / ".credentials.json").exists():
         print(
             f"warning: {host_claude_dir}/.credentials.json exists on the host. On macOS\n"
             "  Claude Code uses the Keychain, so this file shouldn't exist — it was likely\n"
@@ -4123,6 +4253,9 @@ def _ps_picker(home: pathlib.Path) -> None:
     restore-on-any-exit in the finally (without which the dashboard window's
     shell is left wrecked). The loop itself takes an injectable key source.
     """
+    import termios
+    import tty
+
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     tty.setcbreak(fd)
@@ -4232,8 +4365,16 @@ def _docker_port(cid: str, container_port: int) -> int:
 
 
 def _open_url(url: str) -> None:
-    """Open a URL in the host browser (the macOS `open`). A seam for tests."""
-    subprocess.run(["open", url], check=False)
+    """Open a URL in the host's default browser. A seam for tests.
+
+    `webbrowser` is stdlib and cross-platform (it dispatches to `open` on macOS,
+    `xdg-open`/a browser on Linux, the shell on Windows), so this works on every
+    host without an OS branch.
+    """
+    try:
+        webbrowser.open(url)
+    except webbrowser.Error:
+        pass
 
 
 def do_browse(
@@ -4306,9 +4447,8 @@ def do_tokens() -> None:
     list shows almost no per-token metadata, so a recorded mint timestamp is the
     only handle for identifying yolo's token there. EXPIRES~ is minted +
     TOKEN_LIFETIME_DAYS — an estimate, hence the tilde. STATUS reconciles against
-    the keychain: `stale` flags a registry entry whose keychain item is gone
-    (deleted outside yolo), `re-minted` one whose keychain date is materially
-    newer than the recorded mint (re-minted outside yolo — trust the keychain).
+    the credential store: `stale` flags a registry entry whose stored value is
+    gone (deleted outside yolo), else `ok`.
     """
     tokens = _read_tokens_file()
     if not tokens:
@@ -4328,19 +4468,7 @@ def do_tokens() -> None:
             expires = _token_expiry(minted_dt).date().isoformat()
         except ValueError:
             minted_dt = None
-        if not _keychain_has(service):
-            status = "stale (not in keychain)"
-        else:
-            mdat = _keychain_mdat(service)
-            if (
-                minted_dt is not None
-                and mdat is not None
-                and abs(mdat - minted_dt.astimezone(datetime.timezone.utc))
-                > datetime.timedelta(days=1)
-            ):
-                status = f"re-minted outside yolo (keychain says {mdat.date().isoformat()})"
-            else:
-                status = "ok"
+        status = "ok" if _keychain_has(service) else "stale (not in store)"
         rows.append((service, config_dir, minted_day, expires, status))
 
     _print_table(("SERVICE", "CONFIG DIR", "MINTED", "EXPIRES~", "STATUS"), rows)
@@ -4363,13 +4491,18 @@ def do_forget_token(config_dir: str | None) -> None:
     entry = _remove_token_entry(service)
     deleted = _keychain_delete(service)
     if not deleted and entry is None:
-        print(f"No token cached for {dir_label} (keychain service '{service}').")
+        print(f"No token cached for {dir_label} (service '{service}').")
         return
     minted = f" (minted {entry['minted']})" if entry and entry.get("minted") else ""
     if deleted:
-        print(f"Forgotten: deleted the cached token for {dir_label}{minted} from the keychain.")
+        print(
+            f"Forgotten: deleted the cached token for {dir_label}{minted} from the credential store."
+        )
     else:
-        print(f"Removed the stale registry entry for {dir_label}{minted}; not in the keychain.")
+        print(
+            f"Removed the stale registry entry for {dir_label}{minted}; "
+            "not in the credential store."
+        )
     print("yolo will no longer use it.")
     print(
         f"\nNOTE: the token itself is still valid server-side until roughly a year\n"

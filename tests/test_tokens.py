@@ -1,8 +1,9 @@
 """Tests for the OAuth-token bookkeeping: the tokens.json registry, the launch-time
 expiry warning, the implicit-mint consent prompt, and the tokens / forget-token verbs.
 
-The keychain itself is never touched: the `security`-wrapping helpers
-(_keychain_has / _keychain_delete / _keychain_mdat) are stubbed per test.
+The credential store itself is never touched: the wrapping helpers
+(_keychain_has / _keychain_delete) and the registry-backed _token_minted are
+stubbed per test.
 """
 
 import datetime
@@ -73,59 +74,25 @@ def test_malformed_registry_exits_naming_the_file(cy, home_env):
     assert "tokens.json" in str(exc.value)
 
 
-# --- keychain mdat parsing ----------------------------------------------------
-
-SECURITY_OUTPUT = """\
-keychain: "/Users/peter/Library/Keychains/login.keychain-db"
-version: 512
-class: "genp"
-attributes:
-    0x00000007 <blob>="claude-yolo-oauth-token"
-    "acct"<blob>="peter"
-    "cdat"<timedate>=0x32303236303530313039313234345A00  "20260501091244Z\\000"
-    "mdat"<timedate>=0x32303236303631303132333435365A00  "20260610123456Z\\000"
-    "svce"<blob>="claude-yolo-oauth-token"
-"""
-
-
-def _stub_security(cy, monkeypatch, *, stdout, returncode=0):
-    class Result:
-        pass
-
-    r = Result()
-    r.stdout, r.returncode = stdout, returncode
-    monkeypatch.setattr(cy.subprocess, "run", lambda *a, **kw: r)
-
-
-def test_keychain_mdat_parses_modification_date(cy, monkeypatch):
-    _stub_security(cy, monkeypatch, stdout=SECURITY_OUTPUT)
-    mdat = cy._keychain_mdat("claude-yolo-oauth-token")
-    assert mdat == datetime.datetime(2026, 6, 10, 12, 34, 56, tzinfo=datetime.timezone.utc)
-
-
-def test_keychain_mdat_falls_back_to_cdat(cy, monkeypatch):
-    no_mdat = "\n".join(line for line in SECURITY_OUTPUT.splitlines() if "mdat" not in line)
-    _stub_security(cy, monkeypatch, stdout=no_mdat)
-    mdat = cy._keychain_mdat("claude-yolo-oauth-token")
-    assert mdat == datetime.datetime(2026, 5, 1, 9, 12, 44, tzinfo=datetime.timezone.utc)
-
-
-def test_keychain_mdat_none_on_missing_item_or_garbage(cy, monkeypatch):
-    _stub_security(cy, monkeypatch, stdout="", returncode=44)
-    assert cy._keychain_mdat("nope") is None
-    _stub_security(cy, monkeypatch, stdout="attributes:\n    nothing relevant\n")
-    assert cy._keychain_mdat("nope") is None
-
-
-# --- expiry warning -----------------------------------------------------------
+# --- expiry warning (mint date sourced from the tokens.json registry) ----------
 
 
 def _days_ago(n):
     return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=n)
 
 
+def test_token_minted_reads_registry(cy, home_env):
+    cy._write_token_entry(None)
+    minted = cy._token_minted(None)
+    assert minted is not None
+    # within a few seconds of now (just minted)
+    assert abs((datetime.datetime.now(datetime.timezone.utc) - minted).total_seconds()) < 60
+    # missing/unparseable -> None
+    assert cy._token_minted(str(cy.pathlib.Path("/no/such/cfg"))) is None
+
+
 def test_warn_token_expiry_warns_inside_the_window(cy, monkeypatch, capsys):
-    monkeypatch.setattr(cy, "_keychain_mdat", lambda s: _days_ago(360))  # expires in ~5d
+    monkeypatch.setattr(cy, "_token_minted", lambda c: _days_ago(360))  # expires in ~5d
     cy._warn_token_expiry(None)
     err = capsys.readouterr().err
     assert "expires around" in err
@@ -133,15 +100,15 @@ def test_warn_token_expiry_warns_inside_the_window(cy, monkeypatch, capsys):
 
 
 def test_warn_token_expiry_reports_already_expired(cy, monkeypatch, capsys):
-    monkeypatch.setattr(cy, "_keychain_mdat", lambda s: _days_ago(400))
+    monkeypatch.setattr(cy, "_token_minted", lambda c: _days_ago(400))
     cy._warn_token_expiry(None)
     assert "expired around" in capsys.readouterr().err
 
 
 def test_warn_token_expiry_quiet_when_fresh_or_unreadable(cy, monkeypatch, capsys):
-    monkeypatch.setattr(cy, "_keychain_mdat", lambda s: _days_ago(100))
+    monkeypatch.setattr(cy, "_token_minted", lambda c: _days_ago(100))
     cy._warn_token_expiry(None)
-    monkeypatch.setattr(cy, "_keychain_mdat", lambda s: None)
+    monkeypatch.setattr(cy, "_token_minted", lambda c: None)
     cy._warn_token_expiry(None)
     assert capsys.readouterr().err == ""
 
@@ -149,7 +116,7 @@ def test_warn_token_expiry_quiet_when_fresh_or_unreadable(cy, monkeypatch, capsy
 def test_ensure_oauth_token_checks_expiry_of_cached_token(cy, monkeypatch, capsys):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setattr(cy, "_read_oauth_token", lambda c: "sk-ant-oat-CACHED")
-    monkeypatch.setattr(cy, "_keychain_mdat", lambda s: _days_ago(360))
+    monkeypatch.setattr(cy, "_token_minted", lambda c: _days_ago(360))
     assert cy.ensure_oauth_token(None) == "sk-ant-oat-CACHED"
     assert "expires around" in capsys.readouterr().err
 
@@ -211,37 +178,16 @@ def test_tokens_verb_lists_with_status_and_expiry(cy, run_cli, dirs, monkeypatch
             },
         },
     )
-    # default entry present in the keychain and untouched; the alt one was deleted
+    # default entry present in the store and untouched; the alt one was deleted
     monkeypatch.setattr(cy, "_keychain_has", lambda s: s == "claude-yolo-oauth-token")
-    monkeypatch.setattr(
-        cy,
-        "_keychain_mdat",
-        lambda s: datetime.datetime(2026, 6, 1, 10, 0, tzinfo=datetime.timezone.utc),
-    )
 
     assert run_cli(["tokens"], home=home, cwd=work) is None  # terminal verb
     out = capsys.readouterr().out
     assert "(default ~/.claude)" in out
     assert "/Users/x/.claude-work" in out
-    assert "2027-06-01" in out  # minted 2026-06-01 + 365d
-    assert "stale (not in keychain)" in out
+    assert "2027-06-01" in out  # minted 2026-06-01 + 365d (from the registry)
+    assert "stale (not in store)" in out
     assert cy.TOKEN_REVOKE_URL in out
-
-
-def test_tokens_verb_flags_reminted_outside_yolo(cy, run_cli, dirs, monkeypatch, capsys):
-    home, work = dirs
-    write_registry(
-        home,
-        {"claude-yolo-oauth-token": {"config_dir": None, "minted": "2026-01-01T10:00:00+00:00"}},
-    )
-    monkeypatch.setattr(cy, "_keychain_has", lambda s: True)
-    monkeypatch.setattr(
-        cy,
-        "_keychain_mdat",
-        lambda s: datetime.datetime(2026, 6, 1, 10, 0, tzinfo=datetime.timezone.utc),
-    )
-    run_cli(["tokens"], home=home, cwd=work)
-    assert "re-minted outside yolo" in capsys.readouterr().out
 
 
 def test_tokens_verb_empty_registry(cy, run_cli, dirs, capsys):

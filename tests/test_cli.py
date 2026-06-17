@@ -209,9 +209,10 @@ def test_mask_overlays_at_real_config_dir_path(cy, run_cli, flag_values, tmp_pat
     assert f"{MASK_CREDFILE}:/home/claude/.claude/.credentials.json" in mounts
 
 
-def test_stale_host_credentials_file_warns(cy, run_cli, flag_values, dirs, capsys):
+def test_stale_host_credentials_file_warns(cy, run_cli, flag_values, dirs, capsys, monkeypatch):
     # a .credentials.json on the host should never exist on macOS; warn (and still
     # mask it so the run works) so the user knows to delete it
+    monkeypatch.setattr(cy, "_is_macos", lambda: True)
     home, work = dirs
     (home / ".claude").mkdir()
     (home / ".claude" / ".credentials.json").write_text("{}")
@@ -219,6 +220,17 @@ def test_stale_host_credentials_file_warns(cy, run_cli, flag_values, dirs, capsy
     err = capsys.readouterr().err
     assert ".credentials.json exists on the host" in err
     assert cred_overlays(flag_values(argv, "-v")) == [MASK_CREDFILE]
+
+
+def test_no_stale_warning_on_linux_where_file_is_the_store(cy, run_cli, dirs, capsys, monkeypatch):
+    # on a Linux host that file IS Claude Code's legitimate credential store, so its
+    # presence is expected — no warning
+    monkeypatch.setattr(cy, "_is_macos", lambda: False)
+    home, work = dirs
+    (home / ".claude").mkdir()
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    run_cli([], home=home, cwd=work)
+    assert ".credentials.json exists on the host" not in capsys.readouterr().err
 
 
 def test_no_warning_without_stale_host_credentials(cy, run_cli, dirs, capsys):
@@ -292,6 +304,7 @@ def test_generate_oauth_token_widens_the_pty(cy, monkeypatch):
     # then check the window size the child would have seen.
     import fcntl
     import os
+    import pty
     import struct
     import termios
 
@@ -300,7 +313,7 @@ def test_generate_oauth_token_widens_the_pty(cy, monkeypatch):
 
     def fake_spawn(argv, master_read):
         assert argv == ["claude", "setup-token"]
-        master, slave = cy.pty.openpty()
+        master, slave = pty.openpty()
         try:
             os.write(slave, b"Your token:\n" + FULL_TOKEN.encode() + b"\n")
             master_read(master)
@@ -315,7 +328,7 @@ def test_generate_oauth_token_widens_the_pty(cy, monkeypatch):
 
     monkeypatch.setattr(cy.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cy.shutil, "which", lambda cmd: "/usr/local/bin/claude")
-    monkeypatch.setattr(cy.pty, "spawn", fake_spawn)
+    monkeypatch.setattr(pty, "spawn", fake_spawn)
     monkeypatch.setattr(cy, "_store_oauth_token", lambda tok, cfg: stored.__setitem__("tok", tok))
 
     assert cy.generate_oauth_token(None) == FULL_TOKEN
@@ -773,7 +786,9 @@ def test_resume_refuses_when_cwd_session_running(cy, run_cli, dirs, monkeypatch)
     home, work = dirs
     monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "abc123")
     built = []
-    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    monkeypatch.setattr(
+        cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"
+    )
     with pytest.raises(SystemExit) as exc:
         run_cli(["resume"], home=home, cwd=work)
     assert "already running" in str(exc.value)

@@ -7,6 +7,7 @@ the clipboard/stdin/prompt input sources are stubbed per test, like test_tokens.
 
 import json
 import os
+import pathlib
 
 import pytest
 
@@ -134,13 +135,18 @@ def test_malformed_registry_exits_naming_file(cy, monkeypatch, dirs):
     assert "secrets.json" in str(exc.value)
 
 
-def test_read_secret_value_strips_single_trailing_newline(cy, monkeypatch):
-    class R:
-        returncode = 0
-        stdout = "the-value\n"
-
-    monkeypatch.setattr(cy.subprocess, "run", lambda *a, **k: R())
-    assert cy._read_secret_value("svc") == "the-value"
+def test_credential_store_round_trips_value_exactly(cy, monkeypatch, dirs):
+    # The file-store fallback (forced by conftest) round-trips a value byte-for-byte
+    # — including embedded/trailing newlines — unlike the old `security -w` path
+    # that appended a newline. _read_secret_value reads it back unchanged.
+    home, _ = dirs
+    monkeypatch.setenv("HOME", str(home))
+    assert cy._read_secret_value("svc") is None  # absent -> None
+    cy._store_secret_value("svc", "the-value\nwith-newline\n")
+    assert cy._read_secret_value("svc") == "the-value\nwith-newline\n"
+    assert cy._keychain_has("svc")
+    assert cy._keychain_delete("svc")
+    assert cy._read_secret_value("svc") is None
 
 
 # --- `secret set` -------------------------------------------------------------
@@ -556,15 +562,40 @@ def test_masking_credfile_lands_in_run_dir_chmod_600(cy, tmp_path):
     assert oct(p.stat().st_mode)[-3:] == "600"
 
 
-def test_extract_credentials_writes_run_dir(cy, monkeypatch, tmp_path):
+def test_extract_credentials_writes_run_dir_macos(cy, monkeypatch, tmp_path):
     run_dir = tmp_path / "session"
     run_dir.mkdir()
 
     class R:
         stdout = b'{"creds": true}'
 
+    monkeypatch.setattr(cy, "_is_macos", lambda: True)  # exercise the `security` path
     monkeypatch.setattr(cy.subprocess, "run", lambda *a, **k: R())
     path = cy.extract_credentials(None, run_dir)
     assert os.path.dirname(path) == str(run_dir)
     assert (tmp_path / "session" / "credentials.json").read_bytes() == b'{"creds": true}'
     assert oct((tmp_path / "session" / "credentials.json").stat().st_mode)[-3:] == "600"
+
+
+def test_extract_credentials_reads_file_on_non_macos(cy, monkeypatch, tmp_path):
+    # On Linux the host Claude Code stores creds in <config-dir>/.credentials.json
+    # (no Keychain), so extract_credentials reads that file.
+    run_dir = tmp_path / "session"
+    run_dir.mkdir()
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text('{"creds": "fromfile"}')
+    monkeypatch.setattr(cy, "_is_macos", lambda: False)
+    monkeypatch.setenv("HOME", str(home))
+    path = cy.extract_credentials(None, run_dir)
+    assert (tmp_path / "session" / "credentials.json").read_text() == '{"creds": "fromfile"}'
+    assert oct(pathlib.Path(path).stat().st_mode)[-3:] == "600"
+
+
+def test_extract_credentials_missing_file_exits(cy, monkeypatch, tmp_path):
+    run_dir = tmp_path / "session"
+    run_dir.mkdir()
+    monkeypatch.setattr(cy, "_is_macos", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    with pytest.raises(SystemExit):
+        cy.extract_credentials(None, run_dir)
