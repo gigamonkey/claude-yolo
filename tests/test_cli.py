@@ -780,6 +780,24 @@ def test_resume_refuses_when_cwd_session_running(cy, run_cli, dirs, monkeypatch)
     assert built == []  # refused before building
 
 
+def test_stop_stops_cwd_session(cy, run_cli, dirs, monkeypatch):
+    # `yolo stop` (no topic) stops the container running in this directory.
+    home, work = dirs
+    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "abc123def456")
+    real_run = cy.subprocess.run
+    stops = []
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["docker", "stop"]:
+            stops.append(cmd)
+            return cy.subprocess.CompletedProcess(cmd, 0, "", "")
+        return real_run(cmd, **k)
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    assert run_cli(["stop"], home=home, cwd=work) is None  # terminal verb
+    assert stops == [["docker", "stop", "abc123def456"]]
+
+
 def test_docker_command_hidden_unless_verbose(cy, run_cli, dirs, capsys):
     home, work = dirs
     run_cli([], home=home, cwd=work)

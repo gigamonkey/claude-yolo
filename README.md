@@ -175,6 +175,7 @@ yolo start                             # launch a session in the current directo
 yolo resume                            # resume the latest session in the current directory
 yolo resume -r [SESSION_ID]            # resume a specific session (or pick from a list)
 yolo shell                             # open a bash shell in this dir's container
+yolo stop                              # stop the running session in this directory
 ```
 
 As a shorthand a bare `yolo` is the same as `yolo start`. `resume` continues the
@@ -182,7 +183,10 @@ most recent session (`-r` picks a specific one, opening Claude's interactive
 picker when given no ID). `shell` joins the **running** container for this
 directory if there is one — handy while a session works in another terminal —
 and otherwise starts a fresh throwaway container; either way the prompt is
-flagged so you know where you are (`yolo:<dir>$`).
+flagged so you know where you are (`yolo:<dir>$`). `stop` stops the running
+container for this directory (or a worktree's, with a name); the session
+transcript is kept, so you can `yolo resume` it later — it's also how you free up
+a session so `finish` will clean up its worktree.
 
 ### Worktree mode
 
@@ -197,6 +201,7 @@ repo, i.e. the worktrees started via `yolo start <name>`.
 yolo start something                    # new worktree+branch, launch a session
 yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
+yolo stop something                     # stop its running session (transcript kept)
 yolo rebase something                   # rebase its branch onto --base (e.g. main's new commits)
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it

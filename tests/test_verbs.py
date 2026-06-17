@@ -134,6 +134,40 @@ def test_resume_refuses_when_worktree_session_running(cy, run_cli, repo, monkeyp
     assert "already running" in msg and "topic" in msg
 
 
+def _stop_capture(cy, monkeypatch):
+    """Intercept only `docker stop` (pass git etc. through); return the calls list."""
+    real_run = cy.subprocess.run
+    stops = []
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["docker", "stop"]:
+            stops.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real_run(cmd, **k)
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    return stops
+
+
+def test_stop_stops_worktree_session(cy, run_cli, repo, monkeypatch):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cidabc123456")
+    stops = _stop_capture(cy, monkeypatch)
+    run_cli(["stop", "topic"], home=home, cwd=r)
+    assert stops == [["docker", "stop", "cidabc123456"]]
+
+
+def test_stop_no_running_session_is_noop(cy, run_cli, repo, monkeypatch, capsys):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: None)
+    stops = _stop_capture(cy, monkeypatch)
+    run_cli(["stop", "topic"], home=home, cwd=r)
+    assert stops == []  # nothing stopped
+    assert "No running yolo session" in capsys.readouterr().out
+
+
 # --- shell ------------------------------------------------------------------
 
 

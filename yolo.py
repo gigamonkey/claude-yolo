@@ -2260,6 +2260,7 @@ PARSER.add_argument(
         "start",
         "resume",
         "shell",
+        "stop",
         "browse",
         "finish",
         "rebase",
@@ -2272,10 +2273,11 @@ PARSER.add_argument(
         "forget-token",
         "secret",
     ],
-    help="Optional subcommand. start/resume/shell/browse take an *optional* TOPIC: "
+    help="Optional subcommand. start/resume/shell/stop/browse take an *optional* TOPIC: "
     "with a TOPIC they act on a git worktree of that name (start creates it, the "
     "others require it); with no TOPIC they act on the current directory (start a "
-    "fresh session, resume the most recent one, or open a shell). 'browse' opens "
+    "fresh session, resume the most recent one, open a shell, or stop the running "
+    "container). 'browse' opens "
     "the host browser at the running session's forwarded port (see --port/`ports` "
     "config). 'finish' removes a "
     "worktree and requires a TOPIC; 'rebase' rebases a worktree's branch onto "
@@ -2299,7 +2301,7 @@ PARSER.add_argument(
     "topic",
     nargs="?",
     help="Worktree/branch name. Required for finish and rebase; optional for "
-    "start/resume/shell (omit it to act on the current directory). For the "
+    "start/resume/shell/stop (omit it to act on the current directory). For the "
     "`secret` verb this is the subcommand (set/list/rm) instead.",
 )
 PARSER.add_argument(
@@ -3784,6 +3786,36 @@ def do_dir(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
         print(cwd)
 
 
+def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
+    """`stop` verb: stop the running container for a worktree TOPIC, or the current
+    directory. Terminal — no config, no launch.
+
+    The session is found by the same yolo.worktree / yolo.cwd labels the `shell`
+    verb uses (so it's robust to the suffix-laden container name). Containers run
+    `docker run --rm`, so `docker stop` also removes them; the session transcript
+    persists on the host, so `yolo resume` still works afterward. Stopping when
+    nothing is running is a friendly no-op, not an error — `stop` is idempotent in
+    spirit (and so is safe to script). It deliberately doesn't require the worktree
+    dir to exist: the match is by label, so a container in an odd state is still
+    stoppable.
+    """
+    if topic:
+        _, _, slug = _worktree_dir(topic, home)
+        cid = running_container_for(slug, topic)
+        where = f"for '{topic}'"
+    else:
+        cid = running_container_for(_repo_slug_or_none(), cwd=cwd)
+        where = "in this directory"
+    if not cid:
+        print(f"No running yolo session {where}.")
+        return
+    print(f"Stopping the session {where} ({cid[:12]})…")
+    result = subprocess.run(["docker", "stop", cid], capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"docker stop failed: {result.stderr.strip() or result.stdout.strip()}")
+    print(f"Stopped {cid[:12]}.")
+
+
 def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
     """The main checkout backing a linked worktree (its shared `.git`'s parent).
 
@@ -4372,6 +4404,7 @@ def main():
         "start",
         "resume",
         "shell",
+        "stop",
         "browse",
         "finish",
         "rebase",
@@ -4446,6 +4479,12 @@ def main():
     # config load to keep its output clean.
     if verb == "secret":
         do_secret(parsed, home, cwd)
+        return
+
+    # `stop` stops the running container for a worktree/cwd — a docker operation
+    # only, no yolo config, no launch — so dispatch it early like `dir`/`secret`.
+    if verb == "stop":
+        do_stop(topic, home, cwd)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

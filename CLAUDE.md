@@ -50,9 +50,11 @@ that tooling is never needed to *run* the script, only to develop it (see
 ./yolo.py resume -r                # interactive session picker (cwd)
 ./yolo.py resume -r SESSION_ID     # resume a specific session (cwd)
 ./yolo.py shell                    # bash shell in the cwd's container (or fresh)
+./yolo.py stop                     # stop the running session in the cwd
 ./yolo.py start fix-auth           # new worktree+branch, launch a session (see verbs)
 ./yolo.py resume fix-auth          # re-enter that worktree, continue the session
 ./yolo.py shell fix-auth           # bash shell in that worktree's container
+./yolo.py stop fix-auth            # stop that worktree's running session
 ./yolo.py finish fix-auth          # remove the worktree; delete the branch if merged, else keep+warn
 ./yolo.py finish fix-auth --finish-action merge    # ...merge the branch into HEAD, then delete it
 ./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
@@ -71,7 +73,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`browse`/`finish`/`rebase`/`list`/`ps`/`dir`/
+(`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`list`/`ps`/`dir`/
 `dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
 `secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
 trailing positional); see [Workflow verbs](#workflow-verbs).
@@ -973,6 +975,17 @@ gracefully outside one — there's just no repo slug to label/find by).
   `claude-yolo/fix-auth`; with a single slug the label is just the topic. The
   exec'd case works because `docker exec` inherits the container's run-time env —
   so the env vars are stamped on *every* launch, not just `shell` ones.
+- **`stop [TOPIC]`** (`do_stop`) — stop the running container for a worktree
+  `TOPIC`, or the current directory. A terminal verb (no config, no launch),
+  dispatched early like `dir`/`secret`. Finds the container by the same
+  `yolo.worktree`/`yolo.cwd` labels `shell` uses (robust to the suffix-laden
+  name), then `docker stop`s it. Containers run `--rm`, so the stop also *removes*
+  the container — but the session transcript persists on the host, so `yolo
+  resume` still works afterward. Nothing running is a **friendly no-op**, not an
+  error (idempotent in spirit, safe to script), and a `TOPIC` doesn't require the
+  worktree dir to exist (the match is by label, so an odd-state container is still
+  stoppable). The counterpart to `finish`, which refuses while a container runs:
+  `stop` is how you clear that.
 - **`finish TOPIC`** — `git worktree remove` the worktree, then handle the branch
   per **`--finish-action`** (config key `finish-action`, default `delete-if-merged`;
   `FINISH_CHOICES`). The four actions (dispatched at the tail of `do_finish`):
@@ -1100,7 +1113,8 @@ Implementation shape:
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first
   (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, `dir`, which prints a
-  path, and `secret`, which manages the keychain, are dispatched right after
+  path, `secret`, which manages the keychain, and `stop`, which `docker stop`s a
+  container, are dispatched right after
   `config` — before that re-parse — since they need no yolo config at all; `dir`
   in particular keeps its stdout free of the config
   provenance note). The other
@@ -1476,7 +1490,9 @@ overrides — driven by a stamped `.yolo-status` state file), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
-the verb gating).
+the verb gating), the non-tmux already-running `resume` refusal, and the `stop`
+verb (`docker stop`ping the worktree's container by label, and the nothing-running
+no-op; the cwd variant is in `test_cli.py`).
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and
