@@ -3,9 +3,14 @@
 ## Goal
 
 Today `yolo.py` runs only on a macOS host. The aim is to make it run on **Linux**
-and **Windows** as well, without giving up the properties that define it: a
-single stdlib-only PEP 723 file, the container as the blast-radius boundary, and
-secrets that never touch the docker-run argv.
+and **Windows** as well, without giving up the properties that define it: the
+container as the blast-radius boundary, secrets that never touch the docker-run
+argv, and a single-file script runnable both standalone (PEP 723) and as an
+installed console script.
+
+(The previously-stated "stdlib-only / no runtime dependencies" property is
+**dropped as a goal** — adopting `keyring` is a deliberate trade, and uv carries
+declared deps in both run modes; see the credential-store section.)
 
 ## The key framing: host OS vs. container OS
 
@@ -51,8 +56,7 @@ The plan below builds Tier 1 first; Tier 2 is validation.
 ## Architectural approach: a thin platform layer
 
 Rather than scatter `if sys.platform == ...` across 4,800 lines, introduce a
-small **platform abstraction** near the top of the file (still one file, still
-stdlib-only):
+small **platform abstraction** near the top of the file (still one file):
 
 - A `_HOST` constant (`"darwin"` / `"linux"` / `"win32"`) from `sys.platform`,
   plus helpers like `_is_macos()`, `_is_linux()`, `_is_windows()`.
@@ -294,10 +298,12 @@ future native-Windows backend would plug into.
 
 ## Documentation updates
 
-- `CLAUDE.md`: revise "macOS only as written" and the Conventions/gotchas to
-  describe the host abstraction, the per-OS ssh-agent socket, the `keyring`
-  credential store and headless-Linux file fallback, and the supported tiers
-  (macOS + Linux; Windows via WSL2; native Windows out of scope).
+- `CLAUDE.md`: drop the "stdlib-only / no runtime dependencies" framing (it's no
+  longer a project goal) and document `keyring` as the one runtime dependency;
+  revise "macOS only as written" and the Conventions/gotchas to describe the host
+  abstraction, the per-OS ssh-agent socket, the `keyring` credential store and
+  headless-Linux file fallback, and the supported tiers (macOS + Linux; Windows
+  via WSL2; native Windows out of scope).
 
 - README/usage: note Windows-via-WSL2 as the recommended Windows path.
 
