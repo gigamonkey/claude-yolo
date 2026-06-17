@@ -11,9 +11,11 @@ you launch it from or the worktree directory plus explicitly configured other
 directories and a few specific directories Claude Code needs to work. Everything
 else stays on the other side of the container wall.
 
-The script is a self-contained Python script with no runtime dependencies beyond
-the standard library. You can install it with `uv` (see below) or just run the
-file directly.
+The script is a self-contained, single-file Python script (its one runtime
+dependency, [`keyring`](https://pypi.org/project/keyring/), is provisioned by
+`uv` automatically). You can install it with `uv` (see below) or just run the
+file directly. It runs on **macOS and Linux**, and on **Windows under WSL2**
+(which presents as Linux); native Windows without WSL is out of scope.
 
 ## What the container does and doesn't protect
 
@@ -54,11 +56,11 @@ applies to:
 
 - **Credentials pasted into a session** — an API key or password you paste
   into the conversation is one Claude can use, container or no container.
-- **Injected secrets (`--secret`)** — a keychain-stored secret you inject into a
-  session is one Claude can read and use. The keychain buys encrypted-at-rest
-  storage and keeps the value off disk and out of the docker command line; it
-  does *not* sandbox the value once it's in the container. Inject only what the
-  session needs. See [`secrets`](#secrets---secret-nametarget-repeatable).
+- **Injected secrets (`--secret`)** — a stored secret you inject into a
+  session is one Claude can read and use. The credential store buys
+  encrypted-at-rest storage and keeps the value off disk and out of the docker
+  command line; it does *not* sandbox the value once it's in the container. Inject
+  only what the session needs. See [`secrets`](#secrets---secret-nametarget-repeatable).
 - And of course the Anthropic credentials that every mode forwards, which
   Claude needs to run at all.
 
@@ -76,8 +78,12 @@ add host mounts and can't copy host files into the image. See
 
 ## Requirements
 
-- **macOS.** Credential extraction reads from the macOS keychain via the
-  `security` CLI.
+- **macOS or Linux host** (or **Windows via WSL2**, which presents as Linux).
+  Native Windows without WSL is out of scope. Credentials are stored via
+  [`keyring`](https://pypi.org/project/keyring/) — the macOS Keychain, Secret
+  Service (libsecret) on Linux, or the Windows Credential Manager — falling back
+  to a `chmod 600` file store under `~/.claude-yolo/credentials` on a headless
+  box with no keyring backend.
 
 - **Claude Code** on the host computer. Although Claude code sessions are run
   within a Docker container which has Claude Code installed, two of the main
@@ -86,29 +92,30 @@ add host mounts and can't copy host files into the image. See
 
 - **A Docker engine** The obvious choices are either the classic [Docker
   Desktop](https://www.docker.com) or the new hotness,
-  [OrbStack](https://orbstack.dev). The `docker` command line tools `yolo`
-  depends on will use whichever one you are running.
+  [OrbStack](https://orbstack.dev) — and on a Linux host, the native Docker
+  Engine. The `docker` command line tools `yolo` depends on will use whichever
+  one you are running.
 
 - **[uv](https://docs.astral.sh/uv/)** installed. The script's shebang is
   `#!/usr/bin/env -S uv run --script`, so it self-runs under `uv`, which
-  guarantees a Python ≥3.10 (it's still stdlib-only — uv just picks the
-  interpreter, since macOS's system `python3` is often too old).
+  guarantees a Python ≥3.10 (often newer than the system `python3`) and
+  provisions its one dependency, `keyring`.
 
 ## Limitations
 
-Although `yolo` is designed to run on a Mac, the containers it launches are
-Linux (Ubuntu). So despite running on a Mac, it's not much good for *Mac*
-development: inside the container Claude has no access to Xcode, Swift
-toolchains, macOS frameworks, Apple's simulators, or any other Mac-specific
-tooling — it can edit the source files in the mounted directory, but it can't
-build or run anything that needs macOS. It's best suited to projects whose
-toolchain runs on Linux: web apps, servers, CLI tools, libraries, and the like.
+The containers `yolo` launches are always Linux (Ubuntu), regardless of host. So
+on a Mac it's not much good for *Mac* development: inside the container Claude has
+no access to Xcode, Swift toolchains, macOS frameworks, Apple's simulators, or any
+other Mac-specific tooling — it can edit the source files in the mounted directory,
+but it can't build or run anything that needs macOS. It's best suited to projects
+whose toolchain runs on Linux: web apps, servers, CLI tools, libraries, and the
+like.
 
 ## Installation
 
 The preferred way to install `yolo` is with `uv tool install` which builds it
-into an isolated venv and puts a `yolo` executable on your PATH, with zero
-runtime dependencies:
+into an isolated venv and puts a `yolo` executable on your PATH (resolving its
+`keyring` dependency into that venv):
 
 ```bash
 uv tool install git+https://github.com/gigamonkey/claude-yolo  # from the repo
@@ -378,7 +385,7 @@ options](#configuration) below compose with whichever you pick.
 | `--auth`                  | How it authenticates                                              | Best for                                                 |
 |---------------------------|-------------------------------------------------------------------|----------------------------------------------------------|
 | `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var       | Everything, including long-lived and concurrent sessions |
-| `keychain`                | Mounts a snapshot of your rotating Claude.ai keychain credentials | Plans without `setup-token` (Claude Console); short sessions |
+| `keychain`                | Mounts a snapshot of your rotating Claude.ai login credentials    | Plans without `setup-token` (Claude Console); short sessions |
 | `bedrock`                 | AWS Bedrock credentials                                           | Billing via AWS                                          |
 
 ### `oauth-token` (default)
@@ -387,7 +394,7 @@ Authenticates with a long-lived token from `claude setup-token` — a **one-year
 token that is never rotated and never written back** — delivered into the
 container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable, with no
 `.credentials.json` mount. Because nothing ever rewrites it, **any number of
-concurrent containers (plus the host on its own keychain login) can use it at once**
+concurrent containers (plus the host on its own login credentials) can use it at once**
 with no interference, for as long as each session runs. That's why it's the
 default: there is no refresh boundary to cross, so nothing depends on when your
 sessions happen to run, how long they last, or how many run at once.
@@ -402,8 +409,8 @@ container, which is unavoidable and harmless — that's where Claude reads it fr
 
 The first launch per config directory has no cached token, so yolo offers to mint
 one: it explains what's about to happen, asks for confirmation, then runs the
-browser OAuth flow and caches the token in your keychain. After that one-time
-step every launch is silent. You can also mint explicitly with
+browser OAuth flow and caches the token in your credential store. After that
+one-time step every launch is silent. You can also mint explicitly with
 **`yolo setup-token`** (it asks nothing — running it is the consent), and if
 `CLAUDE_CODE_OAUTH_TOKEN` is already set in your environment (e.g. CI), that
 value is used as-is. In a non-interactive context with no cached token, yolo
@@ -413,48 +420,49 @@ Requires a **Pro/Max/Team/Enterprise plan** (that's what `claude setup-token`
 needs); the token is scoped to inference only. If your plan doesn't support it,
 set `"auth": "keychain"` in `~/.yolo.json` and read the keychain section below.
 
-**Tokens are scoped per config directory.** Just like the keychain login
+**Tokens are scoped per config directory.** Just like the host login
 credentials, each `--config-dir` (≈ each account/profile) gets its *own*
 long-lived token, rather than one global token silently authenticating as the
 wrong account. `yolo` resolves the token in this order: an explicit
 `CLAUDE_CODE_OAUTH_TOKEN` in your host environment wins (it's global by nature,
-for CI or self-managed tokens) → else the `yolo`-managed keychain entry for the
+for CI or self-managed tokens) → else the `yolo`-managed store entry for the
 active config directory → else (interactive launches only) offer to mint a fresh
 one and cache it there. `yolo setup-token` honours `--config-dir` too, so it
 caches under the same name a matching launch will read.
 
-**Stored in the macOS keychain, extract-only.** The token is kept as a
-generic-password entry in your login keychain — encrypted at rest, the same
-place Claude Code stores its own credentials, never written to a dotfile. The
+**Stored in the credential store, extract-only.** The token is kept via
+[`keyring`](https://pypi.org/project/keyring/) — the macOS Keychain, Secret
+Service on Linux, or the Windows Credential Manager, all encrypted at rest (or, on
+a headless box with no keyring backend, a `chmod 600` file under
+`~/.claude-yolo/credentials`) — never written to a dotfile in your project. The
 service name is `claude-yolo-oauth-token` for the default config directory, or
 `claude-yolo-oauth-token-<hash8>` for an alternate `--config-dir`, where
 `<hash8>` is the first 8 hex chars of the SHA-256 of the directory's resolved
-path (the same hashing scheme the keychain login credentials use). `yolo` only
-ever *reads* this entry to forward the token into the container — it never
-rotates or rewrites it, so unlike the keychain login credentials there are no
-rotation hazards from sharing it across sessions.
+path. `yolo` only ever *reads* this entry to forward the token into the container
+— it never rotates or rewrites it, so unlike the rotating login credentials there
+are no rotation hazards from sharing it across sessions.
 
 #### Tokens & revocation
 
 Minting a year-long credential deserves some bookkeeping, so `yolo` keeps a
 **registry** of every token it mints — service name, config directory, and the
 exact mint timestamp — in `~/.claude-yolo/tokens.json` (metadata only; the token
-itself lives in the keychain). Three things use it:
+itself lives in the credential store). Three things use it:
 
 ```bash
 yolo setup-token    # mint+cache a token for the active config dir (re-mint when expired)
-yolo forget-token   # delete the active config dir's token from the keychain
+yolo forget-token   # delete the active config dir's token from the credential store
 yolo tokens         # list all the tokens yolo has minted (and when)
 ```
 
 - **`yolo forget-token`** deletes the active config dir's token from your
-  keychain and the registry. *Forget*, not *revoke* — see below.
+  credential store and the registry. *Forget*, not *revoke* — see below.
 - At launch, yolo warns when the active token is within a week of its estimated
   expiry (so it doesn't just silently start 401ing inside containers a year from
   now); re-mint with `yolo setup-token`.
 
 - **`yolo tokens`** lists what exists: per config dir, when it was minted, the
-  estimated expiry (mint + 1 year), and whether the keychain entry is still
+  estimated expiry (mint + 1 year), and whether the store entry is still
   present.
 
 **Revocation is the weak spot, and it's outside yolo's control.** There is no
@@ -483,11 +491,13 @@ stored encrypted — it will likely be the best-tracked token on the page.
 
 ### `keychain`
 
-Claude Code on the host keeps its login credentials in the macOS keychain. In
-the `keychain` auth mode `yolo` pulls them out with the `security` CLI into a
-temporary, `chmod 600` file and bind-mounts that file to `.credentials.json`
-inside the container. Thus no new tokens are created, and you don't need a plan
-that allows creating long-lived tokens.
+In the `keychain` auth mode `yolo` snapshots the credentials the *host's* Claude
+Code manages into a temporary, `chmod 600` file and bind-mounts that file to
+`.credentials.json` inside the container. Thus no new tokens are created, and you
+don't need a plan that allows creating long-lived tokens. Where the host keeps
+those credentials is OS-specific: on **macOS** it's the login Keychain, read via
+the `security` CLI; on **Linux** Claude Code has no Keychain and keeps them in a
+`.credentials.json` file in the config dir, which yolo reads directly.
 
 Before extracting, yolo runs `claude auth status` on the host to confirm you're
 actually logged in. If you're not, it offers to run `claude auth login` for you
@@ -501,10 +511,11 @@ needs a host `claude` recent enough to have the `auth` subcommand; if it's
 missing, the check is skipped and `yolo` just errors out if the credential
 extraction comes up empty.)
 
-The keychain entry it reads is named `Claude Code-credentials` for the default
-config directory, or `Claude Code-credentials-<hash8>` for an alternate
+On macOS the Keychain entry it reads is named `Claude Code-credentials` for the
+default config directory, or `Claude Code-credentials-<hash8>` for an alternate
 `--config-dir` — the same per-directory hashing described above, mirroring how
-Claude Code itself names its keychain entries.
+Claude Code itself names its Keychain entries. (On Linux there's no Keychain; yolo
+just reads the config dir's `.credentials.json` file.)
 
 The catch, and the reason `keychain` is not the default auth mode is **token
 rotation.** Those credentials are an access token with a fixed expiry (~8h after
@@ -600,8 +611,8 @@ pointing `CLAUDE_CONFIG_DIR` somewhere else gives you a completely separate
 Claude profile — its own login (so a different account), its own settings,
 history, and memory. People keep one per account (work vs. personal, or a
 client's Team account), or a stripped-down profile for experiments. `yolo` just
-supports them: the per-config-dir credential (keychain entry or OAuth token,
-hashed service names as described under [Authentication
+supports them: the per-config-dir credential (the credential-store entry or OAuth
+token, hashed service names as described under [Authentication
 modes](#authentication-modes)) is selected to match, and — the common case — you
 can tie a project to its config dir once with `yolo config --config-dir
 ~/.claude-work` so every launch from that project uses the right account
@@ -655,7 +666,7 @@ and the CLI (on a same-container-port conflict the higher layer wins).
 
 ### `secrets` (`--secret NAME[:TARGET]`, repeatable)
 
-Keychain-stored secrets — PATs, API keys, SSH keys — injected into a session
+Stored secrets — PATs, API keys, SSH keys — injected into a session
 without ever writing a plaintext secrets file or putting the value on a command
 line. There are two halves: **storing** a secret (the `secret` verb) and
 **injecting** it (the `secrets` config key / `--secret` flag). Storing one does
@@ -664,19 +675,21 @@ as [`dockerfile`](#dockerfile---dockerfile-path) and `yolorc` (the *key* lives i
 host-side config, which Claude can't edit from inside a container, so Claude can't
 grant its next session a new secret).
 
-**Storing — the `secret` verb.** Values live in the macOS keychain (encrypted at
-rest), with a host-side `~/.claude-yolo/secrets.json` registry that records
-non-secret metadata (name, scope, timestamps) and is never mounted — the same
-arrangement as the OAuth-token registry.
+**Storing — the `secret` verb.** Values live in the same credential store as the
+OAuth token (`keyring` — the macOS Keychain, Secret Service, or Windows Credential
+Manager, encrypted at rest; a `chmod 600` file under `~/.claude-yolo/credentials`
+on a headless box), with a host-side `~/.claude-yolo/secrets.json` registry that
+records non-secret metadata (name, scope, timestamps) and is never mounted — the
+same arrangement as the OAuth-token registry.
 
 ```bash
 yolo secret set GH_TOKEN              # prompts (hidden), or reads piped stdin
 gh auth token | yolo secret set GH_TOKEN     # from a pipe
-yolo secret set GH_TOKEN --clipboard  # from the macOS clipboard (pbpaste)
+yolo secret set GH_TOKEN --clipboard  # from the system clipboard (pbpaste / Get-Clipboard / wl-paste / xclip / xsel)
 yolo secret set DB_PASSWORD --project # scoped to this repo, not global
 yolo secret list                      # global + this project's secrets
 yolo secret list --all                # across every project
-yolo secret rm GH_TOKEN               # delete (keychain + registry)
+yolo secret rm GH_TOKEN               # delete (store + registry)
 ```
 
 The value is **never passed as a command-line argument** (which would leak it
@@ -717,16 +730,16 @@ secrets are written to chmod-600 files in a private per-session directory
 bind-mounted at `/run/secrets` and exported by a small loader yolo bakes into the
 image (sourced before your `yolorc`, so an rc can use the values — e.g. `echo
 "$GH_TOKEN" | gh auth login --with-token`). File-target secrets are bind-mounted
-read-only at their path. Either way the staged files live under `$TMPDIR`
-(excluded from Time Machine and synced folders) and are reclaimed when the
-container exits. (An env-target value does end up in Claude's own process
+read-only at their path. Either way the staged files live in a private per-user
+temp dir (`$XDG_RUNTIME_DIR` on Linux, else `$TMPDIR` — on macOS that's excluded
+from Time Machine and synced folders) and are reclaimed when the container exits. (An env-target value does end up in Claude's own process
 environment inside the container — unavoidable for an env var, and within the
 session's trust boundary; a file target avoids even that.) The default
 `oauth-token` auth mode delivers the Anthropic token through this very same
 transport, for the same reason.
 
-The keychain buys **encrypted-at-rest storage and no plaintext secrets dotfile**
-— it does not make the secret invisible to Claude. Anything you inject, Claude
+The credential store buys **encrypted-at-rest storage and no plaintext secrets
+dotfile** — it does not make the secret invisible to Claude. Anything you inject, Claude
 (and any code in the skip-permissions container) can read; that's inherent, which
 is exactly why injection is opt-in per project. See also [What the container does
 and doesn't protect](#what-the-container-does-and-doesnt-protect).
@@ -1046,9 +1059,9 @@ including the `chmod 600` credentials file and your mounted `~/.claude` config.
 How depends on the `--auth` mode (see
 [Authentication modes](#authentication-modes)): the default `oauth-token` mode
 forwards the cached long-lived token as an environment variable; `keychain`
-extracts your login credentials from the macOS keychain into a `chmod 600` temp
-file mounted into the container; `bedrock` mounts `~/.aws` read-only and sets
-the Bedrock environment variables.
+extracts your host login credentials (the macOS Keychain, or the Linux
+`.credentials.json` file) into a `chmod 600` temp file mounted into the container;
+`bedrock` mounts `~/.aws` read-only and sets the Bedrock environment variables.
 
 ### 4. Wires up the container
 
@@ -1077,9 +1090,10 @@ it's where Claude starts.
 This is deliberate: it keeps paths **consistent across the container boundary**.
 File references, `git`, stack traces, clickable `file:line` links, and Claude
 Code's own session transcript all line up whether you read them inside the
-container or back on the host. (It's why you'll see a macOS-looking path like
-`/Users/...` recorded as the `cwd` in a session file even though the container is
-Linux — that genuinely *is* the working directory inside the container.) Mounting
+container or back on the host. (It's why you'll see a host path like
+`/Users/...` — or `/home/...` on a Linux host — recorded as the `cwd` in a session
+file even though the container is Linux: that genuinely *is* the working directory
+inside the container.) Mounting
 at `/workspace` instead would make every recorded path mismatch the host layout.
 
 #### Why forward the SSH agent?
@@ -1104,11 +1118,16 @@ hands back the *signature*. The key itself never leaves the agent.
 claude-yolo bind-mounts that socket into the container and sets `SSH_AUTH_SOCK`
 inside it to point at the mount. So `ssh` (and `git` over SSH) inside the
 container authenticates through your host agent — Claude can push to a private
-repo, but it never gets to read the private key. (The socket the Docker engine
-exposes is owned `root:root` with mode `srw-rw----`, so the container's `claude`
-user is added to group 0 — root's group — to get the group-write permission that
-`connect()` needs. This adds no real privilege: the user already has passwordless
-`sudo`, and the container is the sandbox.)
+repo, but it never gets to read the private key. Which socket gets mounted
+depends on the engine: on **macOS/Windows** (Docker Desktop or OrbStack) the agent
+lives outside the engine's Linux VM, so yolo mounts the VM-side proxy socket the
+engine exposes at `/run/host-services/ssh-auth.sock` — it's owned `root:root` with
+mode `srw-rw----`, so the container's `claude` user is added to group 0 (root's
+group) to get the group-write permission that `connect()` needs. (This adds no
+real privilege: the user already has passwordless `sudo`, and the container is the
+sandbox.) On a **native Linux Docker** host the engine shares your kernel, so yolo
+mounts your own `$SSH_AUTH_SOCK` directly and `connect()` works because the
+in-container user shares your host uid.
 
 The companion `~/.ssh/known_hosts` mount just lets SSH verify the remote host's
 key fingerprint, so connections don't fail or hang on an unknown-host prompt.
@@ -1183,9 +1202,10 @@ launch, so you can see exactly what's happening.
 
 ## Development
 
-The script is stdlib-only and needs nothing installed to run. For working on it,
-the repo includes a [uv](https://docs.astral.sh/uv/)-managed dev setup
-(`pyproject.toml`) with `ruff` and `pytest`:
+The script needs only `uv`, which provisions its one runtime dependency
+(`keyring`) automatically. For working on it, the repo includes a
+[uv](https://docs.astral.sh/uv/)-managed dev setup (`pyproject.toml`) with `ruff`
+and `pytest`:
 
 ```bash
 uv sync                 # set up .venv with the dev tools
@@ -1195,8 +1215,9 @@ uv run ruff format .    # format
 uv build                # build the wheel/sdist into dist/ (for publishing)
 ```
 
-The tests stub out Docker, the keychain, and `os.execvp`, so they assert on the
-`docker run` command the script *would* build without touching the host or
+The tests stub out Docker, the credential store, and `os.execvp` (and force the
+file-based credential fallback so they never touch a real keyring), so they assert
+on the `docker run` command the script *would* build without touching the host or
 launching anything.
 
 ## Provenance

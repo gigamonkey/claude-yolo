@@ -3,6 +3,45 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.17.0 — unreleased
+
+- **Runs on Linux now (and Windows via WSL2), not just macOS.** The container was
+  always Linux; this ports the host-side glue (credential store, clipboard,
+  ssh-agent socket, temp dir) off macOS-only assumptions, gated through new
+  `_HOST` helpers. Native Windows without WSL is out of scope.
+
+- **Credentials now go through [`keyring`](https://pypi.org/project/keyring/), the
+  one new runtime dependency.** The OAuth token and stored `secret`s previously
+  lived in the macOS Keychain via the `security` CLI; they now use keyring — the
+  macOS Keychain, Secret Service (libsecret) on Linux, or the Windows Credential
+  Manager, all encrypted at rest. On a **headless** box with no keyring backend,
+  yolo falls back to a `chmod 600` file store under `~/.claude-yolo/credentials`
+  (force it anywhere with `YOLO_CREDENTIAL_STORE=file`). uv provisions the
+  dependency automatically in both the standalone and installed run modes, so the
+  single-file property is preserved. (The previously-advertised "stdlib-only / no
+  runtime dependencies" property is intentionally dropped.)
+
+  - **Seamless upgrade for existing macOS users.** A token/secret left in the
+    login Keychain by a pre-keyring version is read back through `security` on
+    first use and migrated into keyring — so you won't be prompted to re-mint. This
+    is a temporary shim that will be removed in a later release.
+
+- **`keychain` auth mode works on Linux.** It reads the host's rotating Claude Code
+  credentials — the macOS Keychain via `security`, or the `.credentials.json` file
+  Claude Code keeps on Linux.
+
+- **`yolo tokens` / the expiry warning read the mint date from the registry.**
+  keyring exposes no per-item modification date (the macOS Keychain did), so the
+  estimate now comes solely from `~/.claude-yolo/tokens.json`; the old "re-minted
+  outside yolo" status is gone.
+
+- **Smaller cross-platform fixes:** `yolo browse` opens the browser via Python's
+  `webbrowser` instead of macOS `open`; `secret set --clipboard` reads the system
+  clipboard via `pbpaste` / `Get-Clipboard` / `wl-paste` / `xclip` / `xsel`;
+  `--ssh-agent` mounts the Docker-Desktop/OrbStack VM socket on macOS/Windows but
+  your own `$SSH_AUTH_SOCK` on native Linux Docker; the per-session run dir prefers
+  `$XDG_RUNTIME_DIR` on Linux.
+
 ## v0.16.0 — 2026-06-17
 
 - **New `stop` verb.** `yolo stop` stops the running session's container in the
