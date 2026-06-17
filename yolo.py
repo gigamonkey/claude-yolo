@@ -423,14 +423,11 @@ def _cred_get(service: str) -> str | None:
             val = _cred_file_path(service).read_text(encoding="utf-8")
         except OSError:
             val = None
-    # TEMP (diagnostic): the macOS legacy-Keychain migration fallback is disabled to
-    # verify the token persisted natively in keyring rather than being re-read from the
-    # legacy item each run. Re-enable by uncommenting; revert this whole change after.
-    # if val is None and _is_macos():
-    #     legacy = _legacy_keychain_get(service)
-    #     if legacy is not None:
-    #         _cred_set(service, legacy)  # migrate forward so the next read is native
-    #         return legacy
+    if val is None and _is_macos():
+        legacy = _legacy_keychain_get(service)
+        if legacy is not None:
+            _cred_set(service, legacy)  # migrate forward so the next read is native
+            return legacy
     return val
 
 
