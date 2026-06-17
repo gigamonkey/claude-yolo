@@ -2364,7 +2364,7 @@ def _git_suffix(base: str) -> str:
 
     Reaching past that check means `__file__` is inside a checkout, so the version
     is never left bare — it always carries a marker saying which live state it's in:
-    `+g{sha}` when HEAD isn't the commit tagged `v{base}` (committed work past the
+    `+{sha}` when HEAD isn't the commit tagged `v{base}` (committed work past the
     release, or the tag isn't fetched locally); `+editable` when HEAD *is* that
     commit with a clean tree (otherwise indistinguishable from a wheel of the tag);
     plus `.dirty` (or a bare `+dirty`) when the working tree has uncommitted
@@ -2380,12 +2380,12 @@ def _git_suffix(base: str) -> str:
         # On the release commit, but it's a live checkout (a wheel returned above),
         # so still mark it rather than report a bare version a real wheel would.
         return "+dirty" if dirty else "+editable"
-    return f"+g{head}.dirty" if dirty else f"+g{head}"
+    return f"+{head}.dirty" if dirty else f"+{head}"
 
 
 def _version() -> str:
     """Package version for `--version`, with a local-version suffix
-    (`+editable` / `+g{sha}` / `[.]dirty`) when running live code from a checkout
+    (`+editable` / `+{sha}` / `[.]dirty`) when running live code from a checkout
     rather than an installed wheel (see _git_suffix)."""
     base = _base_version()
     if base == "unknown":

@@ -686,9 +686,9 @@ def test_git_suffix_dirty_on_release(cy, monkeypatch):
 def test_git_suffix_past_release_uses_sha(cy, monkeypatch):
     # HEAD diverges from the v0.11.0 tag (commit past the release / tag absent).
     _fake_git(cy, monkeypatch, head="def5678", dirty=False, tag_commit="abc1234")
-    assert cy._git_suffix("0.11.0") == "+gdef5678"
+    assert cy._git_suffix("0.11.0") == "+def5678"
     _fake_git(cy, monkeypatch, head="def5678", dirty=True, tag_commit=None)
-    assert cy._git_suffix("0.11.0") == "+gdef5678.dirty"
+    assert cy._git_suffix("0.11.0") == "+def5678.dirty"
 
 
 # --- worktree mounts (start TOPIC) ------------------------------------------
