@@ -186,7 +186,9 @@ and otherwise starts a fresh throwaway container; either way the prompt is
 flagged so you know where you are (`yolo:<dir>$`). `stop` stops the running
 container for this directory (or a worktree's, with a name); the session
 transcript is kept, so you can `yolo resume` it later — it's also how you free up
-a session so `finish` will clean up its worktree.
+a session so `finish` will clean up its worktree. `stop` won't cut off a session
+that's actively working unless you pass `--force` (an idle session, or one you've
+only opened a `yolo shell` into, stops without complaint).
 
 ### Worktree mode
 

@@ -984,8 +984,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   resume` still works afterward. Nothing running is a **friendly no-op**, not an
   error (idempotent in spirit, safe to script), and a `TOPIC` doesn't require the
   worktree dir to exist (the match is by label, so an odd-state container is still
-  stoppable). The counterpart to `finish`, which refuses while a container runs:
-  `stop` is how you clear that.
+  stoppable). A session that's actively **`working`** is refused unless `--force`,
+  so a stray `stop` can't cut off a running task — activity read from the same
+  session-state file `ps`/`rebase` use, located via the container's *own*
+  `yolo.config-dir`/`yolo.cwd` labels (so it's independent of this invocation's
+  config). Unlike `rebase`, only `working` is guarded — `waiting`, a `yolo shell`,
+  and a not-yet-started session (unknown `-`) all stop freely, since the point is
+  just not to interrupt active work. The counterpart to `finish`, which refuses
+  while a container runs: `stop` is how you clear that.
 - **`finish TOPIC`** — `git worktree remove` the worktree, then handle the branch
   per **`--finish-action`** (config key `finish-action`, default `delete-if-merged`;
   `FINISH_CHOICES`). The four actions (dispatched at the tail of `do_finish`):
@@ -1180,9 +1186,9 @@ Implementation shape:
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
   `start`, `list`, `finish`, and `rebase`), `--finish-action`/`--finish-remote`
   (config-backed like `base`, so ungated; consumed by `finish`), `--new`
-  (resume, worktree-only), `--force` (`finish` and `rebase` — skips the
-  uncommitted-changes guard for the former, the not-confirmed-idle running
-  container for the latter),
+  (resume, worktree-only), `--force` (`finish`, `rebase`, and `stop` — skips the
+  uncommitted-changes guard for `finish`, the not-confirmed-idle running container
+  for `rebase`, and the actively-`working` guard for `stop`),
   `--resume`/`-r` (resume), `--watch` (ps), `--all` (`list` and `secret list`),
   `--project`/`--clipboard` (`secret`), `--print`/`-n`
   (browse), and the
@@ -1491,8 +1497,9 @@ TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
 the verb gating), the non-tmux already-running `resume` refusal, and the `stop`
-verb (`docker stop`ping the worktree's container by label, and the nothing-running
-no-op; the cwd variant is in `test_cli.py`).
+verb (`docker stop`ping the worktree's container by label, the nothing-running
+no-op, and the actively-`working` guard — refused without `--force`, stopped with
+it; the cwd variant is in `test_cli.py`).
 `test_worktree_config.py` covers the per-worktree overlay (also against a real
 repo): `start` populating `worktrees.json` from explicit flags (and the empty
 `{}`), `resume`/`shell` consuming it with project<overlay<CLI precedence and

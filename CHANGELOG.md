@@ -9,9 +9,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   current directory; `yolo stop TOPIC` stops a worktree's. The container is found
   by the same labels `shell` uses and `docker stop`ped (which also removes it,
   since containers run `--rm`); the session transcript is kept, so `yolo resume`
-  still works afterward. Nothing running is a friendly no-op. It's the
-  counterpart to `finish` (which refuses while a container is running) — `stop`
-  is how you clear that.
+  still works afterward. Nothing running is a friendly no-op. A session that's
+  actively **working** is refused unless you pass `--force`, so a stray `stop`
+  can't cut off a running task (idle/shell/not-yet-started sessions stop freely).
+  It's the counterpart to `finish` (which refuses while a container is running) —
+  `stop` is how you clear that.
 
 - **Resuming/starting a session that's already running is now handled up front**,
   instead of building an image and then failing (or silently reusing the old one).

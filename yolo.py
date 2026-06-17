@@ -2450,7 +2450,7 @@ PARSER.add_argument(
     action="store_true",
     help="For `finish`: remove the worktree even with uncommitted changes. For "
     "`rebase`: rebase even when a container is running and its session isn't "
-    "confirmed idle.",
+    "confirmed idle. For `stop`: stop even when the session is actively working.",
 )
 PARSER.add_argument(
     "--config-dir",
@@ -3786,7 +3786,7 @@ def do_dir(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
         print(cwd)
 
 
-def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
+def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: bool) -> None:
     """`stop` verb: stop the running container for a worktree TOPIC, or the current
     directory. Terminal — no config, no launch.
 
@@ -3798,6 +3798,14 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
     spirit (and so is safe to script). It deliberately doesn't require the worktree
     dir to exist: the match is by label, so a container in an odd state is still
     stoppable.
+
+    A session that's actively **working** is refused unless `--force`, so a stray
+    `yolo stop` can't cut off a running task. Activity comes from the same
+    session-state file `ps`/`rebase` use, located via the container's *own*
+    `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on this invocation's
+    config). Unlike `rebase`, only `working` is guarded: an idle (`waiting`)
+    session, a `yolo shell`, or a not-yet-started session (unknown state) all stop
+    freely — the point is just not to interrupt active work.
     """
     if topic:
         _, _, slug = _worktree_dir(topic, home)
@@ -3809,6 +3817,18 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
     if not cid:
         print(f"No running yolo session {where}.")
         return
+    cfgdir = _container_label(cid, "yolo.config-dir") or str(home / ".claude")
+    rawcwd = _container_label(cid, "yolo.cwd")
+    state = _read_session_state(
+        pathlib.Path(cfgdir) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state", time.time()
+    )
+    if state.split()[0] == "working":
+        if not force:
+            sys.exit(
+                f"the session {where} is active ({state}); wait for it to finish, or "
+                "re-run with --force to stop it anyway."
+            )
+        print(f"--force: stopping the active session {where} ({state}).")
     print(f"Stopping the session {where} ({cid[:12]})…")
     result = subprocess.run(["docker", "stop", cid], capture_output=True, text=True)
     if result.returncode != 0:
@@ -4428,8 +4448,8 @@ def main():
         sys.exit("--resume/-r only applies to `resume`.")
     if parsed.new and parsed.resume is not None:
         sys.exit("--new can't be combined with --resume/-r.")
-    if parsed.force and verb not in ("finish", "rebase"):
-        sys.exit("--force only applies to `finish` and `rebase`.")
+    if parsed.force and verb not in ("finish", "rebase", "stop"):
+        sys.exit("--force only applies to `finish`, `rebase`, and `stop`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
     if parsed.all_repos and verb not in ("list", "secret"):
@@ -4484,7 +4504,7 @@ def main():
     # `stop` stops the running container for a worktree/cwd — a docker operation
     # only, no yolo config, no launch — so dispatch it early like `dir`/`secret`.
     if verb == "stop":
-        do_stop(topic, home, cwd)
+        do_stop(topic, home, cwd, force=parsed.force)
         return
 
     # Every other verb gets the config defaults layered under the CLI flags

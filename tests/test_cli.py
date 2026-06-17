@@ -791,6 +791,8 @@ def test_stop_stops_cwd_session(cy, run_cli, dirs, monkeypatch):
         if cmd[:2] == ["docker", "stop"]:
             stops.append(cmd)
             return cy.subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["docker", "inspect"]:
+            return cy.subprocess.CompletedProcess(cmd, 0, "", "")  # no labels → state '-'
         return real_run(cmd, **k)
 
     monkeypatch.setattr(cy.subprocess, "run", fake_run)

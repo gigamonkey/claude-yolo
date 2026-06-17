@@ -135,7 +135,8 @@ def test_resume_refuses_when_worktree_session_running(cy, run_cli, repo, monkeyp
 
 
 def _stop_capture(cy, monkeypatch):
-    """Intercept only `docker stop` (pass git etc. through); return the calls list."""
+    """Intercept `docker stop`/`docker inspect` (pass git etc. through); return the
+    captured `docker stop` calls."""
     real_run = cy.subprocess.run
     stops = []
 
@@ -143,6 +144,8 @@ def _stop_capture(cy, monkeypatch):
         if cmd[:2] == ["docker", "stop"]:
             stops.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")  # no labels → state '-'
         return real_run(cmd, **k)
 
     monkeypatch.setattr(cy.subprocess, "run", fake_run)
@@ -166,6 +169,28 @@ def test_stop_no_running_session_is_noop(cy, run_cli, repo, monkeypatch, capsys)
     run_cli(["stop", "topic"], home=home, cwd=r)
     assert stops == []  # nothing stopped
     assert "No running yolo session" in capsys.readouterr().out
+
+
+def test_stop_refuses_working_session_without_force(cy, run_cli, repo, monkeypatch):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789")
+    monkeypatch.setattr(cy, "_read_session_state", lambda path, now: "working 3s")
+    stops = _stop_capture(cy, monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["stop", "topic"], home=home, cwd=r)
+    assert "active" in str(exc.value)
+    assert stops == []  # not stopped
+
+
+def test_stop_force_stops_working_session(cy, run_cli, repo, monkeypatch):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789")
+    monkeypatch.setattr(cy, "_read_session_state", lambda path, now: "working 3s")
+    stops = _stop_capture(cy, monkeypatch)
+    run_cli(["stop", "topic", "--force"], home=home, cwd=r)
+    assert stops == [["docker", "stop", "cid123456789"]]
 
 
 # --- shell ------------------------------------------------------------------
