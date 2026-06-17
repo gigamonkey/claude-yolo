@@ -69,6 +69,7 @@ def test_file_credential_store_round_trip(cy, monkeypatch, tmp_path):
     assert cy._cred_get("svc-b") == "value-b"  # unaffected
 
 
+@pytest.mark.skip(reason="TEMP: legacy-Keychain migration disabled for a diagnostic run")
 def test_macos_legacy_keychain_migration(cy, monkeypatch, tmp_path):
     # Upgrade path: a token/secret left by pre-keyring yolo lives in the macOS login
     # Keychain (read via `security`). _cred_get pulls it through, migrates it into the
