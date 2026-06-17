@@ -538,7 +538,13 @@ Mechanics (`ensure_oauth_token` / `generate_oauth_token`):
   (`_keyring_available`) and falls back to a **chmod-600 file store** under
   `~/.claude-yolo/credentials/` (one hashed-name `.cred` file per service). Force
   the file store with `YOLO_CREDENTIAL_STORE=file` (used by the test suite, via a
-  conftest autouse fixture, so tests never touch a real keyring). Either way the
+  conftest autouse fixture, so tests never touch a real keyring). **Upgrade
+  migration (macOS, temporary):** pre-keyring yolo stored tokens/secrets in the
+  login Keychain via the `security` CLI, which keyring doesn't surface; so on macOS
+  `_cred_get` falls back to reading the legacy item through `security`
+  (`_legacy_keychain_get`) and migrates it into the active store — otherwise an
+  existing user's cached token would look absent and yolo would re-mint. A shim to
+  drop a release or two after keyring lands. Either way the
   token is *extract-only* — never rotated, never written back — so none of the
   precedence/rotation hazards of the mounted `.credentials.json` apply. Because
   keyring exposes no per-item modification date (unlike the macOS keychain), the

@@ -405,15 +405,50 @@ def _cred_file_path(service: str) -> pathlib.Path:
 
 
 def _cred_get(service: str) -> str | None:
-    """The stored value for `service`, or None. keyring or the file fallback."""
+    """The stored value for `service`, or None. keyring or the file fallback.
+
+    On macOS, falls back to a *legacy* item left by pre-keyring yolo (which stored
+    tokens/secrets directly in the login Keychain via the `security` CLI). keyring
+    doesn't surface those, so on first read after upgrade we pull the value through
+    `security` and migrate it into the active store — otherwise an existing user's
+    cached token would look absent and yolo would re-mint. **Temporary migration
+    shim**; remove a release or two after keyring lands, once users have upgraded.
+    """
     if _keyring_available():
         import keyring
 
-        return keyring.get_password(service, _cred_account())
+        val = keyring.get_password(service, _cred_account())
+    else:
+        try:
+            val = _cred_file_path(service).read_text(encoding="utf-8")
+        except OSError:
+            val = None
+    if val is None and _is_macos():
+        legacy = _legacy_keychain_get(service)
+        if legacy is not None:
+            _cred_set(service, legacy)  # migrate forward so the next read is native
+            return legacy
+    return val
+
+
+def _legacy_keychain_get(service: str) -> str | None:
+    """Read a pre-keyring item from the macOS login Keychain via `security`, or None.
+
+    Part of the upgrade migration in `_cred_get` (macOS only). `security ... -w`
+    appends one trailing newline to the value it prints; strip exactly that.
+    """
     try:
-        return _cred_file_path(service).read_text(encoding="utf-8")
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True,
+            text=True,
+        )
     except OSError:
         return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    out = result.stdout
+    return out[:-1] if out.endswith("\n") else out
 
 
 def _cred_set(service: str, value: str) -> None:
@@ -450,10 +485,8 @@ def _cred_delete(service: str) -> bool:
 
 
 def _cred_exists(service: str) -> bool:
-    """Whether a value is stored for `service`."""
-    if _keyring_available():
-        return _cred_get(service) is not None
-    return _cred_file_path(service).is_file()
+    """Whether a value is stored for `service` (incl. the macOS legacy fallback)."""
+    return _cred_get(service) is not None
 
 
 def extract_credentials(config_dir: str | None, run_dir: pathlib.Path) -> str:

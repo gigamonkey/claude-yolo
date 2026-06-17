@@ -69,6 +69,40 @@ def test_file_credential_store_round_trip(cy, monkeypatch, tmp_path):
     assert cy._cred_get("svc-b") == "value-b"  # unaffected
 
 
+def test_macos_legacy_keychain_migration(cy, monkeypatch, tmp_path):
+    # Upgrade path: a token/secret left by pre-keyring yolo lives in the macOS login
+    # Keychain (read via `security`). _cred_get pulls it through, migrates it into the
+    # active store, and the next read is native (no more `security` call).
+    monkeypatch.setattr(cy, "_HOST", "darwin")  # _is_macos() -> True
+    monkeypatch.setenv("HOME", str(tmp_path))  # file store (conftest forces it)
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = "legacy-token\n"  # `security -w` appends one newline
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return R()
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    assert cy._cred_get("claude-yolo-oauth-token") == "legacy-token"  # newline stripped
+    assert calls and calls[0][0] == "security"
+    # migrated into the file store, so a second read doesn't touch `security`
+    calls.clear()
+    assert cy._cred_get("claude-yolo-oauth-token") == "legacy-token"
+    assert calls == []
+
+
+def test_legacy_keychain_get_absent_returns_none(cy, monkeypatch):
+    class R:
+        returncode = 44
+        stdout = ""
+
+    monkeypatch.setattr(cy.subprocess, "run", lambda *a, **k: R())
+    assert cy._legacy_keychain_get("nope") is None
+
+
 def test_keyring_backend_used_when_available(cy, monkeypatch):
     # Simulate a real keyring backend and assert the store routes to it (not file).
     store = {}
