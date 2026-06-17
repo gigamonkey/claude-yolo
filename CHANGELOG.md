@@ -5,6 +5,19 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Resuming/starting a session that's already running is now handled up front**,
+  instead of building an image and then failing (or silently reusing the old one).
+  A container of that name already running means a live session for the
+  worktree/cwd; you can't launch a second with the same name. yolo now detects
+  this before the build, in both modes: **non-tmux** refuses with guidance (switch
+  to the terminal it's running in, or exit it and resume again; `yolo shell` for
+  another view) rather than dying on docker's raw name-conflict error; **tmux**
+  switches you to the existing window (resuming a live session = going back to it)
+  and **warns** that the reused container keeps the image it was started with — so
+  a changed `Dockerfile.yolo` / rebuilt image won't apply until you exit and resume
+  the session. This is also the fix for the confusing "it built a new image but
+  launched the old container" surprise in tmux mode.
+
 - **The assembled `docker run` command is no longer printed before launch.** It
   was long and rarely legible. Pass **`--verbose`/`-v`** to bring it back for
   debugging. (It carries no secrets — the OAuth token and any `--secret` ride a

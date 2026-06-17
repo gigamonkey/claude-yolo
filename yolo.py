@@ -3167,6 +3167,41 @@ def launch_container(
     if parsed.auth == "bedrock":
         container = f"{container}-{parsed.aws_profile or 'bedrock'}"
 
+    # A container of this name already running means a live session for this
+    # worktree/cwd — you can't launch a second with the same name (docker forbids
+    # it), so resuming/starting one "on top" is never valid. Handle it up front,
+    # before the (now-pointless) image build, rather than building and then failing:
+    #   - tmux: switch to its existing window — "resuming" a live session means
+    #     going back to it, not starting another. Warn that the running container
+    #     keeps the image it was started with, so a changed Dockerfile / rebuilt
+    #     image won't apply until it's exited and resumed. (Running but *no* window —
+    #     started outside tmux — falls through to spawn + let docker report the name
+    #     conflict in the window, as before.)
+    #   - non-tmux: there's no window to switch to (it's a live `-it` process in
+    #     another terminal), so refuse with guidance instead of building and then
+    #     dying on docker's raw name-conflict error.
+    if running_container_for(slug, worktree_name, cwd=None if worktree_name else cwd):
+        target = f"worktree '{worktree_name}'" if worktree_name else "this directory"
+        if parsed.tmux:
+            print(
+                f"warning: a session for {target} is already running ('{container}'); "
+                "switching to its window. It keeps the image it was started with, so a "
+                "changed Dockerfile or rebuilt image won't take effect until you exit "
+                "that session and resume it again.",
+                file=sys.stderr,
+            )
+            if _find_tmux_window(parsed.tmux_session, container) is not None:
+                _launch_in_tmux([], container, session=parsed.tmux_session, reuse_existing=True)
+                return
+        else:
+            shell_hint = f"yolo shell {worktree_name}" if worktree_name else "yolo shell"
+            sys.exit(
+                f"A yolo session for {target} is already running ('{container}'). You "
+                "can't start a second one with the same name — switch to the terminal "
+                f"it's running in, or exit it and resume again. For another view into "
+                f"it without disturbing it, use `{shell_hint}`."
+            )
+
     # Reclaim leftover run dirs of finished sessions, then make this session's dir
     # (mode 700). It holds the chmod-600 credential/secret files bind-mounted for
     # the container's lifetime; yolo execvp's into docker, so the GC — not a

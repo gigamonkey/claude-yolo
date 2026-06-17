@@ -43,6 +43,12 @@ def run_cli(cy, monkeypatch):
     Returns that argv list, or None if execvp was never reached (e.g. the `init`
     verb, which exits early).
     """
+    # launch_container now does an up-front `running_container_for` (docker ps) on
+    # every launch to guard against resuming an already-running session. Default it
+    # to "nothing running" so launch tests don't shell out to docker — but only if
+    # the test hasn't set its own stub (the tmux/verb tests patch it to a truthy id
+    # *before* calling run_cli, and that must win).
+    original_rcf = cy.running_container_for
 
     def _run(argv, *, home, cwd, creds_path="/tmp/creds.json"):
         monkeypatch.setenv("HOME", str(home))
@@ -54,6 +60,8 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "_masking_credfile", lambda d: MASK_CREDFILE)
         monkeypatch.setattr(cy, "ensure_oauth_token", lambda c: "sk-ant-oat-TESTTOKEN")
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
+        if cy.running_container_for is original_rcf:
+            monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: None)
         # The per-session run dir + docker-ps GC touch real $TMPDIR / docker; keep
         # them inside the controlled tmp HOME and skip the GC's `docker ps` call.
         monkeypatch.setattr(cy, "_run_dir", lambda: pathlib.Path(home) / ".claude-yolo-run")

@@ -1199,6 +1199,22 @@ The mechanics, all funneled through two functions:
   doomed to the container-name conflict — but if no window matches (container
   started outside tmux mode), it spawns anyway and lets docker report the
   conflict in the window.
+- **The already-running guard** (in `launch_container`, *before* `_build_image`,
+  shared by both modes — same `running_container_for` query). A running container
+  of this name means a live session for the worktree/cwd; you can't launch a
+  second with the same name, so resuming/starting one "on top" is never valid.
+  Handle it up front (so we never do the now-pointless, possibly-slow image build
+  and then fail): **non-tmux** `sys.exit`s with guidance (switch to the terminal
+  it's running in, or exit it and resume; `yolo shell` for another view) rather
+  than building and dying on docker's raw name conflict. **tmux** instead
+  **switches to the existing window** (resuming a live session = going back to it)
+  and **warns** that the reused container keeps the image it was started with, so
+  a changed Dockerfile / rebuilt image won't apply until the session is exited and
+  resumed — the "it built a new image but launched the old one" surprise. The tmux
+  no-window fall-through (container started outside tmux) still builds + spawns and
+  lets docker report the conflict, unchanged. (Terminal verbs and `shell`-into-
+  running are exempt: `shell` *wants* to attach to a running container, handled by
+  the `docker exec` path in `main` before this is reached.)
 - **`_launch_in_tmux`** ensures the session exists (`_ensure_tmux_session` —
   a fresh one is created detached with window 0 running the `yolo ps --watch`
   dashboard, re-invoked via `_self_invocation`: sys.argv[0] resolved through
@@ -1419,7 +1435,11 @@ never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
 `ensure_oauth_token`, `git_identity_args`, and `os.execvp` (and points `_run_dir`
 at the test home + no-ops the docker-ps `_gc_run_dir`), then asserts on the
-captured `docker run` argv. `test_config.py` covers config parsing/merging
+captured `docker run` argv. It also defaults `running_container_for` to "nothing
+running" (the launch-time already-running guard does a `docker ps`) — but only
+when a test hasn't set its own stub, so the tmux/verb tests that patch it to a
+truthy id before calling `run_cli` still win (identity check against the
+freshly-loaded module's original). `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 the `finish-action`/`finish-remote` keys (parse, the `FINISH_CHOICES` validation,
@@ -1435,6 +1455,10 @@ and folds the base tag into the final tag; `_verify_image_user` rejects a non-
 `claude` image), and the `dockerfile` dump verb. The
 tests locate the built image in the assembled argv by its
 `claude-yolo:` repo prefix (the tag is now content-addressed, not a fixed constant).
+It also covers the unconfigured-`Dockerfile.yolo` warning, the `--verbose`/`-v`
+docker-command dump, and the **already-running guard** (non-tmux `resume` with a
+running container `sys.exit`s before the build; the `repo`-based worktree variant
+is in `test_verbs.py`, the tmux switch-and-skip-build variant in `test_tmux.py`).
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects —
@@ -1468,7 +1492,9 @@ expiry warning, the implicit-mint consent prompt, and the `tokens` /
 `test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux
 server patched in at the `_tmux` seam (session creation + dashboard seeding,
 window command quoting, inside-vs-outside `$TMUX` focusing, the
-already-attached-client no-mirror guard, window reuse, the config keys, the
+already-attached-client no-mirror guard, window reuse (including that a reused
+running container **skips the image build** and warns, while the no-window
+fall-through still builds), the config keys, the
 terminal-title options set only on a yolo-created session, and the pinned
 window names), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and

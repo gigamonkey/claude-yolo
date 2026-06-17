@@ -767,6 +767,19 @@ def test_no_dockerfile_yolo_warning_when_absent(cy, run_cli, dirs, capsys):
     assert "Dockerfile.yolo" not in capsys.readouterr().err
 
 
+def test_resume_refuses_when_cwd_session_running(cy, run_cli, dirs, monkeypatch):
+    # A live session for this dir → can't launch a second container with the same
+    # name; non-tmux refuses up front, before the (now-pointless) image build.
+    home, work = dirs
+    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "abc123")
+    built = []
+    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["resume"], home=home, cwd=work)
+    assert "already running" in str(exc.value)
+    assert built == []  # refused before building
+
+
 def test_docker_command_hidden_unless_verbose(cy, run_cli, dirs, capsys):
     home, work = dirs
     run_cli([], home=home, cwd=work)

@@ -122,6 +122,18 @@ def test_resume_with_session_id(cy, run_cli, repo):
     assert "--resume" in cmd and "SID" in cmd
 
 
+def test_resume_refuses_when_worktree_session_running(cy, run_cli, repo, monkeypatch):
+    # Can't resume a worktree whose session is already running (non-tmux): refuse
+    # up front rather than build + hit docker's name conflict.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["resume", "topic"], home=home, cwd=r)
+    msg = str(exc.value)
+    assert "already running" in msg and "topic" in msg
+
+
 # --- shell ------------------------------------------------------------------
 
 

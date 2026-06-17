@@ -243,6 +243,32 @@ def test_tmux_spawns_when_container_runs_but_no_window_matches(
     assert len(tmux.named("new-window")) == 1
 
 
+def test_tmux_reuse_skips_image_build_and_warns(cy, run_cli, tmux, dirs, monkeypatch, capsys):
+    # Reusing a running container keeps its image, so building a new one is
+    # pointless — skip the build and warn that a changed Dockerfile won't apply
+    # until the session is restarted (the reported "built it but ran the old one").
+    home, work = dirs
+    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    built = []
+    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    tmux.has_session = True
+    tmux.windows.append(("@3", "work"))  # matching window exists → focus it
+    run_cli(["resume", "--tmux"], home=home, cwd=work)
+    assert built == []  # build skipped
+    assert "already running" in capsys.readouterr().err
+
+
+def test_tmux_no_window_still_builds(cy, run_cli, tmux, dirs, monkeypatch):
+    # Running but no window (started outside tmux): fall through to build + spawn.
+    home, work = dirs
+    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    built = []
+    monkeypatch.setattr(cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x")
+    tmux.has_session = True
+    run_cli(["resume", "--tmux"], home=home, cwd=work)
+    assert built  # not short-circuited
+
+
 # --- shell into a running container -------------------------------------------
 
 

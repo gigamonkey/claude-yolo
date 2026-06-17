@@ -334,8 +334,15 @@ What `--tmux` does on each launch:
   inside tmux your current client just switches to the new window.
 
 If the matching container is already running — say you `yolo resume foo` twice
-— yolo switches to its existing window instead of spawning a `docker run` that
-would only die on the container-name conflict.
+— you can't launch a second one with the same name, so yolo handles it up front
+rather than failing on docker's name conflict. In tmux it **switches to the
+existing window** (resuming a live session just means going back to it) and warns
+that the running container keeps the image it was started with — so if you
+changed its `Dockerfile.yolo`, the new image won't apply until you exit that
+session and resume it again. Without tmux there's no window to switch to (it's a
+live session in another terminal), so yolo refuses with a short message: switch
+to that terminal, or exit the session and resume again (or use `yolo shell` for a
+second view into it).
 
 The **STATE** column tells you which sessions need you: `working 12s` while
 Claude is busy (time since your last prompt), or `waiting 5m` once it has
