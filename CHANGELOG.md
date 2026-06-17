@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## v0.17.0 — unreleased
+## v0.17.0 — 2026-06-17
 
 - **Runs on Linux now (and Windows via WSL2), not just macOS.** The container was
   always Linux; this ports the host-side glue (credential store, clipboard,
