@@ -3839,7 +3839,6 @@ def do_rebase(
     home: pathlib.Path,
     base: str,
     *,
-    config_dir: str | None,
     force: bool,
 ) -> None:
     """`rebase` verb: rebase a worktree's branch onto `base` (e.g. main's new work).
@@ -3854,10 +3853,11 @@ def do_rebase(
     container at all), rebase only rewrites commits in a worktree that stays put,
     so a running container isn't a hard blocker — only an *active* session is. So
     when a container is running, we consult the session-activity state file the
-    hooks write (the same one `ps` reads): a `waiting` session (idle at a prompt)
-    is rebased through; a `working` one — or an unknown state (`-`: a `yolo shell`,
-    which has no hooks, or a session that hasn't taken a turn yet) — is refused
-    unless `--force`. The only residual race (the user prompting the session in
+    hooks write (the same one `stop`/`finish`/`ps` read, via the container's own
+    labels): a `waiting` session (idle at a prompt) is rebased through; a
+    `working` one — or an unknown state (`-`: a `yolo shell`, which has no hooks,
+    or a session that hasn't taken a turn yet) — is refused unless `--force`.
+    The only residual race (the user prompting the session in
     the instant between our check and the rebase) needs them driving the same
     session from two places at once, so in practice it's a non-issue.
 
@@ -3869,10 +3869,9 @@ def do_rebase(
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
         sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    if running_container_for(slug, topic):
-        state_dir = pathlib.Path(config_dir) if config_dir else home / ".claude"
-        state_file = state_dir / _STATUS_DIR_NAME / f"{_cwd_slug(worktree)}.state"
-        state = _read_session_state(state_file, time.time())
+    cid = running_container_for(slug, topic)
+    if cid:
+        state = _container_session_state(cid, home)
         activity = state.split()[0]  # "waiting" | "working" | "-"
         if activity == "waiting":
             print(f"Session for '{topic}' is idle ({state}); rebasing.")
@@ -3991,6 +3990,22 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: 
     _stop_container(cid, where, home, force=force)
 
 
+def _container_session_state(cid: str, home: pathlib.Path) -> str:
+    """A running container's session activity state ("waiting"/"working"/"-").
+
+    Reads the status file via the container's *own* `yolo.config-dir`/`yolo.cwd`
+    labels, so the answer doesn't depend on which `--config-dir` the verb was
+    invoked with — `stop`, `finish`, and `rebase` all read the same session
+    identically. "-" when there's no state file (a `yolo shell`, which runs no
+    hooks, or a session that hasn't taken a turn yet).
+    """
+    cfgdir = _container_label(cid, "yolo.config-dir") or str(home / ".claude")
+    rawcwd = _container_label(cid, "yolo.cwd")
+    return _read_session_state(
+        pathlib.Path(cfgdir) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state", time.time()
+    )
+
+
 def _stop_container(cid: str, where: str, home: pathlib.Path, *, force: bool) -> None:
     """Stop (and, since `--rm`, remove) a running yolo container.
 
@@ -4001,11 +4016,7 @@ def _stop_container(cid: str, where: str, home: pathlib.Path, *, force: bool) ->
     `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on the caller's
     config). `where` is a human phrase for messages (e.g. "for 'fix-auth'").
     """
-    cfgdir = _container_label(cid, "yolo.config-dir") or str(home / ".claude")
-    rawcwd = _container_label(cid, "yolo.cwd")
-    state = _read_session_state(
-        pathlib.Path(cfgdir) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state", time.time()
-    )
+    state = _container_session_state(cid, home)
     if state.split()[0] == "working":
         if not force:
             sys.exit(
@@ -4749,7 +4760,7 @@ def main():
         )
         return
     if verb == "rebase":
-        do_rebase(topic, home, parsed.base, config_dir=parsed.config_dir, force=parsed.force)
+        do_rebase(topic, home, parsed.base, force=parsed.force)
         return
     if verb == "shell":
         if topic:

@@ -428,14 +428,15 @@ def test_finish_refuses_dirty_without_force(cy, run_cli, repo):
     assert not wt.exists()  # --force removes it
 
 
-def _fake_docker_for_finish(cy, monkeypatch, home, worktree):
-    """Stub subprocess so finish's `docker stop`/`docker inspect` don't hit docker.
+def _fake_docker_session(cy, monkeypatch, home, worktree):
+    """Stub subprocess so a verb's `docker stop`/`docker inspect` don't hit docker.
 
-    `docker stop` records the call and succeeds; `docker inspect` returns the
-    container's yolo.config-dir / yolo.cwd labels so `_stop_container` reads the
-    session-state file `_write_session_state` writes (default config dir, keyed
-    by the worktree path). Everything else (git) runs for real. Returns the list
-    that captures the `docker stop` argv.
+    Shared by the finish and rebase tests. `docker stop` records the call and
+    succeeds; `docker inspect` returns the container's yolo.config-dir / yolo.cwd
+    labels so `_container_session_state` reads the state file `_write_session_state`
+    writes (default config dir, keyed by the worktree path). Everything else (git)
+    runs for real. Returns the list that captures the `docker stop` argv (empty for
+    rebase, which never stops the container).
     """
     real_run = cy.subprocess.run
     stops = []
@@ -467,7 +468,7 @@ def test_finish_stops_idle_session_and_finishes(cy, run_cli, repo, monkeypatch):
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "waiting")
-    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
+    stops = _fake_docker_session(cy, monkeypatch, home, wt)
     run_cli(["finish", "topic"], home=home, cwd=r)
     assert stops == [["docker", "stop", "cid"]]  # the idle session was stopped
     assert not wt.exists()  # worktree removed
@@ -480,7 +481,7 @@ def test_finish_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "working")
-    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
+    stops = _fake_docker_session(cy, monkeypatch, home, wt)
     with pytest.raises(SystemExit):
         run_cli(["finish", "topic"], home=home, cwd=r)
     assert stops == []  # nothing stopped
@@ -494,7 +495,7 @@ def test_finish_force_stops_active_session(cy, run_cli, repo, monkeypatch):
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "working")
-    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
+    stops = _fake_docker_session(cy, monkeypatch, home, wt)
     run_cli(["finish", "topic", "--force"], home=home, cwd=r)
     assert stops == [["docker", "stop", "cid"]]
     assert not wt.exists()
@@ -558,7 +559,9 @@ def test_rebase_refuses_when_container_running_and_state_unknown(cy, run_cli, re
     # that hasn't taken a turn): state is "-", so refuse without --force.
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _fake_docker_session(cy, monkeypatch, home, wt)  # labels present, but no state file
     with pytest.raises(SystemExit):
         run_cli(["rebase", "topic"], home=home, cwd=r)
 
@@ -581,6 +584,7 @@ def test_rebase_proceeds_when_session_waiting(cy, run_cli, repo, monkeypatch):
     r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "waiting")
+    _fake_docker_session(cy, monkeypatch, home, wt)
     run_cli(["rebase", "topic"], home=home, cwd=r)
     assert (wt / "main.txt").exists()  # rebased through an idle running container
 
@@ -589,6 +593,7 @@ def test_rebase_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
     r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "working")
+    _fake_docker_session(cy, monkeypatch, home, wt)
     with pytest.raises(SystemExit):
         run_cli(["rebase", "topic"], home=home, cwd=r)
     assert not (wt / "main.txt").exists()  # not rebased
@@ -598,8 +603,35 @@ def test_rebase_force_overrides_active_session(cy, run_cli, repo, monkeypatch):
     r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
     _write_session_state(cy, home, wt, "working")
+    _fake_docker_session(cy, monkeypatch, home, wt)
     run_cli(["rebase", "topic", "--force"], home=home, cwd=r)
     assert (wt / "main.txt").exists()  # --force rebased despite a working session
+
+
+def test_rebase_reads_state_from_container_config_dir(cy, run_cli, repo, monkeypatch):
+    # The session was started under an alternate --config-dir, so its state file
+    # lives there, not in ~/.claude. rebase (invoked without --config-dir) must
+    # still read the right state via the container's own yolo.config-dir label —
+    # otherwise it'd see "-" and refuse an idle session.
+    r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
+    altcfg = home / ".claude-work"
+    sd = altcfg / cy._STATUS_DIR_NAME
+    sd.mkdir(parents=True)
+    (sd / f"{cy._cwd_slug(wt)}.state").write_text(f"waiting {int(time.time())}")
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+
+    real_run = cy.subprocess.run
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["docker", "inspect"]:
+            fmt = cmd[3]
+            out = str(altcfg) if "yolo.config-dir" in fmt else str(wt) if "yolo.cwd" in fmt else ""
+            return cy.subprocess.CompletedProcess(cmd, 0, out + "\n", "")
+        return real_run(cmd, **k)
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    run_cli(["rebase", "topic"], home=home, cwd=r)
+    assert (wt / "main.txt").exists()  # idle session found via the container's label
 
 
 def test_rebase_honours_base(cy, run_cli, repo):

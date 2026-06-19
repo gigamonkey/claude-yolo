@@ -1076,12 +1076,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   abort (`git rebase --abort`) **in the worktree dir**, leaving it in-progress
   there. A terminal verb — no container; the `worktrees.json` overlay is
   untouched (the worktree lives on). **Running-container handling is
-  session-aware, unlike `finish`'s flat refusal:** `finish` removes the worktree
-  so it can't tolerate a live container at all, but rebase only rewrites commits
-  in a worktree that stays put — so only an *active* session is a real hazard. A
+  session-aware:** rebase only rewrites commits in a worktree that stays put — so
+  only an *active* session is a real hazard, not a live container per se. A
   running container is checked against the **session-activity state file the hooks
-  write** (`<config-dir>/.yolo-status/<cwd-slug>.state`, read by
-  `_read_session_state` — the same file `ps`'s STATE column uses): a `waiting`
+  write** (`<config-dir>/.yolo-status/<cwd-slug>.state`), read via the **shared
+  `_container_session_state` helper** that `stop`/`finish` also use: it resolves
+  the state file through the container's *own* `yolo.config-dir`/`yolo.cwd` labels
+  (not this invocation's `--config-dir`), so a session started under a different
+  config dir is still read correctly. A `waiting`
   session (idle at a prompt) is rebased **through**; a `working` one — or an
   unknown state (`-`: a `yolo shell`, which runs no hooks, or a session that hasn't
   taken a turn yet) — is **refused unless `--force`**. The one residual race (the
@@ -1534,7 +1536,9 @@ default, and a no-op without `.gitmodules`), and the `rebase` verb (replaying a 
 the base's new commits, honouring `--base`; the required-topic/missing-worktree/
 dirty-tree refusals; and the session-aware running-container handling — a
 `waiting` session rebases through, `working`/unknown refuse, and `--force`
-overrides — driven by a stamped `.yolo-status` state file), and `list` (the
+overrides — driven by a stamped `.yolo-status` state file read through the
+container's own labels, including that a session under an alternate `--config-dir`
+is still read correctly), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
