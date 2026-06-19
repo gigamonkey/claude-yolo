@@ -192,10 +192,9 @@ directory if there is one — handy while a session works in another terminal �
 and otherwise starts a fresh throwaway container; either way the prompt is
 flagged so you know where you are (`yolo:<dir>$`). `stop` stops the running
 container for this directory (or a worktree's, with a name); the session
-transcript is kept, so you can `yolo resume` it later — it's also how you free up
-a session so `finish` will clean up its worktree. `stop` won't cut off a session
-that's actively working unless you pass `--force` (an idle session, or one you've
-only opened a `yolo shell` into, stops without complaint).
+transcript is kept, so you can `yolo resume` it later. `stop` won't cut off a
+session that's actively working unless you pass `--force` (an idle session, or
+one you've only opened a `yolo shell` into, stops without complaint).
 
 ### Worktree mode
 
@@ -240,9 +239,11 @@ Verb details:
   `--force`. A rebase that hits conflicts is left in-progress in the worktree for
   you to `git rebase --continue` or `git rebase --abort`.
 
-- **`finish TOPIC`** refuses if a container is still running or if there are
-  uncommitted changes (override with `--force`). What it does with the branch
-  after removing the worktree is set by
+- **`finish TOPIC`** stops a running container for you first — as `yolo stop`
+  would — so a quiescent session can be closed and cleaned up in one step; an
+  actively `working` session is refused unless you pass `--force`. It also
+  refuses if there are uncommitted changes (override with `--force`). What it
+  does with the branch after removing the worktree is set by
   [`--finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
   (default: delete it if merged, else keep it).
 
@@ -861,8 +862,9 @@ modes:
 
 - **`keep`** — leave the branch alone (just clean up the worktree).
 
-Every mode still refuses on a running container or uncommitted changes (unless
-`--force`). Set it in config to make e.g. `merge` your default `finish`, or pass
+Every mode first stops a running container (refusing only an actively `working`
+session unless `--force`) and refuses on uncommitted changes (unless `--force`).
+Set it in config to make e.g. `merge` your default `finish`, or pass
 `--finish-action` for a one-off.
 
 ### `prompts` (`--prompt` / `-p`, repeatable)

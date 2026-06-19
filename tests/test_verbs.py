@@ -428,12 +428,76 @@ def test_finish_refuses_dirty_without_force(cy, run_cli, repo):
     assert not wt.exists()  # --force removes it
 
 
-def test_finish_refuses_when_container_running(cy, run_cli, repo, monkeypatch):
+def _fake_docker_for_finish(cy, monkeypatch, home, worktree):
+    """Stub subprocess so finish's `docker stop`/`docker inspect` don't hit docker.
+
+    `docker stop` records the call and succeeds; `docker inspect` returns the
+    container's yolo.config-dir / yolo.cwd labels so `_stop_container` reads the
+    session-state file `_write_session_state` writes (default config dir, keyed
+    by the worktree path). Everything else (git) runs for real. Returns the list
+    that captures the `docker stop` argv.
+    """
+    real_run = cy.subprocess.run
+    stops = []
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["docker", "stop"]:
+            stops.append(cmd)
+            return cy.subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["docker", "inspect"]:
+            fmt = cmd[3]
+            if "yolo.config-dir" in fmt:
+                out = str(home / ".claude")
+            elif "yolo.cwd" in fmt:
+                out = str(worktree)
+            else:
+                out = ""
+            return cy.subprocess.CompletedProcess(cmd, 0, out + "\n", "")
+        return real_run(cmd, **k)
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    return stops
+
+
+def test_finish_stops_idle_session_and_finishes(cy, run_cli, repo, monkeypatch):
+    # A running but idle (waiting) session is stopped as `yolo stop` would, then
+    # finish proceeds — closing the session and removing the worktree in one step.
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "waiting")
+    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
+    run_cli(["finish", "topic"], home=home, cwd=r)
+    assert stops == [["docker", "stop", "cid"]]  # the idle session was stopped
+    assert not wt.exists()  # worktree removed
+
+
+def test_finish_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
+    # An actively working session is not cut off: finish refuses without --force.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "working")
+    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
     with pytest.raises(SystemExit):
         run_cli(["finish", "topic"], home=home, cwd=r)
+    assert stops == []  # nothing stopped
+    assert wt.exists()  # worktree left intact
+
+
+def test_finish_force_stops_active_session(cy, run_cli, repo, monkeypatch):
+    # --force stops even an actively working session, then finishes.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "working")
+    stops = _fake_docker_for_finish(cy, monkeypatch, home, wt)
+    run_cli(["finish", "topic", "--force"], home=home, cwd=r)
+    assert stops == [["docker", "stop", "cid"]]
+    assert not wt.exists()
 
 
 # --- rebase -----------------------------------------------------------------

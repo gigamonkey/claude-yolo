@@ -3,6 +3,15 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **`yolo finish` stops an idle session for you.** It used to refuse outright if a
+  container was still running for the worktree; now it stops the session first —
+  exactly as `yolo stop` would — so a quiescent session can be closed, its branch
+  handled, and its worktree cleaned up in one step. An actively `working` session
+  is still refused unless you pass `--force` (the same flag that overrides the
+  uncommitted-changes guard), so `finish` can't cut off a running task by accident.
+
 ## v0.17.0 — 2026-06-17
 
 - **Runs on Linux now (and Windows via WSL2), not just macOS.** The container was

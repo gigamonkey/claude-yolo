@@ -3670,9 +3670,12 @@ def do_finish(
 ) -> None:
     """`finish` verb: remove a worktree, then handle its branch per `action`.
 
-    Guards against the real loss vectors — a running container holding the mount,
-    and uncommitted changes (unless --force) — then removes the worktree. What
-    happens to the branch is controlled by `action` (--finish-action):
+    A running container holds the worktree's mount, so finish first **stops it as
+    `yolo stop` would** (`_stop_container`) — an idle session is stopped through,
+    an actively `working` one is refused unless --force — letting you finish a
+    quiescent session in one step. Then it guards against the other loss vector,
+    uncommitted changes (unless --force), and removes the worktree. What happens
+    to the branch is controlled by `action` (--finish-action):
 
     - `delete-if-merged` (default): delete the branch iff it's reachable from
       `base` (merged or never diverged); otherwise keep it with a note about
@@ -3686,8 +3689,13 @@ def do_finish(
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
         sys.exit(f"no worktree '{topic}'; nothing to finish.")
-    if running_container_for(slug, topic):
-        sys.exit(f"a container is running for '{topic}'; exit it first.")
+    cid = running_container_for(slug, topic)
+    if cid:
+        # The worktree can't be removed while a container holds its mount, so stop
+        # the session first — exactly as `yolo stop` would. An idle (`waiting`)
+        # session is stopped through; an actively `working` one is refused unless
+        # --force (so finish can't cut off a running task).
+        _stop_container(cid, f"for '{topic}'", home, force=force)
     dirty = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
         capture_output=True,
@@ -3980,6 +3988,19 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: 
     if not cid:
         print(f"No running yolo session {where}.")
         return
+    _stop_container(cid, where, home, force=force)
+
+
+def _stop_container(cid: str, where: str, home: pathlib.Path, *, force: bool) -> None:
+    """Stop (and, since `--rm`, remove) a running yolo container.
+
+    Shared by the `stop` and `finish` verbs. An actively **working** session is
+    refused unless `force`, so a stray stop can't cut off a running task; an idle
+    (`waiting`) session, a `yolo shell`, or a not-yet-started session (unknown
+    state) all stop freely. Activity is read from the container's *own*
+    `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on the caller's
+    config). `where` is a human phrase for messages (e.g. "for 'fix-auth'").
+    """
     cfgdir = _container_label(cid, "yolo.config-dir") or str(home / ".claude")
     rawcwd = _container_label(cid, "yolo.cwd")
     state = _read_session_state(
