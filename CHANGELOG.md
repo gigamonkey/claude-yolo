@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo rebase` now reliably reads a session's idle/working state.** It already
+  rebased through an idle (`waiting`) session and refused an actively `working`
+  one, but it located the session-activity file from the invoking command's
+  `--config-dir` rather than the container's. A session started under a different
+  config dir was read as unknown, so an idle one was wrongly refused without
+  `--force`. It now reads the state through the container's own labels — the same
+  way `stop` and `finish` do — so the config dir no longer matters.
+
 - **`yolo finish` stops an idle session for you.** It used to refuse outright if a
   container was still running for the worktree; now it stops the session first —
   exactly as `yolo stop` would — so a quiescent session can be closed, its branch
