@@ -90,7 +90,7 @@ def project_item(cy, **over):
         "project",
         over.pop("key", "project:/p"),
         over.pop("cols", ("/p",)),
-        {"path": over.pop("path", "/p")},
+        {"path": over.pop("path", "/p"), "registered": over.pop("registered", True)},
     )
 
 
@@ -164,6 +164,24 @@ def test_wip_projects_flags_active(cy, tmp_path):
     projects = cy._wip_projects(home, sessions)
     by_path = {str(p["path"]): p["active"] for p in projects}
     assert by_path == {"/work/a": True, "/work/b": False}
+    assert all(p["registered"] for p in projects)
+
+
+def test_wip_projects_unions_recent_registry(cy, tmp_path):
+    # A recently-opened project (in recent-projects.json) shows up alongside the
+    # registered ones, flagged unregistered — but only if its directory still exists.
+    home = tmp_path / "home"
+    (home / ".claude-yolo").mkdir(parents=True)
+    (home / ".claude-yolo" / "projects.json").write_text(f'{{"{tmp_path}/reg": {{}}}}')
+    (tmp_path / "reg").mkdir()
+    seen = tmp_path / "seen"
+    seen.mkdir()
+    cy._record_recent_project(home, str(seen))
+    cy._record_recent_project(home, str(tmp_path / "gone"))  # dir doesn't exist
+    cy._record_recent_project(home, str(tmp_path / "reg"))  # also registered
+    projects = cy._wip_projects(home, [])
+    by_path = {str(p["path"]): p["registered"] for p in projects}
+    assert by_path == {str(tmp_path / "reg"): True, str(seen): False}  # gone/dup dropped
 
 
 # --- loop: navigation + refresh ---------------------------------------------
@@ -332,6 +350,34 @@ def test_add_project_prompts_and_registers(cy, monkeypatch, tmp_path):
     d = tmp_path / "newproj"
     d.mkdir()
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d)])
+    assert registered == [str(d.resolve())]
+
+
+def test_add_project_on_recent_registers_selection(cy, monkeypatch):
+    # `a` on a selected recent-only project registers *that* one directly (no prompt).
+    registered = []
+    monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
+    sections = {
+        "session": [],
+        "worktree": [],
+        "project": [project_item(cy, path="/work/seen", registered=False)],
+    }
+    run_loop(cy, monkeypatch, sections, ["a", "q"])
+    assert registered == ["/work/seen"]
+
+
+def test_add_project_on_registered_still_prompts(cy, monkeypatch, tmp_path):
+    # `a` on an already-registered project falls back to the prompt (add another).
+    registered = []
+    monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
+    d = tmp_path / "other"
+    d.mkdir()
+    sections = {
+        "session": [],
+        "worktree": [],
+        "project": [project_item(cy, path="/work/reg", registered=True)],
+    }
     run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d)])
     assert registered == [str(d.resolve())]
 

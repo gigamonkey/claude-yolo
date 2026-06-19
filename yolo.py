@@ -1615,6 +1615,54 @@ def _read_projects_file(path: pathlib.Path) -> dict:
     return raw
 
 
+# Recent-projects registry: ~/.claude-yolo/recent-projects.json maps a project key
+# (the same projects.json-style key — main repo root, else cwd) -> {"last_opened":
+# iso}. Stamped on every launch so the `wip` dashboard can list projects you've
+# opened even when they have no config entry. Kept SEPARATE from projects.json on
+# purpose: projects.json stays a deliberate, config-only ledger (`yolo config` is its
+# only writer), so the dangling-key warning and require-project-entry keep meaning a
+# launch-stamped file would dilute. Host-side only and never mounted, like tokens.json.
+def _recent_projects_file(home: pathlib.Path) -> pathlib.Path:
+    return home / ".claude-yolo" / "recent-projects.json"
+
+
+def _read_recent_projects_file(home: pathlib.Path) -> dict:
+    """~/.claude-yolo/recent-projects.json as {project key: entry}; {} if absent.
+
+    Lenient by design — it's a convenience cache, not config, so a malformed file
+    returns {} (it'll be rewritten on the next launch) rather than blocking the
+    dashboard the way a bad projects.json deliberately does.
+    """
+    path = _recent_projects_file(home)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        return {}
+    return raw
+
+
+def _record_recent_project(home: pathlib.Path, project_key: str) -> None:
+    """Stamp `project_key` as just-opened in the recent-projects registry.
+
+    Called from the single launch path on every launch. Best-effort: a write
+    failure must never block a session, so OS errors are swallowed.
+    """
+    try:
+        projects = _read_recent_projects_file(home)
+        projects[project_key] = {
+            "last_opened": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        path = _recent_projects_file(home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(projects, indent=2) + "\n")
+    except OSError:
+        pass
+
+
 # Per-worktree overlay config: ~/.claude-yolo/worktrees.json maps a worktree's
 # absolute path -> a config object (same shape as a projects.json entry). It's the
 # most specific persisted layer (projects.json entry < worktree overlay < CLI),
@@ -3400,6 +3448,12 @@ def launch_container(
     is the resolved (dir, mode) list from --mount / the `mounts` config key;
     `ports` the resolved (host-or-None, container) pairs from --port / `ports`.
     """
+    # Stamp this project as recently opened so `wip` can list it even without a
+    # projects.json entry (recorded here, the single launch path, so it covers
+    # start/resume/shell in any auth/worktree mode). _project_key follows the shared
+    # .git to the main repo, matching the projects.json key wip groups by.
+    _record_recent_project(home, _project_key(cwd))
+
     # Finalize the container name up front (the -{config}/-{profile} suffixes the
     # auth/config blocks below would otherwise tack on), because the per-session
     # run dir is keyed by the *final* name so the docker-ps GC can match it.
@@ -4732,18 +4786,34 @@ def _order_sessions(sessions: list) -> list:
 
 
 def _wip_projects(home: pathlib.Path, sessions: list) -> list:
-    """The registered projects (projects.json keys), each flagged if it has a session.
+    """Projects to offer in the dashboard: registered (projects.json) + recently opened.
 
-    Returns `[{path, active}]`. `active` is true when a running session's cwd is at
-    or under the project path — a hint that work is already happening there.
+    Returns `[{path, active, registered}]`. `registered` keys are deliberate
+    projects.json entries; the rest come from the recent-projects registry (every
+    launch stamps one) so a project you've opened shows up even with no config entry
+    — `a` can then register it. Recent-only keys whose directory no longer exists are
+    dropped (stale auto-records, not actionable); registered keys are kept regardless
+    (a dangling one is the config layer's warning to raise, not something to hide
+    here). `active` is true when a running session's cwd is at or under the path — a
+    hint that work is already happening there.
     """
-    keys = sorted(_read_projects_file(home / ".claude-yolo" / "projects.json").keys())
+    registered = set(_read_projects_file(home / ".claude-yolo" / "projects.json").keys())
+    recent_raw = _read_recent_projects_file(home)
+    recent = sorted(
+        (
+            k
+            for k in recent_raw
+            if k not in registered and pathlib.Path(os.path.expanduser(k)).is_dir()
+        ),
+        key=lambda k: recent_raw[k].get("last_opened", ""),
+        reverse=True,  # most-recently-opened first, below the (alphabetical) registered ones
+    )
     cwds = [pathlib.Path(s.cwd) for s in sessions if s.cwd]
     out = []
-    for k in keys:
+    for k in sorted(registered) + recent:
         kp = pathlib.Path(k)
         active = any(c == kp or kp in c.parents for c in cwds)
-        out.append({"path": kp, "active": active})
+        out.append({"path": kp, "active": active, "registered": k in registered})
     return out
 
 
@@ -4811,8 +4881,12 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
         WipItem(
             "project",
             f"project:{p['path']}",
-            (str(p["path"]) + (" (active)" if p["active"] else ""),),
-            {"path": p["path"]},
+            (
+                str(p["path"])
+                + (" (active)" if p["active"] else "")
+                + ("" if p["registered"] else " (recent)"),
+            ),
+            {"path": p["path"], "registered": p["registered"]},
         )
         for p in projects
     ]
@@ -4840,7 +4914,7 @@ def _draw_wip_section(title: str, headers: tuple, items: list, selected: str | N
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
     "worktree": "Enter resume · f finish · r rebase",
-    "project": "Enter start session · n new worktree",
+    "project": "Enter start session · a register · n new worktree",
 }
 
 
@@ -4924,7 +4998,15 @@ def _wip_action(key, item, home, base, session, term, *, finish_action, finish_r
     down the dashboard. Launches (start/resume) shell out into a new tmux window.
     Keys that don't apply to the selected kind are a no-op.
     """
-    if key == "a":  # add a project — a global action, independent of the selection
+    if key == "a":  # register a project in projects.json
+        # On a recent-only project (shown because a launch stamped it, but not yet a
+        # deliberate projects.json entry), `a` registers *that* one straight away —
+        # the natural "promote what I see" flow. Otherwise it prompts for a path.
+        if item is not None and item.kind == "project" and not item.payload.get("registered"):
+            try:
+                return register_project(home, str(item.payload["path"]))
+            except YoloError as e:
+                return str(e)
         return _wip_add_project(home, term)
     if item is None:
         return ""

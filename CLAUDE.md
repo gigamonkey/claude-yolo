@@ -1143,13 +1143,23 @@ gracefully outside one — there's just no repo slug to label/find by).
   you rise), **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
-  `docker ps` at the 2s cadence), and **projects** (the `projects.json` keys,
-  flagged active when a session's cwd is under one). The loop (`_wip_loop`, under
+  `docker ps` at the 2s cadence), and **projects** (`_wip_projects`: the
+  `projects.json` keys **plus** the recent-projects registry — every launch stamps
+  the project it opened (`_record_recent_project`, keyed by `_project_key`) into
+  `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
+  config entry; recent-only keys are flagged `(recent)` and dropped when their dir
+  no longer exists, registered keys always shown — each flagged active when a
+  session's cwd is under it). This registry is kept **separate from `projects.json`
+  on purpose**: `projects.json` stays a deliberate, config-only ledger (`yolo
+  config` is its only writer), so the dangling-key warning and `require-project-entry`
+  keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under
   the cbreak `_run_picker` extracted from `_ps_picker`, selection tracked by a
   stable key like the ps picker) dispatches keys (`_wip_action`): `Enter`
   switches to a session's window / resumes a worktree / starts a project session,
   `n` starts a new worktree, `b` browses a forwarded port (prompting if >1), `s`
-  stops, `f` finishes, `r` rebases, `a` registers a project, `q` quits. `f`/`r`
+  stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
+  *recent-only* project it registers **that** one straight into `projects.json`;
+  otherwise it prompts for a path), `q` quits. `f`/`r`
   are offered only on *waiting* sessions and inactive worktrees (never a `working`
   one). **Quick ops run in-process** via the cores below and surface their
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux

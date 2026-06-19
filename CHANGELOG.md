@@ -5,6 +5,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` lists projects you've opened, not just configured ones.** Every
+  launch now stamps the project it opened into a new `~/.claude-yolo/recent-projects.json`
+  registry, and the dashboard's **projects** section unions those with the
+  `projects.json` keys — so a project shows up (flagged `(recent)`) the first time
+  you run yolo there, with no `yolo config` step. Pressing `a` on a selected
+  recent-only project registers *that* one into `projects.json` directly. The
+  registry is deliberately separate from `projects.json`, which stays a
+  config-only ledger so its dangling-key warning and `require-project-entry`
+  guardrail keep their meaning.
+
 - **`yolo rebase` now reliably reads a session's idle/working state.** It already
   rebased through an idle (`waiting`) session and refused an actively `working`
   one, but it located the session-activity file from the invoking command's

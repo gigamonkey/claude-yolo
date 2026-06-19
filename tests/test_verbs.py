@@ -847,8 +847,12 @@ def test_all_only_applies_to_list(cy, run_cli, repo):
 def test_start_no_topic_runs_in_cwd(cy, run_cli, repo):
     r, home = repo
     argv = run_cli(["start"], home=home, cwd=r)
-    # No worktree was created; the container runs in (and is named for) the cwd.
-    assert not (home / ".claude-yolo").exists()
+    # No worktree was created; the container runs in (and is named for) the cwd. The
+    # launch stamps the recent-projects registry (so `wip` can list it) but never
+    # touches the deliberate config ledgers projects.json / worktrees.json.
+    assert (home / ".claude-yolo" / "recent-projects.json").exists()
+    assert not (home / ".claude-yolo" / "projects.json").exists()
+    assert not (home / ".claude-yolo" / "worktrees.json").exists()
     assert worktree_label(argv) is None
     cmd = claude_command(cy, argv)
     assert "--name" not in cmd  # a plain cwd session is unnamed
