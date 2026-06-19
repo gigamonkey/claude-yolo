@@ -327,19 +327,15 @@ yolo start fix-auth --tmux        # so does this one, alongside it
 yolo config --global --tmux       # make tmux mode the default everywhere
 yolo ps                           # list running yolo containers, across all repos
 yolo ps --watch                   # ...refreshing every 2 seconds
+yolo wip                          # open the dashboard for managing everything
 ```
 
 What `--tmux` does on each launch:
 
 - Makes sure the shared tmux session exists, creating it detached if not. A
-  fresh session gets a **dashboard** as window 0: `yolo ps --watch`, a live
-  table of every running yolo container (NAME / TOPIC / DIRECTORY / PORTS / UP /
-  STATE) across all repos. The dashboard is also a **picker**: `j`/`k` or the arrow keys move
-  the highlight, Enter switches to that session's window, `q` quits. A
-  container with no tmux window to switch to (started outside tmux mode) is
-  marked with `*`. (`ps` is an ordinary verb — useful on its own; run
-  interactively inside tmux it's the picker, anywhere else `--watch` is just a
-  self-refreshing table.)
+  fresh session gets the **`wip` dashboard** as window 0 (see [The `wip`
+  dashboard](#the-wip-dashboard) below) — your home base for switching between,
+  launching, and tidying up sessions.
 - Opens a new window named after the container, running the same `docker run`
   the default mode would have exec'd. The window closes when Claude exits; a
   window whose command *fails* sticks around showing the error until you press
@@ -376,6 +372,49 @@ token verbs, and interactive credential prompts) stays in the terminal you ran
 entry can group sessions per project instead. tmux mode needs `tmux` installed
 on the host (`brew install tmux`); `--no-tmux` overrides a config-file default
 for one run.
+
+### The `wip` dashboard
+
+`yolo wip` opens a full-screen, tmux-resident dashboard for managing *everything*
+yolo — it's the window-0 dashboard a `--tmux` session opens onto, and you can jump
+to it any time with `yolo wip` (it ensures the shared session exists and focuses
+the dashboard window). It refreshes every 2 seconds like `ps --watch`, in three
+sections:
+
+- **Running sessions** — every running yolo container across all repos (a superset
+  of `ps --watch`), grouped so the ones most likely to need you rise to the top:
+  **waiting** sessions first (longest-idle first), then **working** ones
+  (longest-working first), then anything whose state is unknown (a `yolo shell`, or
+  a session that hasn't taken a turn).
+- **Inactive worktrees** — every worktree under `~/.claude-yolo/worktrees` that
+  *isn't* currently running (a la `yolo list --all`), ready to resume.
+- **Projects** — the directories registered in `projects.json`, where you can start
+  fresh work.
+
+Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
+the selected row:
+
+| Key     | On…                              | Does |
+|---------|----------------------------------|------|
+| `Enter` | a running session                | switch to its tmux window |
+| `Enter` | an inactive worktree             | resume it in a new window |
+| `Enter` | a project                        | start a session there (no worktree) |
+| `n`     | a project                        | prompt for a topic, start a new worktree |
+| `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
+| `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
+| `f`     | an inactive worktree / idle session | finish it (stops an idle session first, then removes the worktree) |
+| `r`     | an inactive worktree / idle session | rebase its branch onto `--base` |
+| `a`     | anything                         | register a new project (prompts for a path) |
+| `q`     | anything                         | quit the dashboard |
+
+`f` and `r` are offered only on idle (`waiting`) sessions and inactive worktrees,
+never on an actively `working` one — the same not-interrupt-active-work stance
+`yolo stop`/`yolo rebase` take (stop a working session with `s` first). Stops,
+finishes, rebases, and project registration happen **in place** (their result, or
+any error, shows in the footer); starting and resuming a session **shell out** into
+a new tmux window, where a fresh `yolo` resolves that project's own config.
+Requires tmux. (`wip` replaced the old `ps --watch` dashboard, of which it's a
+superset; `ps`/`ps --watch` remain as standalone verbs, handy outside tmux.)
 
 ## Authentication modes
 

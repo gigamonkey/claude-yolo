@@ -13,6 +13,20 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `--force`. It now reads the state through the container's own labels — the same
   way `stop` and `finish` do — so the config dir no longer matters.
 
+- **`yolo wip` — a tmux dashboard for managing everything yolo.** A full-screen,
+  tmux-resident dashboard in three sections: **running sessions** (a superset of
+  `ps --watch`, grouped waiting-then-working with the longest-idle first),
+  **inactive worktrees** (a la `list --all`, ready to resume), and the
+  **projects** registered in `projects.json`. Navigate with `j`/`k`/arrows;
+  `Enter` switches to a running session's window, resumes an inactive worktree, or
+  starts a session in a project; `n` starts a new worktree in a project; `b`
+  browses a session's forwarded port; `s` stops a session; `f` finishes; `r`
+  rebases; `a` registers a new project; `q` quits. It refreshes every 2s like `ps
+  --watch`. `wip` is now the window-0 dashboard the shared `--tmux` session opens
+  onto (it replaces the old `ps --watch` seed; `ps`/`ps --watch` remain standalone
+  verbs). Quick actions run in-process and surface results/errors in the footer;
+  launches shell out into a fresh tmux window. Requires tmux.
+
 - **`yolo finish` stops an idle session for you.** It used to refuse outright if a
   container was still running for the worktree; now it stops the session first —
   exactly as `yolo stop` would — so a quiescent session can be closed, its branch

@@ -73,7 +73,8 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py list --all               # every repo's worktrees under ~/.claude-yolo/worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
-./yolo.py ps --watch               # ...refreshing every 2s (the tmux dashboard)
+./yolo.py ps --watch               # ...refreshing every 2s (the ps picker)
+./yolo.py wip                      # the dashboard: manage every session/worktree/project
 ./yolo.py --tmux                   # spawn the session as a tmux window instead
 ./yolo.py --version                # print the version and exit
 ```
@@ -83,7 +84,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`list`/`ps`/`dir`/
+(`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`list`/`ps`/`wip`/`dir`/
 `dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
 `secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
 trailing positional); see [Workflow verbs](#workflow-verbs).
@@ -1124,12 +1125,38 @@ gracefully outside one — there's just no repo slug to label/find by).
   `waiting <age>` (since the `Stop` hook fired), or `-` (no file / older
   container). Both render via `_humanize_secs`. The config dir comes from the
   `yolo.config-dir` label (falls back to `~/.claude`); no extra docker calls.
-  `--watch` redraws every `PS_WATCH_INTERVAL` (2s) — that's
-  the dashboard tmux mode seeds (see below), but it's an ordinary verb usable
-  anywhere. Run interactively *inside tmux* (stdin a TTY + `$TMUX` set),
+  `--watch` redraws every `PS_WATCH_INTERVAL` (2s). It's an ordinary verb usable
+  anywhere; run interactively *inside tmux* (stdin a TTY + `$TMUX` set),
   `--watch` is a **picker**: j/k/arrows move, Enter `select-window`s to the
   chosen container's window, q/ESC quits; otherwise it falls back to the
-  passive redraw loop.
+  passive redraw loop. (The tmux dashboard window is now `wip`, not `ps --watch`
+  — see below.)
+- **`wip`** — a tmux-resident **dashboard** for managing everything yolo, a
+  superset of the `ps --watch` picker and the window-0 dashboard `--tmux`
+  sessions now seed (`_ensure_tmux_session` runs `yolo wip --_dashboard`, the
+  hidden flag that means "run the loop", vs a user-typed `yolo wip` that
+  bootstraps the session + focuses the dashboard window via `_focus_tmux_window`,
+  the shared focus helper extracted from `_launch_in_tmux`). Requires tmux.
+  Three sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
+  `docker ps` carrying the cid + labels, ordered by `_order_sessions`:
+  waiting→working→unknown, longest-first within each, so the most-likely-to-need-
+  you rise), **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
+  filtered to those whose worktree path isn't in the running set — the running
+  ones already show as sessions; passing `running_paths` avoids a per-worktree
+  `docker ps` at the 2s cadence), and **projects** (the `projects.json` keys,
+  flagged active when a session's cwd is under one). The loop (`_wip_loop`, under
+  the cbreak `_run_picker` extracted from `_ps_picker`, selection tracked by a
+  stable key like the ps picker) dispatches keys (`_wip_action`): `Enter`
+  switches to a session's window / resumes a worktree / starts a project session,
+  `n` starts a new worktree, `b` browses a forwarded port (prompting if >1), `s`
+  stops, `f` finishes, `r` rebases, `a` registers a project, `q` quits. `f`/`r`
+  are offered only on *waiting* sessions and inactive worktrees (never a `working`
+  one). **Quick ops run in-process** via the cores below and surface their
+  result/`YoloError` in the footer; **launches shell out** into a fresh tmux
+  window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
+  `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
+  config and execs docker straight into the window). The `--_dashboard` loop only
+  activates with a TTY + `$TMUX`; otherwise it degrades to `_ps_watch_passive`.
 - **`browse [TOPIC]`** — open the host browser at a running session's forwarded
   port (`do_browse`): find the container by the same label query `shell` uses
   (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
@@ -1153,6 +1180,21 @@ gracefully outside one — there's just no repo slug to label/find by).
 
 Implementation shape:
 
+- **Operational cores raise `YoloError`, not `sys.exit`** — so the `wip`
+  dashboard can call them in-process without the process dying under it.
+  `main()` is a thin wrapper that runs `_main()` and translates a `YoloError`
+  back to `sys.exit(str(e))`, so the CLI behaves exactly as before. The
+  cwd-coupled verbs were split into a context-explicit **core** + a thin
+  cwd-resolving **wrapper**: `stop_session` (from `_stop_container`),
+  `finish_worktree` (from `do_finish`; all git runs against an explicit
+  `main_root` via `-C`, and the finish helpers `_finish_merge`/`_finish_push`/
+  `_branch_status_note`/`_current_branch` likewise take a `repo`), `rebase_worktree`
+  (from `do_rebase`; the session-activity guard stays in the wrapper, the dirty/
+  base-resolve/rebase moves to the core, which can `capture` git's output for the
+  dashboard's frame), `browse_session` (from `do_browse`; `_docker_port` now also
+  raises `YoloError`), and `register_project` (from `config --init`). The cores
+  **return** their result string rather than printing, so the wrapper prints it
+  (CLI) and the dashboard shows it in the footer.
 - **Dispatch is two-tier** (`main`). `config` runs off the *first* `parse_args`,
   before the config files are layered in, so a broken config can't block fixing
   the config (and its sentinel re-parse needs pristine parser defaults).
@@ -1163,7 +1205,7 @@ Implementation shape:
   `config` — before that re-parse — since they need no yolo config at all; `dir`
   in particular keeps its stdout free of the config
   provenance note). The other
-  terminal verbs (`list`, `ps`, `tokens`, `forget-token`, `finish`, `rebase`,
+  terminal verbs (`list`, `ps`, `wip`, `tokens`, `forget-token`, `finish`, `rebase`,
   `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
@@ -1275,11 +1317,13 @@ The mechanics, all funneled through two functions:
   running are exempt: `shell` *wants* to attach to a running container, handled by
   the `docker exec` path in `main` before this is reached.)
 - **`_launch_in_tmux`** ensures the session exists (`_ensure_tmux_session` —
-  a fresh one is created detached with window 0 running the `yolo ps --watch`
-  dashboard, re-invoked via `_self_invocation`: sys.argv[0] resolved through
+  a fresh one is created detached with window 0 running the `yolo wip
+  --_dashboard` dashboard, re-invoked via `_self_invocation`: sys.argv[0]
+  resolved through
   `which()` and absolutized, since the tmux server's PATH/cwd differ), creates
   the window (`new-window -n <container-name> -P -F '#{window_id}'`), then
-  focuses it — inside tmux (`$TMUX` set) by `select-window` + `switch-client`
+  focuses it (via `_focus_tmux_window`) — inside tmux (`$TMUX` set) by
+  `select-window` + `switch-client`
   on the current client; outside by exec'ing into `tmux select-window \;
   attach-session`, so the invoking terminal becomes the tmux client. The
   outside case has one guard: if the session **already has a client attached**
@@ -1575,7 +1619,18 @@ terminal-title options set only on a yolo-created session, and the pinned
 window names), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection
-surviving a refresh, orphan marking, the picker-vs-passive dispatch).
+surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
+`wip --_dashboard` seed of window 0 is asserted here too.
+`test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
+grouping/sorting, `_wip_items` splitting a running worktree into the sessions
+section vs the inactive list against a real repo, `_wip_projects`' active flag)
+and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
+`_draw_wip` and the action cores stubbed (navigation across sections, refresh
+preserving selection by key, Enter→switch/resume/start, `b` browse incl. the
+multi-port prompt, `s` stop with the working-session force + confirm/cancel,
+`f`/`r` on worktrees and idle sessions, a raised `YoloError` landing in the
+footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
+(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback).
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
 assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker

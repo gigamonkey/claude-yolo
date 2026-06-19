@@ -5,6 +5,7 @@
 # ///
 
 import argparse
+import collections
 import datetime
 import getpass
 import hashlib
@@ -27,6 +28,19 @@ import webbrowser
 # that simply importing yolo — for `--version`, the console-script entry point, or
 # the cross-platform launch paths — works on Windows, where those modules don't
 # exist. See generate_oauth_token and _ps_picker.
+
+
+class YoloError(Exception):
+    """A user-facing operational failure that should end the CLI with its message.
+
+    The operational *cores* (stop_session, finish_worktree, rebase_worktree,
+    browse_session, …) raise this instead of calling sys.exit, so they're reusable
+    from contexts that must not exit the process — chiefly the `wip` dashboard,
+    which catches it and shows the message in its footer rather than dying. The CLI
+    entry point (main) catches it at the top and translates it to sys.exit, so the
+    command-line behavior is unchanged.
+    """
+
 
 # --- Host platform ---------------------------------------------------------------
 #
@@ -2171,6 +2185,23 @@ def _effective_config(
     return items, matched_key
 
 
+def register_project(home: pathlib.Path, project_key: str) -> str:
+    """Register `project_key` in projects.json with an empty entry; return a message.
+
+    The in-process core behind `config --init` and the dashboard's add-project
+    (`a`) action — "yolo knows about this project", no overrides. Raises
+    `YoloError` if an entry for the key already exists.
+    """
+    projects_file = home / ".claude-yolo" / "projects.json"
+    projects = _read_projects_file(projects_file)
+    if project_key in projects:
+        raise YoloError(f"{project_key} already has a projects.json entry.")
+    projects[project_key] = {}
+    projects_file.parent.mkdir(parents=True, exist_ok=True)
+    projects_file.write_text(json.dumps(projects, indent=2) + "\n")
+    return f"Registered {project_key} (no overrides)."
+
+
 def do_config(
     script_argv: list[str], home: pathlib.Path, cwd: pathlib.Path, parsed, topic: str | None = None
 ) -> None:
@@ -2234,9 +2265,7 @@ def do_config(
                 f"when running under {key}.",
                 file=sys.stderr,
             )
-        projects[key] = {}
-        projects_file.parent.mkdir(parents=True, exist_ok=True)
-        projects_file.write_text(json.dumps(projects, indent=2) + "\n")
+        register_project(home, key)
         print(f"Registered {key} in {projects_file} (no overrides).")
         return
 
@@ -2422,6 +2451,7 @@ PARSER.add_argument(
         "rebase",
         "list",
         "ps",
+        "wip",
         "dir",
         "dockerfile",
         "setup-token",
@@ -2439,7 +2469,9 @@ PARSER.add_argument(
     "worktree and requires a TOPIC; 'rebase' rebases a worktree's branch onto "
     "--base (default HEAD), replaying it on top of commits landed on the base "
     "since it branched (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
-    "all running yolo containers across repos (see --watch); 'dir' prints a "
+    "all running yolo containers across repos (see --watch); 'wip' opens a "
+    "tmux dashboard for managing everything — running sessions, inactive "
+    "worktrees, and projects — with launch/stop/finish/rebase/browse actions; 'dir' prints a "
     "session's directory (a worktree's root with a TOPIC, else the current "
     "directory) for `cd $(yolo dir TOPIC)`; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
@@ -2685,6 +2717,15 @@ PARSER.add_argument(
     dest="all_repos",
     help="For `list`: show worktrees across all repos under ~/.claude-yolo/worktrees "
     "(with a leading REPO column), not just the current repo's.",
+)
+PARSER.add_argument(
+    # Internal: marks the `yolo wip` invocation that runs *as* the dashboard window
+    # (the loop), vs. a user-typed `yolo wip` that bootstraps + attaches. Seeded by
+    # _ensure_tmux_session; not for direct use, so hidden from --help.
+    "--_dashboard",
+    dest="wip_dashboard",
+    action="store_true",
+    help=argparse.SUPPRESS,
 )
 PARSER.add_argument(
     "--ssh-agent",
@@ -3061,7 +3102,7 @@ def _ps1_env_args(cwd: pathlib.Path, worktree_name: str | None) -> list[str]:
     return [*extra, "-e", f"YOLO_PS1={tag}{blue}{where}{reset}\\$ "]
 
 
-TMUX_DASHBOARD_WINDOW = "yolo-ps"
+TMUX_DASHBOARD_WINDOW = "yolo-wip"
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -3132,15 +3173,16 @@ def _session_has_client(session: str) -> bool:
 def _ensure_tmux_session(session: str) -> None:
     """Make sure the shared tmux session exists, creating it detached if not.
 
-    A fresh session gets the dashboard as window 0: `yolo ps --watch`, re-invoked
-    via the absolute path we were launched from (a bare `yolo` may not be on the
-    tmux server's PATH). The dashboard gets the same keep-open-on-failure wrapper
-    as the container windows — which also keeps a bad self-invocation from
-    killing the just-created session before the real window is added.
+    A fresh session gets the `wip` dashboard as window 0 (`yolo wip --_dashboard`),
+    re-invoked via the absolute path we were launched from (a bare `yolo` may not
+    be on the tmux server's PATH). The dashboard gets the same keep-open-on-failure
+    wrapper as the container windows — which also keeps a bad self-invocation from
+    killing the just-created session before the real window is added. (`wip`
+    superseded the old `ps --watch` dashboard, of which it's a superset.)
     """
     if _tmux("has-session", "-t", f"={session}").returncode == 0:
         return
-    dashboard = _tmux_window_command([_self_invocation(), "ps", "--watch"])
+    dashboard = _tmux_window_command([_self_invocation(), "wip", "--_dashboard"])
     res = _tmux("new-session", "-d", "-s", session, "-n", TMUX_DASHBOARD_WINDOW, dashboard)
     if res.returncode != 0:
         sys.exit(f"tmux new-session failed: {res.stderr.strip()}")
@@ -3199,44 +3241,87 @@ def _launch_in_tmux(
         window_id = res.stdout.strip()
         _pin_tmux_window_name(window_id)
 
-    if os.environ.get("TMUX"):
-        # Already a tmux client: re-point it at the session and window. (Window
-        # ids are server-global, so select-window works across sessions.)
-        _tmux("select-window", "-t", window_id)
-        _tmux("switch-client", "-t", f"={session}")
+    focus = _focus_tmux_window(session, window_id)
+    if focus == "switched":
         print(f"Spawned '{window_name}' in tmux session '{session}'.")
-    elif _session_has_client(session):
-        # Another terminal is already attached to this session. Attaching a
-        # second client here would make both terminals *mirror* the one session
-        # (tmux clamps every attached client to the smallest one's size and
-        # shows them the same window) — the duplicate-session-in-two-terminals
-        # surprise. Instead just point the already-attached client at the new
-        # window; the session shows up over there, and this terminal stays a
-        # normal shell.
-        _tmux("select-window", "-t", window_id)
+    elif focus == "attached-elsewhere":
         print(
             f"Spawned '{window_name}' in tmux session '{session}', which is "
             "already attached in another terminal — switched that terminal to "
             "the new window."
         )
-    else:
-        # No client yet: become the tmux client, focused on the new window.
-        # select-window runs first (it works detached — it just moves the
-        # session's current-window pointer); the ";" argument is tmux's command
-        # separator, not shell syntax — there's no shell here, this is an exec.
-        os.execvp(
-            "tmux",
-            [
-                "tmux",
-                "select-window",
-                "-t",
-                window_id,
-                ";",
-                "attach-session",
-                "-t",
-                f"={session}",
-            ],
-        )
+
+
+def _focus_tmux_window(session: str, window_id: str) -> str:
+    """Point a tmux client at `window_id`; return how we did it.
+
+    Inside tmux (this session or another) the current client is switched over
+    ("switched"). Outside, the invoking terminal execs into `tmux attach` to become
+    the client — *unless* the session already has a client elsewhere, in which case
+    we don't attach a second (mirroring) client but just select the window there
+    ("attached-elsewhere") and leave this terminal a normal shell. The attach case
+    replaces the process (execvp) and so never returns. Shared by `_launch_in_tmux`,
+    `_spawn_session_window`, and the `wip` bootstrap.
+    """
+    if os.environ.get("TMUX"):
+        # Already a tmux client: re-point it at the session and window. (Window
+        # ids are server-global, so select-window works across sessions.)
+        _tmux("select-window", "-t", window_id)
+        _tmux("switch-client", "-t", f"={session}")
+        return "switched"
+    if _session_has_client(session):
+        # Another terminal is already attached to this session. Attaching a second
+        # client here would make both terminals *mirror* the one session (tmux
+        # clamps every attached client to the smallest one's size and shows them
+        # the same window). Instead just point the already-attached client at the
+        # window; this terminal stays a normal shell.
+        _tmux("select-window", "-t", window_id)
+        return "attached-elsewhere"
+    # No client yet: become the tmux client, focused on the window. select-window
+    # runs first (it works detached — it just moves the session's current-window
+    # pointer); the ";" argument is tmux's command separator, not shell syntax —
+    # there's no shell here, this is an exec.
+    os.execvp(
+        "tmux",
+        ["tmux", "select-window", "-t", window_id, ";", "attach-session", "-t", f"={session}"],
+    )
+    return "attached"  # unreachable on a successful exec; for the stubbed test seam
+
+
+def _spawn_session_window(
+    repo_dir: pathlib.Path, argv_tail: list, window_name: str, session: str
+) -> str:
+    """Open a tmux window that runs a fresh `yolo` invocation, and focus it.
+
+    The dashboard's launch path: a session is always a long-lived process in its
+    own window, so rather than re-assemble a docker command in-process for a
+    foreign repo (threading a synthesized cwd through the whole launch pipeline),
+    we spawn `yolo <argv_tail>` (via _self_invocation) with the window's working
+    directory set to `repo_dir` (`new-window -c`) so the spawned yolo resolves its
+    own config there. `--no-tmux` is part of `argv_tail` so the inner yolo execs
+    docker straight into this window instead of opening yet another one. Returns
+    the new window id; raises `YoloError` if tmux can't create it.
+    """
+    cmd = _tmux_window_command([_self_invocation(), *argv_tail])
+    res = _tmux(
+        "new-window",
+        "-t",
+        f"={session}:",
+        "-c",
+        str(repo_dir),
+        "-n",
+        window_name,
+        "-P",
+        "-F",
+        "#{window_id}",
+        cmd,
+    )
+    if res.returncode != 0:
+        raise YoloError(f"tmux new-window failed: {res.stderr.strip()}")
+    window_id = res.stdout.strip()
+    _pin_tmux_window_name(window_id)
+    _focus_tmux_window(session, window_id)
+    return window_id
 
 
 def _dispatch_launch(
@@ -3638,7 +3723,7 @@ def launch_container(
     )
 
 
-def _remove_worktree(worktree: pathlib.Path, topic: str, force: bool) -> None:
+def _remove_worktree(worktree: pathlib.Path, topic: str, force: bool, repo: pathlib.Path) -> None:
     """`git worktree remove` the worktree, falling back to manual removal.
 
     git unconditionally refuses to remove a worktree containing populated
@@ -3648,15 +3733,18 @@ def _remove_worktree(worktree: pathlib.Path, topic: str, force: bool) -> None:
     ourselves, then `git worktree prune` the now-stale admin entry. Our own dirty
     guard has already run (or been waived by --force), so the rm is gated. Any
     *other* git failure (e.g. a locked worktree) is surfaced verbatim, not forced.
+    `repo` is the main checkout the `git worktree` admin commands run in (`-C`), so
+    the caller need not be cd'd there (the `wip` dashboard isn't).
     """
-    remove = ["git", "worktree", "remove"] + (["--force"] if force else []) + [str(worktree)]
+    base = ["git", "-C", str(repo), "worktree"]
+    remove = base + ["remove"] + (["--force"] if force else []) + [str(worktree)]
     result = subprocess.run(remove, capture_output=True, text=True)
     if result.returncode != 0:
         if "submodule" not in result.stderr.lower():
-            sys.exit(result.stderr.strip() or f"failed to remove worktree '{topic}'.")
+            raise YoloError(result.stderr.strip() or f"failed to remove worktree '{topic}'.")
         # Submodule case: git won't, so we do it by hand.
         shutil.rmtree(worktree)
-    subprocess.run(["git", "worktree", "prune"])
+    subprocess.run(base + ["prune"])
 
 
 def do_finish(
@@ -3685,26 +3773,57 @@ def do_finish(
     - `push`: push the branch to `remote` (--finish-remote) and keep it locally.
     - `keep`: leave the branch alone.
     """
-    _, _, slug = _repo_paths()
+    _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    print(
+        finish_worktree(
+            worktree, main_root, slug, topic, home, base, force=force, action=action, remote=remote
+        )
+    )
+
+
+def finish_worktree(
+    worktree: pathlib.Path,
+    main_root: pathlib.Path,
+    slug: str,
+    topic: str,
+    home: pathlib.Path,
+    base: str,
+    *,
+    force: bool,
+    action: str = "delete-if-merged",
+    remote: str = "origin",
+) -> str:
+    """Remove `worktree` and handle its branch per `action`; return a result message.
+
+    The in-process core behind the `finish` verb and the dashboard's `f` action.
+    All git runs against the explicit `main_root` (`-C`), so the caller need not be
+    cd'd into the repo (the `wip` dashboard isn't). Raises `YoloError` on the
+    refusal/failure paths (active session, dirty tree, removal failure) instead of
+    exiting, and returns the (possibly multi-line) outcome rather than printing it,
+    so the dashboard can show it in its footer.
+    """
     if not worktree.is_dir():
-        sys.exit(f"no worktree '{topic}'; nothing to finish.")
+        raise YoloError(f"no worktree '{topic}'; nothing to finish.")
+    msgs = []
     cid = running_container_for(slug, topic)
     if cid:
         # The worktree can't be removed while a container holds its mount, so stop
         # the session first — exactly as `yolo stop` would. An idle (`waiting`)
         # session is stopped through; an actively `working` one is refused unless
         # --force (so finish can't cut off a running task).
-        _stop_container(cid, f"for '{topic}'", home, force=force)
+        msgs.append(stop_session(cid, f"for '{topic}'", home, force=force))
     dirty = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
         capture_output=True,
         text=True,
     ).stdout.strip()
     if dirty and not force:
-        sys.exit(f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force.")
+        raise YoloError(
+            f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force."
+        )
 
-    _remove_worktree(worktree, topic, force)
+    _remove_worktree(worktree, topic, force, main_root)
 
     # The worktree is gone, so its overlay config goes too (only finish removes it;
     # a manual `git worktree remove` would leave a stale entry that the next `start`
@@ -3717,90 +3836,85 @@ def do_finish(
     prefix = f"Removed worktree for '{topic}'."
 
     if action == "merge":
-        _finish_merge(topic, prefix)
-        return
-
-    if action == "push":
-        _finish_push(topic, remote, prefix)
-        return
-
-    if action == "keep":
-        print(f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic)}).")
-        return
-
+        msgs.append(_finish_merge(topic, prefix, main_root))
+    elif action == "push":
+        msgs.append(_finish_push(topic, remote, prefix, main_root))
+    elif action == "keep":
+        msgs.append(f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic, main_root)}).")
     # delete-if-merged (default): if the branch is already integrated into `base`,
     # there's nothing left to preserve — delete it. (-d is the safe form: it
     # refuses an unmerged branch, but _branch_merged has confirmed reachability.)
-    if _branch_merged(topic, base):
-        subprocess.run(["git", "branch", "-d", topic], check=True)
-        print(f"{prefix} Branch '{topic}' was merged; deleted it.")
-        return
-    print(
-        f"{prefix} Branch '{topic}' still exists and needs to be merged or pushed "
-        f"({_branch_status_note(topic)})."
-    )
+    elif _branch_merged(topic, base, main_root):
+        subprocess.run(["git", "-C", str(main_root), "branch", "-d", topic], check=True)
+        msgs.append(f"{prefix} Branch '{topic}' was merged; deleted it.")
+    else:
+        msgs.append(
+            f"{prefix} Branch '{topic}' still exists and needs to be merged or pushed "
+            f"({_branch_status_note(topic, main_root)})."
+        )
+    return "\n".join(msgs)
 
 
-def _branch_status_note(branch: str) -> str:
+def _branch_status_note(branch: str, repo: pathlib.Path) -> str:
     """A short note on where `branch` stands vs. its upstream, for finish output."""
     upstream = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
         capture_output=True,
         text=True,
     )
     if upstream.returncode != 0:
         return "local only — push it to open a PR"
     unpushed = subprocess.run(
-        ["git", "rev-list", "--count", f"{upstream.stdout.strip()}..{branch}"],
+        ["git", "-C", str(repo), "rev-list", "--count", f"{upstream.stdout.strip()}..{branch}"],
         capture_output=True,
         text=True,
     ).stdout.strip()
     return "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
 
 
-def _finish_merge(topic: str, prefix: str) -> None:
-    """Merge `topic` into the current checkout, then delete it (the `merge` action).
+def _finish_merge(topic: str, prefix: str, repo: pathlib.Path) -> str:
+    """Merge `topic` into `repo`'s checkout, then delete it (the `merge` action).
 
     On any merge failure (conflicts, dirty tree, no common history) the merge is
     aborted and the branch is kept — the worktree is already gone, but the commits
     live on in the branch, recoverable by merging or re-checking-out manually.
     """
-    merge = subprocess.run(["git", "merge", topic], capture_output=True, text=True)
+    merge = subprocess.run(["git", "-C", str(repo), "merge", topic], capture_output=True, text=True)
     if merge.returncode != 0:
-        subprocess.run(["git", "merge", "--abort"], capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True)
         detail = merge.stderr.strip() or merge.stdout.strip()
-        print(
+        return (
             f"{prefix} Merging '{topic}' failed (the branch is kept); resolve it "
             f"manually.\n{detail}"
         )
-        return
-    subprocess.run(["git", "branch", "-d", topic], check=True)
-    target = _current_branch() or "the current branch"
-    print(f"{prefix} Merged '{topic}' into {target} and deleted the branch.")
+    subprocess.run(["git", "-C", str(repo), "branch", "-d", topic], check=True)
+    target = _current_branch(repo) or "the current branch"
+    return f"{prefix} Merged '{topic}' into {target} and deleted the branch."
 
 
-def _finish_push(topic: str, remote: str, prefix: str) -> None:
+def _finish_push(topic: str, remote: str, prefix: str, repo: pathlib.Path) -> str:
     """Push `topic` to `remote` and keep it locally (the `push` action).
 
     Uses `-u` so the local branch tracks `<remote>/<topic>`: the `push` action
     exists for the open-a-PR flow, where you'll want a later bare `git push` /
     `git pull` on that branch to just work.
     """
-    push = subprocess.run(["git", "push", "-u", remote, topic], capture_output=True, text=True)
+    push = subprocess.run(
+        ["git", "-C", str(repo), "push", "-u", remote, topic], capture_output=True, text=True
+    )
     if push.returncode != 0:
         detail = push.stderr.strip() or push.stdout.strip()
-        print(
+        return (
             f"{prefix} Pushing '{topic}' to '{remote}' failed (the branch is kept "
             f"locally).\n{detail}"
         )
-        return
-    print(f"{prefix} Pushed '{topic}' to '{remote}'; the branch is kept locally.")
+    return f"{prefix} Pushed '{topic}' to '{remote}'; the branch is kept locally."
 
 
-def _current_branch() -> str | None:
-    """The current branch name of the repo at cwd, or None if detached/unknown."""
+def _current_branch(repo: pathlib.Path) -> str | None:
+    """The current branch name of `repo`, or None if detached/unknown."""
     r = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True,
         text=True,
     )
@@ -3865,10 +3979,10 @@ def do_rebase(
     clean tree regardless. A rebase that hits conflicts is left in-progress in the
     worktree for the user to resolve (`git rebase --continue`) or abort.
     """
-    _, _, slug = _repo_paths()
+    _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
-        sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+        raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
     cid = running_container_for(slug, topic)
     if cid:
         state = _container_session_state(cid, home)
@@ -3883,41 +3997,67 @@ def do_rebase(
                 if activity == "working"
                 else f"can't confirm its session is idle (state: {state})"
             )
-            sys.exit(
+            raise YoloError(
                 f"a container is running for '{topic}' and {detail}; wait for it "
                 "to finish or re-run with --force."
             )
+    # Stream git's output (capture=False) so the user sees the rebase progress.
+    print(rebase_worktree(worktree, main_root, topic, base))
+
+
+def rebase_worktree(
+    worktree: pathlib.Path,
+    main_root: pathlib.Path,
+    topic: str,
+    base: str,
+    *,
+    capture: bool = False,
+) -> str:
+    """Rebase `worktree`'s branch onto `base`; return a result message.
+
+    The in-process core behind the `rebase` verb and the dashboard's `r` action.
+    `base` is resolved to a concrete commit in `main_root` (`-C`) — so a ref like
+    HEAD means the main repo's tip, not the worktree's own branch — then `git
+    rebase` runs inside the worktree. Raises `YoloError` on a dirty tree, an
+    unresolvable base, or conflicts (leaving the rebase in-progress in the worktree
+    to resolve/abort). The session-activity guard is the *caller's* job: `do_rebase`
+    enforces it for the CLI, and the dashboard only offers `r` on idle (waiting) /
+    inactive worktrees. With `capture=True` git's output is captured (and folded
+    into the conflict error) rather than streamed — for the dashboard, which can't
+    let git scribble over its frame.
+    """
+    if not worktree.is_dir():
+        raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
     dirty = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
         capture_output=True,
         text=True,
     ).stdout.strip()
     if dirty:
-        sys.exit(
+        raise YoloError(
             f"worktree '{topic}' has uncommitted changes; commit or stash them "
             "first (git rebase requires a clean tree)."
         )
-
-    # Resolve `base` to a concrete commit in the main checkout (cwd), so a ref
-    # like HEAD means the main repo's tip rather than the worktree's own branch.
     rev = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", base],
+        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
         capture_output=True,
         text=True,
     )
     target = rev.stdout.strip()
     if rev.returncode != 0 or not target:
-        sys.exit(f"can't resolve base ref '{base}'.")
-
-    # Stream git's own output (no capture) so the user sees the rebase progress.
-    rebase = subprocess.run(["git", "-C", str(worktree), "rebase", target])
+        raise YoloError(f"can't resolve base ref '{base}'.")
+    kw = {"capture_output": True, "text": True} if capture else {}
+    rebase = subprocess.run(["git", "-C", str(worktree), "rebase", target], **kw)
     if rebase.returncode != 0:
-        sys.exit(
+        detail = ""
+        if capture:
+            detail = "\n" + (rebase.stderr.strip() or rebase.stdout.strip())
+        raise YoloError(
             f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
             f"{worktree} and run `git rebase --continue`, or `git rebase --abort` "
-            "there to back out."
+            f"there to back out.{detail}"
         )
-    print(f"Rebased '{topic}' onto '{base}'.")
+    return f"Rebased '{topic}' onto '{base}'."
 
 
 def _format_table(headers: tuple, rows: list) -> list[str]:
@@ -3987,7 +4127,7 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: 
     if not cid:
         print(f"No running yolo session {where}.")
         return
-    _stop_container(cid, where, home, force=force)
+    print(stop_session(cid, where, home, force=force))
 
 
 def _container_session_state(cid: str, home: pathlib.Path) -> str:
@@ -4006,29 +4146,32 @@ def _container_session_state(cid: str, home: pathlib.Path) -> str:
     )
 
 
-def _stop_container(cid: str, where: str, home: pathlib.Path, *, force: bool) -> None:
-    """Stop (and, since `--rm`, remove) a running yolo container.
+def stop_session(cid: str, where: str, home: pathlib.Path, *, force: bool) -> str:
+    """Stop (and, since `--rm`, remove) a running yolo container; return a message.
 
-    Shared by the `stop` and `finish` verbs. An actively **working** session is
-    refused unless `force`, so a stray stop can't cut off a running task; an idle
+    The in-process core shared by the `stop` and `finish` verbs and the `wip`
+    dashboard. An actively **working** session is refused (raises `YoloError`)
+    unless `force`, so a stray stop can't cut off a running task; an idle
     (`waiting`) session, a `yolo shell`, or a not-yet-started session (unknown
     state) all stop freely. Activity is read from the container's *own*
     `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on the caller's
     config). `where` is a human phrase for messages (e.g. "for 'fix-auth'").
+    Returns a one-line result the caller prints (CLI) or shows in the footer
+    (dashboard); raises `YoloError` on the active-work refusal or a docker failure.
     """
     state = _container_session_state(cid, home)
+    note = ""
     if state.split()[0] == "working":
         if not force:
-            sys.exit(
+            raise YoloError(
                 f"the session {where} is active ({state}); wait for it to finish, or "
                 "re-run with --force to stop it anyway."
             )
-        print(f"--force: stopping the active session {where} ({state}).")
-    print(f"Stopping the session {where} ({cid[:12]})…")
+        note = f"--force: stopping the active session {where} ({state}). "
     result = subprocess.run(["docker", "stop", cid], capture_output=True, text=True)
     if result.returncode != 0:
-        sys.exit(f"docker stop failed: {result.stderr.strip() or result.stdout.strip()}")
-    print(f"Stopped {cid[:12]}.")
+        raise YoloError(f"docker stop failed: {result.stderr.strip() or result.stdout.strip()}")
+    return f"{note}Stopped {cid[:12]}."
 
 
 def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
@@ -4048,19 +4191,30 @@ def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
     return pathlib.Path(out.stdout.strip()).parent
 
 
-def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
-    """`list` verb: show worktrees, their status, and directory.
+# One worktree's row for `list` / the `wip` dashboard. `running` is a bool;
+# `main_root` is the worktree's own main checkout (None in the single-repo `list`
+# case, where it's the cwd); `worktree`/`slug`/`topic` are what the finish/rebase
+# cores need; `topic_label` folds in a diverged branch for display.
+WorktreeRow = collections.namedtuple(
+    "WorktreeRow",
+    "repo_name topic topic_label status directory running worktree main_root slug",
+)
 
-    By default just this repo's worktrees; with `all_repos` (--all), every worktree
-    under ~/.claude-yolo/worktrees across all repos, with a leading REPO column.
 
-    The TOPIC column normally equals the branch (yolo names them alike), so the
-    branch is only shown — as `topic (branch: X)` — when the worktree has a
-    *different* branch checked out (someone switched it inside the container).
+def _worktree_rows(
+    home: pathlib.Path,
+    base: str,
+    all_repos: bool,
+    running_paths: set | None = None,
+) -> list:
+    """The worktrees under ~/.claude-yolo/worktrees as WorktreeRow records.
 
-    `merged` is judged against `base` (the same ref `start` branches off — default
-    HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
-    own main repo, since the branch/base only resolve there.
+    Shared by `do_list` and the `wip` dashboard. With `all_repos`, every repo's
+    worktrees (each judged `merged` in its *own* main repo, since the branch/base
+    only resolve there); otherwise just this repo's. `running` is normally a
+    per-worktree `running_container_for` (a docker ps each) — but a caller that
+    already has the set of running worktree paths (the dashboard, from one docker
+    ps) passes `running_paths` to avoid N docker calls at its 2s refresh.
     """
     root = home / ".claude-yolo" / "worktrees"
     if all_repos:
@@ -4073,8 +4227,7 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
     rows = []
     for slug_dir in slug_dirs:
         slug = slug_dir.name
-        topics = sorted(p for p in slug_dir.iterdir() if p.is_dir())
-        for wt in topics:
+        for wt in sorted(p for p in slug_dir.iterdir() if p.is_dir()):
             topic = wt.name
             branch = subprocess.run(
                 ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -4091,7 +4244,11 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
             # Under --all, resolve the branch in its own repo (the current dir
             # isn't it); also names the REPO column.
             repo = _worktree_main_repo(wt) if all_repos else None
-            running = running_container_for(slug, topic)
+            running = (
+                wt in running_paths
+                if running_paths is not None
+                else bool(running_container_for(slug, topic))
+            )
             flags = (["running"] if running else []) + (["dirty"] if dirty else [])
             # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
             # when it's actually a candidate to `finish`.
@@ -4105,17 +4262,51 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
             # Fold the branch into TOPIC, surfaced only when it differs (the
             # off-the-happy-path case of a branch switched inside the container).
             label = topic if branch in (topic, "") else f"{topic} (branch: {branch})"
-            repo_name = repo.name if repo else slug
-            rows.append((repo_name, label, status, directory))
+            rows.append(
+                WorktreeRow(
+                    repo_name=repo.name if repo else slug,
+                    topic=topic,
+                    topic_label=label,
+                    status=status,
+                    directory=directory,
+                    running=running,
+                    worktree=wt,
+                    main_root=repo,
+                    slug=slug,
+                )
+            )
+    return rows
 
+
+def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
+    """`list` verb: show worktrees, their status, and directory.
+
+    By default just this repo's worktrees; with `all_repos` (--all), every worktree
+    under ~/.claude-yolo/worktrees across all repos, with a leading REPO column.
+
+    The TOPIC column normally equals the branch (yolo names them alike), so the
+    branch is only shown — as `topic (branch: X)` — when the worktree has a
+    *different* branch checked out (someone switched it inside the container).
+
+    `merged` is judged against `base` (the same ref `start` branches off — default
+    HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
+    own main repo, since the branch/base only resolve there.
+    """
+    rows = _worktree_rows(home, base, all_repos)
     if not rows:
         print("No worktrees." if all_repos else "No worktrees for this repo.")
         return
 
     if all_repos:
-        _print_table(("REPO", "TOPIC", "STATUS", "DIRECTORY"), rows)
+        _print_table(
+            ("REPO", "TOPIC", "STATUS", "DIRECTORY"),
+            [(r.repo_name, r.topic_label, r.status, r.directory) for r in rows],
+        )
     else:
-        _print_table(("TOPIC", "STATUS", "DIRECTORY"), [r[1:] for r in rows])
+        _print_table(
+            ("TOPIC", "STATUS", "DIRECTORY"),
+            [(r.topic_label, r.status, r.directory) for r in rows],
+        )
 
 
 PS_WATCH_INTERVAL = 2  # seconds between `ps --watch` refreshes
@@ -4152,28 +4343,43 @@ def _humanize_secs(s: int) -> str:
     return f"{s // 86400}d"
 
 
-def _read_session_state(path: pathlib.Path, now: float) -> str:
-    """A session's activity state for the `ps` STATE column, from its status file.
+def _session_activity(path: pathlib.Path, now: float) -> tuple[str, int] | None:
+    """A session's raw activity from its status file: `(state, age_secs)` or None.
 
-    The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>",
-    rendered with the elapsed time since that transition: `waiting 5m` (since the
-    main agent last finished) or `working 12s` (since the last user prompt).
-    Anything missing or unparseable is `-`.
+    The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>".
+    `state` is "waiting" (since the main agent last finished) or "working" (since
+    the last user prompt); `age_secs` is the elapsed seconds since that transition.
+    Returns None for anything missing/unparseable or a state outside that pair —
+    the "unknown" case (`-` in the display). The raw form lets callers sort/group
+    by age (the `wip` dashboard) where _read_session_state only renders a string.
     """
     try:
         parts = path.read_text().split()
     except OSError:
-        return "-"
+        return None
     if len(parts) != 2:
-        return "-"
+        return None
     state, ts = parts
     try:
         age = max(0, int(now - int(ts)))
     except ValueError:
-        return "-"
+        return None
     if state in ("waiting", "working"):
-        return f"{state} {_humanize_secs(age)}"
-    return "-"
+        return state, age
+    return None
+
+
+def _read_session_state(path: pathlib.Path, now: float) -> str:
+    """A session's activity state for the `ps` STATE column, formatted for display.
+
+    `waiting 5m` / `working 12s`, or `-` for the unknown case — a thin formatter
+    over _session_activity (the raw core).
+    """
+    activity = _session_activity(path, now)
+    if activity is None:
+        return "-"
+    state, age = activity
+    return f"{state} {_humanize_secs(age)}"
 
 
 def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
@@ -4310,13 +4516,52 @@ def _wait_key(fd: int, timeout: float) -> str | None:
     return _read_key(fd)
 
 
-def _ps_picker(home: pathlib.Path) -> None:
-    """Interactive `ps --watch`: cbreak terminal setup around the picker loop.
+class _PickerTerm:
+    """The terminal surface a picker loop draws on: key input + cooked prompts.
 
-    Only the terminal plumbing lives here — cbreak mode (key-at-a-time, no
-    echo; ISIG stays on so Ctrl-C still works), hidden cursor, and the
-    restore-on-any-exit in the finally (without which the dashboard window's
-    shell is left wrecked). The loop itself takes an injectable key source.
+    Wraps the cbreak-mode stdin fd so the loop can read keys (`wait_key`), drop
+    briefly back to cooked mode for a line of input (`prompt_line`, used by the
+    `wip` dashboard's topic/path prompts), and ask a one-key yes/no (`confirm`).
+    A small object rather than loose functions so a test can inject a fake with
+    scripted inputs, exactly as the loops take an injectable key source.
+    """
+
+    def __init__(self, fd: int, saved):
+        self.fd = fd
+        self.saved = saved
+
+    def wait_key(self, timeout: float) -> str | None:
+        return _wait_key(self.fd, timeout)
+
+    def prompt_line(self, prompt: str) -> str:
+        """Read one cooked line (echoing, with the cursor shown), then re-cbreak."""
+        import termios
+        import tty
+
+        sys.stdout.write("\x1b[?25h")  # show the cursor for typing
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        finally:
+            tty.setcbreak(self.fd)
+            sys.stdout.write("\x1b[?25l")
+
+    def confirm(self, prompt: str) -> bool:
+        """Draw a yes/no prompt and read a single key; only y/Y is yes."""
+        sys.stdout.write("\r\x1b[K" + prompt + " [y/N] ")
+        sys.stdout.flush()
+        return _read_key(self.fd) in ("y", "Y")
+
+
+def _run_picker(body) -> None:
+    """Run a picker `body(term)` with the terminal in cbreak mode, restored after.
+
+    The shared terminal plumbing for `ps --watch` and the `wip` dashboard: cbreak
+    mode (key-at-a-time, no echo; ISIG stays on so Ctrl-C still works), a hidden
+    cursor, and the restore-on-any-exit in the finally (without which the window's
+    shell is left wrecked). `body` gets a `_PickerTerm` and runs the actual loop.
     """
     import termios
     import tty
@@ -4326,13 +4571,19 @@ def _ps_picker(home: pathlib.Path) -> None:
     tty.setcbreak(fd)
     sys.stdout.write("\x1b[?25l")  # hide the cursor; restored in the finally
     try:
-        _ps_picker_loop(home, _tmux_session_name(), lambda timeout: _wait_key(fd, timeout))
+        body(_PickerTerm(fd, saved))
     except KeyboardInterrupt:
         pass
     finally:
         sys.stdout.write("\x1b[?25h\n")
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _ps_picker(home: pathlib.Path) -> None:
+    """Interactive `ps --watch`: the ps picker loop under the shared cbreak setup."""
+    session = _tmux_session_name()
+    _run_picker(lambda term: _ps_picker_loop(home, session, term.wait_key))
 
 
 def _ps_picker_loop(home: pathlib.Path, session: str | None, wait_key) -> None:
@@ -4400,6 +4651,429 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
         print("* no tmux window (started outside tmux mode)")
 
 
+# --- wip dashboard ---------------------------------------------------------------
+#
+# `yolo wip` is a tmux-resident dashboard for managing all yolo work: running
+# sessions (a superset of `ps --watch`), inactive worktrees (a la `list --all`),
+# and the projects registered in projects.json — with in-process lifecycle actions
+# (stop/finish/rebase/browse/add-project) and shell-out launches (start/resume into
+# a new tmux window). It seeds window 0 of the shared tmux session (see
+# _ensure_tmux_session), so it's the home base the `--tmux` session opens onto.
+
+# One running session, for the dashboard. cid + labels come from a single
+# `docker ps`; state/age from the session's status file (_session_activity).
+WipSession = collections.namedtuple(
+    "WipSession", "cid name topic cwd config_dir ports created state age"
+)
+
+# One selectable dashboard row: its kind, a stable selection key (so a refresh
+# can't move the highlight to a different row), the display columns for its
+# section's table, and the payload an action needs.
+WipItem = collections.namedtuple("WipItem", "kind key cols payload")
+
+WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "STATE", "PORTS", "UP")
+WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "DIRECTORY")
+WIP_PROJECT_HEADERS = ("PROJECT",)
+
+
+def _wip_sessions(home: pathlib.Path) -> list:
+    """Every running yolo container as a WipSession, from one `docker ps`.
+
+    Like _ps_rows but also carries the container id (for stop/browse) and the raw
+    cwd label (the worktree dir for a worktree session — what correlates it to a
+    worktree row and locates its main repo). State/age are the raw _session_activity
+    pair so the dashboard can group/sort by how long each has waited or worked.
+    """
+    fmt = "\t".join(
+        (
+            "{{.ID}}",
+            "{{.Names}}",
+            '{{.Label "yolo.worktree"}}',
+            '{{.Label "yolo.cwd"}}',
+            '{{.Label "yolo.config-dir"}}',
+            "{{.Ports}}",
+            "{{.RunningFor}}",
+        )
+    )
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "--filter", "label=yolo.cwd", "--format", fmt],
+            capture_output=True,
+            text=True,
+        ).stdout
+    except FileNotFoundError:
+        sys.exit("docker not found; is it installed and on PATH?")
+    now = time.time()
+    sessions = []
+    for line in out.splitlines():
+        cid, name, topic, cwd, cfgdir, ports, up = (line.split("\t") + [""] * 7)[:7]
+        base = cfgdir or str(home / ".claude")
+        state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(cwd)}.state"
+        activity = _session_activity(state_file, now)
+        state, age = activity if activity else (None, 0)
+        sessions.append(
+            WipSession(cid, name, topic, cwd, cfgdir, _condense_ports(ports), up, state, age)
+        )
+    return sessions
+
+
+def _order_sessions(sessions: list) -> list:
+    """Group sessions waiting → working → unknown; within each, longest first.
+
+    Waiting sessions (idle the longest = readiest to pick up) lead, then working
+    (longest-working first), then the unknown/`-` ones (a `yolo shell` or a session
+    that hasn't taken a turn). Ties and the unknown group sort by name for
+    stability across refreshes.
+    """
+    waiting = sorted((s for s in sessions if s.state == "waiting"), key=lambda s: (-s.age, s.name))
+    working = sorted((s for s in sessions if s.state == "working"), key=lambda s: (-s.age, s.name))
+    unknown = sorted((s for s in sessions if s.state is None), key=lambda s: s.name)
+    return waiting + working + unknown
+
+
+def _wip_projects(home: pathlib.Path, sessions: list) -> list:
+    """The registered projects (projects.json keys), each flagged if it has a session.
+
+    Returns `[{path, active}]`. `active` is true when a running session's cwd is at
+    or under the project path — a hint that work is already happening there.
+    """
+    keys = sorted(_read_projects_file(home / ".claude-yolo" / "projects.json").keys())
+    cwds = [pathlib.Path(s.cwd) for s in sessions if s.cwd]
+    out = []
+    for k in keys:
+        kp = pathlib.Path(k)
+        active = any(c == kp or kp in c.parents for c in cwds)
+        out.append({"path": kp, "active": active})
+    return out
+
+
+def _wip_items(home: pathlib.Path, base: str) -> dict:
+    """The dashboard's three sections as ordered WipItem lists.
+
+    Sessions (ordered by _order_sessions), then inactive worktrees (the `list
+    --all` rows whose container isn't running — running ones already show as
+    sessions), then projects. One `docker ps` (via _wip_sessions) drives both the
+    sessions and the worktrees' running/inactive split (running_paths), so the
+    per-worktree docker call _worktree_rows would otherwise make is avoided at the
+    2s refresh.
+    """
+    sessions = _order_sessions(_wip_sessions(home))
+    windows = _all_tmux_windows()
+    running_paths = {pathlib.Path(s.cwd) for s in sessions if s.cwd}
+    worktrees = [
+        w
+        for w in _worktree_rows(home, base, all_repos=True, running_paths=running_paths)
+        if not w.running
+    ]
+    projects = _wip_projects(home, sessions)
+
+    session_items = []
+    for s in sessions:
+        win = windows.get(s.name)
+        is_wt = bool(s.topic)
+        cwdp = pathlib.Path(s.cwd) if s.cwd else None
+        state_disp = f"{s.state} {_humanize_secs(s.age)}" if s.state else "-"
+        payload = {
+            "cid": s.cid,
+            "name": s.name,
+            "topic": s.topic,
+            "state": s.state,
+            "window": win[0] if win else None,
+            "worktree": cwdp if is_wt else None,
+            "slug": cwdp.parent.name if is_wt and cwdp else None,
+            "main_root": _worktree_main_repo(cwdp) if is_wt and cwdp else None,
+        }
+        cols = (
+            s.name + ("" if win else " *"),
+            s.topic or "-",
+            state_disp,
+            s.ports or "-",
+            s.created,
+        )
+        session_items.append(WipItem("session", f"session:{s.name}", cols, payload))
+
+    worktree_items = [
+        WipItem(
+            "worktree",
+            f"worktree:{w.slug}:{w.topic}",
+            (w.repo_name, w.topic_label, w.status, w.directory),
+            {
+                "worktree": w.worktree,
+                "main_root": w.main_root,
+                "slug": w.slug,
+                "topic": w.topic,
+            },
+        )
+        for w in worktrees
+    ]
+
+    project_items = [
+        WipItem(
+            "project",
+            f"project:{p['path']}",
+            (str(p["path"]) + (" (active)" if p["active"] else ""),),
+            {"path": p["path"]},
+        )
+        for p in projects
+    ]
+
+    return {"session": session_items, "worktree": worktree_items, "project": project_items}
+
+
+def _draw_wip_section(title: str, headers: tuple, items: list, selected: str | None) -> None:
+    """Draw one dashboard section: a bold title, then its table (or "(none)")."""
+    print(f"\x1b[1m{title}\x1b[0m")
+    if not items:
+        print("  (none)")
+        print()
+        return
+    lines = _format_table(headers, [it.cols for it in items])
+    print("  " + lines[0])
+    for it, line in zip(items, lines[1:], strict=True):
+        if it.key == selected:
+            print(f"> \x1b[7m{line}\x1b[0m")
+        else:
+            print(f"  {line}")
+    print()
+
+
+_WIP_HINTS = {
+    "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
+    "worktree": "Enter resume · f finish · r rebase",
+    "project": "Enter start session · n new worktree",
+}
+
+
+def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
+    """One dashboard frame: the three sections plus a status/help footer."""
+    print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
+    print("\x1b[1myolo wip\x1b[0m — dashboard\n")
+    _draw_wip_section("RUNNING SESSIONS", WIP_SESSION_HEADERS, sections["session"], selected)
+    _draw_wip_section("INACTIVE WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
+    _draw_wip_section("PROJECTS", WIP_PROJECT_HEADERS, sections["project"], selected)
+    kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"updated {now} · a add-project · q quit · j/k move")
+    print(_WIP_HINTS.get(kind, "") if not footer else f"\x1b[33m{footer}\x1b[0m")
+
+
+def _wip_nav(sections: dict) -> list:
+    """The flat, ordered list of selectable items (sessions, worktrees, projects)."""
+    return sections["session"] + sections["worktree"] + sections["project"]
+
+
+def _wip_loop(home, base, session, term, *, finish_action, finish_remote) -> None:
+    """The dashboard's event loop (terminal plumbing is _run_picker's job).
+
+    `term` supplies key input and cooked prompts (a real _PickerTerm, or a fake in
+    tests). Selection is tracked by stable key, so the 2s auto-refresh — and the
+    immediate refresh after an action — never drags the highlight onto a different
+    row. `session` is the tmux session the dashboard lives in (for switch/spawn).
+    """
+    sections = _wip_items(home, base)
+    nav = _wip_nav(sections)
+    selected = nav[0].key if nav else None
+    footer = ""
+    deadline = time.monotonic() + PS_WATCH_INTERVAL
+    while True:
+        keys = [it.key for it in nav]
+        if selected not in keys:
+            selected = keys[0] if keys else None
+        _draw_wip(sections, selected, footer)
+        key = term.wait_key(max(0.0, deadline - time.monotonic()))
+        if key is None:  # refresh deadline, no keypress
+            sections = _wip_items(home, base)
+            nav = _wip_nav(sections)
+            deadline = time.monotonic() + PS_WATCH_INTERVAL
+            continue
+        footer = ""
+        if key in ("q", "\x1b"):
+            return
+        if key in ("up", "k") and selected in keys:
+            selected = keys[max(0, keys.index(selected) - 1)]
+            continue
+        if key in ("down", "j") and selected in keys:
+            selected = keys[min(len(keys) - 1, keys.index(selected) + 1)]
+            continue
+        item = next((it for it in nav if it.key == selected), None)
+        footer = (
+            _wip_action(
+                key,
+                item,
+                home,
+                base,
+                session,
+                term,
+                finish_action=finish_action,
+                finish_remote=finish_remote,
+            )
+            or ""
+        )
+        # An action may have changed the world (a stop, finish, launch): refresh now
+        # rather than waiting out the tick, so the dashboard reflects it immediately.
+        sections = _wip_items(home, base)
+        nav = _wip_nav(sections)
+        deadline = time.monotonic() + PS_WATCH_INTERVAL
+
+
+def _wip_action(key, item, home, base, session, term, *, finish_action, finish_remote) -> str:
+    """Dispatch one keypress against the selected item; return a footer message.
+
+    The mutating cores (stop/finish/rebase/browse/register) run in-process and may
+    raise YoloError — caught here and turned into a footer string instead of taking
+    down the dashboard. Launches (start/resume) shell out into a new tmux window.
+    Keys that don't apply to the selected kind are a no-op.
+    """
+    if key == "a":  # add a project — a global action, independent of the selection
+        return _wip_add_project(home, term)
+    if item is None:
+        return ""
+    kind, p = item.kind, item.payload
+    try:
+        if key in ("\r", "\n"):
+            return _wip_enter(item, session, term)
+        if key == "b" and kind == "session":
+            return _wip_browse(p, term)
+        if key == "s" and kind == "session":
+            working = p["state"] == "working"
+            label = p["topic"] or p["name"]
+            prompt = (
+                f"Session '{label}' is working — stop anyway?"
+                if working
+                else f"Stop session '{label}'?"
+            )
+            if not term.confirm(prompt):
+                return "cancelled."
+            return stop_session(p["cid"], f"for '{label}'", home, force=working)
+        if key == "f":
+            return _wip_finish(kind, p, home, base, term, finish_action, finish_remote)
+        if key == "r":
+            return _wip_rebase(kind, p, base, term)
+    except YoloError as e:
+        return str(e)
+    return ""
+
+
+def _wip_enter(item, session, term) -> str:
+    """Enter on the selected item: switch to a session, or launch a worktree/project."""
+    kind, p = item.kind, item.payload
+    if kind == "session":
+        if not p["window"]:
+            return f"{p['name']} has no tmux window (started outside tmux mode)."
+        _focus_tmux_window(session, p["window"])
+        return f"switched to {p['name']}."
+    if kind == "worktree":
+        repo = p["main_root"] or p["worktree"]
+        name = f"{pathlib.Path(repo).name}-{p['topic']}" if p["main_root"] else p["topic"]
+        _spawn_session_window(repo, ["resume", p["topic"], "--no-tmux"], name, session)
+        return f"resuming '{p['topic']}'…"
+    if kind == "project":
+        path = p["path"]
+        _spawn_session_window(path, ["start", "--no-tmux"], pathlib.Path(path).name, session)
+        return f"starting a session in {pathlib.Path(path).name}…"
+    return ""
+
+
+def _wip_browse(p, term) -> str:
+    """`b`: open a session's forwarded port, prompting to pick when there's >1."""
+    ports = _forwarded_ports(p["cid"])
+    if not ports:
+        return "no forwarded ports for this session."
+    select = None
+    if len(ports) > 1:
+        choice = term.prompt_line(f"Which port? {', '.join(str(x) for x in ports)}: ")
+        if not choice:
+            return "cancelled."
+        if not choice.isdigit() or int(choice) not in ports:
+            return f"not a forwarded port: {choice}"
+        select = int(choice)
+    return f"opened {browse_session(p['cid'], select=select)}"
+
+
+def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
+    """`f`: finish an inactive worktree, or stop-then-finish an idle (waiting) session."""
+    if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
+        if not p.get("main_root"):
+            return "couldn't resolve the worktree's main repo."
+        if not term.confirm(f"Finish '{p['topic']}' (remove worktree)?"):
+            return "cancelled."
+        return finish_worktree(
+            p["worktree"],
+            p["main_root"],
+            p["slug"],
+            p["topic"],
+            home,
+            base,
+            force=False,
+            action=finish_action,
+            remote=finish_remote,
+        )
+    return "finish applies to inactive worktrees and idle sessions."
+
+
+def _wip_rebase(kind, p, base, term) -> str:
+    """`r`: rebase an inactive worktree or an idle (waiting) session onto base."""
+    if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
+        if not p.get("main_root"):
+            return "couldn't resolve the worktree's main repo."
+        return rebase_worktree(p["worktree"], p["main_root"], p["topic"], base, capture=True)
+    return "rebase applies to inactive worktrees and idle sessions."
+
+
+def _wip_add_project(home, term) -> str:
+    """`a`: register a project. Prompts for a path; uses its git root if it has one."""
+    raw = term.prompt_line("Project path to add: ")
+    if not raw:
+        return "cancelled."
+    proj = pathlib.Path(raw).expanduser()
+    if not proj.is_dir():
+        return f"not a directory: {proj}"
+    top = subprocess.run(
+        ["git", "-C", str(proj), "rev-parse", "--show-toplevel"], capture_output=True, text=True
+    )
+    key = top.stdout.strip() if top.returncode == 0 and top.stdout.strip() else str(proj.resolve())
+    try:
+        return register_project(home, key)
+    except YoloError as e:
+        return str(e)
+
+
+def do_wip(home, base, *, dashboard, tmux_session, finish_action, finish_remote) -> None:
+    """`wip` verb: open (or run) the tmux dashboard for managing yolo work.
+
+    Two roles. As the **window-0 command** the tmux session seeds (`--_dashboard`),
+    it runs the interactive loop in cbreak mode. As a **user-typed `yolo wip`**, it
+    ensures the shared tmux session exists (seeding that dashboard window) and
+    focuses it — attaching this terminal, or switching the client if we're already
+    in tmux. Requires tmux either way.
+    """
+    if dashboard:
+        if not (sys.stdin.isatty() and os.environ.get("TMUX")):
+            # The seeded command always runs in a tmux window with a tty; this is
+            # only reached if someone runs the internal flag by hand. Degrade to the
+            # passive ps table rather than a broken cbreak loop.
+            _ps_watch_passive(home)
+            return
+        _run_picker(
+            lambda term: _wip_loop(
+                home,
+                base,
+                _tmux_session_name(),
+                term,
+                finish_action=finish_action,
+                finish_remote=finish_remote,
+            )
+        )
+        return
+    if not shutil.which("tmux"):
+        sys.exit("`yolo wip` needs tmux installed and on PATH (brew install tmux).")
+    _ensure_tmux_session(tmux_session)
+    window_id = _find_tmux_window(tmux_session, TMUX_DASHBOARD_WINDOW)
+    if not window_id:
+        sys.exit(f"couldn't find the dashboard window in tmux session '{tmux_session}'.")
+    _focus_tmux_window(tmux_session, window_id)
+
+
 def _container_label(cid: str, key: str) -> str:
     """The value of one docker label on a container, or '' if unset/unreadable."""
     res = subprocess.run(
@@ -4426,7 +5100,7 @@ def _docker_port(cid: str, container_port: int) -> int:
         host, sep, port = line.strip().rpartition(":")
         if sep and port.isdigit() and not host.startswith("["):
             return int(port)
-    sys.exit(f"docker reports no host mapping for container port {container_port}.")
+    raise YoloError(f"docker reports no host mapping for container port {container_port}.")
 
 
 def _open_url(url: str) -> None:
@@ -4470,21 +5144,44 @@ def do_browse(
         where = "this directory"
     if not cid:
         sys.exit(f"no yolo session running for {where}; start one with `yolo start`.")
+    url = browse_session(cid, select=select, open_browser=not print_only)
+    print(url)  # always, so it's copy-pasteable even when we also open it
+
+
+def _forwarded_ports(cid: str) -> list[int]:
+    """The container ports a session forwarded at launch (its `yolo.ports` label)."""
     label = _container_label(cid, "yolo.ports")
-    if not label:
-        sys.exit(
-            f"the session for {where} was launched without any forwarded ports, and "
-            "docker can't add a port mapping to a running container. Configure one "
-            "(e.g. `yolo config --add-port 8000`), exit the session, and `yolo resume`."
+    return [int(p) for p in label.split(",")] if label else []
+
+
+def browse_session(cid: str, *, select: int | None = None, open_browser: bool = True) -> str:
+    """Resolve a session's forwarded URL (and optionally open it); return the URL.
+
+    The in-process core behind the `browse` verb and the dashboard's `b` action.
+    Reads the container's `yolo.ports` label for what was forwarded at launch
+    (first = default; `select` picks another), resolves the assigned host port via
+    `docker port`, and returns `http://127.0.0.1:PORT/`. Opens it in the host
+    browser unless `open_browser` is False (the `--print`/`-n` case). Raises
+    `YoloError` when nothing was forwarded or `select` isn't among the forwarded
+    ports — so the dashboard can surface it instead of dying.
+    """
+    forwarded = _forwarded_ports(cid)
+    if not forwarded:
+        raise YoloError(
+            "the session was launched without any forwarded ports, and docker can't "
+            "add a port mapping to a running container. Configure one (e.g. "
+            "`yolo config --add-port 8000`), exit the session, and `yolo resume`."
         )
-    forwarded = [int(p) for p in label.split(",")]
     port = select if select is not None else forwarded[0]
     if port not in forwarded:
-        sys.exit(f"container port {port} isn't forwarded for this session (forwarded: {label}).")
+        joined = ",".join(str(p) for p in forwarded)
+        raise YoloError(
+            f"container port {port} isn't forwarded for this session (forwarded: {joined})."
+        )
     url = f"http://127.0.0.1:{_docker_port(cid, port)}/"
-    print(url)
-    if not print_only:
+    if open_browser:
         _open_url(url)
+    return url
 
 
 def do_dockerfile(custom: bool = False) -> None:
@@ -4587,6 +5284,20 @@ def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
 
 
 def main():
+    """CLI entry point: run the dispatcher, translating YoloError to a clean exit.
+
+    The operational cores raise YoloError rather than sys.exit so they're reusable
+    in-process (the `wip` dashboard catches it per-action). Here at the top of the
+    CLI we turn it back into the usual `sys.exit(message)` so command-line behavior
+    is identical to the pre-refactor direct sys.exit calls.
+    """
+    try:
+        _main()
+    except YoloError as e:
+        sys.exit(str(e))
+
+
+def _main():
     # Split on "--" before argparse sees argv so docker_args don't confuse it
     # docker_args come after $ARGS so last-one-wins gives user-supplied flags precedence
     if "--" in sys.argv:
@@ -4648,6 +5359,8 @@ def main():
         sys.exit("--new can't be combined with --resume/-r.")
     if parsed.force and verb not in ("finish", "rebase", "stop"):
         sys.exit("--force only applies to `finish`, `rebase`, and `stop`.")
+    if parsed.wip_dashboard and verb != "wip":
+        sys.exit("--_dashboard is internal to `wip`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
     if parsed.all_repos and verb not in ("list", "secret"):
@@ -4724,6 +5437,16 @@ def main():
         return
     if verb == "ps":
         do_ps(home, watch=parsed.watch)
+        return
+    if verb == "wip":
+        do_wip(
+            home,
+            parsed.base,
+            dashboard=parsed.wip_dashboard,
+            tmux_session=parsed.tmux_session,
+            finish_action=parsed.finish_action,
+            finish_remote=parsed.finish_remote,
+        )
         return
     if verb == "browse":
         # Selection comes from cli_ports (the pre-config parse), NOT parsed.ports:

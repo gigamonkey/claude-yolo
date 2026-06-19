@@ -279,5 +279,5 @@ def test_docker_port_no_mapping_exits(cy, monkeypatch):
         "run",
         lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", ""),
     )
-    with pytest.raises(SystemExit, match="no host mapping"):
+    with pytest.raises(cy.YoloError, match="no host mapping"):
         cy._docker_port("abc123", 8000)

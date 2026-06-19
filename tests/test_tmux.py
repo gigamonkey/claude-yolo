@@ -118,11 +118,11 @@ def test_tmux_outside_creates_session_and_attaches(cy, run_cli, tmux, dirs):
     home, work = dirs
     argv = run_cli(["--tmux"], home=home, cwd=work)
 
-    # fresh server: session created detached, window 0 = the ps --watch dashboard
+    # fresh server: session created detached, window 0 = the wip dashboard
     (new_session,) = tmux.named("new-session")
     assert new_session[1:5] == ["-d", "-s", "yolo", "-n"]
     assert new_session[5] == cy.TMUX_DASHBOARD_WINDOW
-    assert "ps --watch" in window_command(new_session)
+    assert "wip --_dashboard" in window_command(new_session)
 
     # the claude window runs the same docker run the default mode would exec,
     # shell-quoted (the --settings JSON must survive the round trip) and wrapped
