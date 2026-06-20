@@ -117,66 +117,101 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
 # --- data layer -------------------------------------------------------------
 
 
-def test_order_sessions_waiting_then_working_longest_first(cy):
-    def mk(name, state, age):
-        return cy.WipSession("c", name, "", "/c", "", "", "1m", state, age)
+def test_order_sessions_unknown_then_waiting_then_working(cy):
+    def mk(name, state, age, created_at=""):
+        return cy.WipSession("c", name, "", "/c", "", "", "1m", state, age, created_at)
 
     ordered = cy._order_sessions(
         [
             mk("w-short", "working", 5),
             mk("idle-short", "waiting", 5),
-            mk("unknown", None, 0),
+            mk("unknown-new", None, 0, "2026-06-20 10:00:00 +0000 UTC"),
+            mk("unknown-old", None, 0, "2026-06-20 09:00:00 +0000 UTC"),
             mk("idle-long", "waiting", 99),
             mk("w-long", "working", 50),
         ]
     )
     names = [s.name for s in ordered]
-    # waiting (longest first), then working (longest first), then unknown
-    assert names == ["idle-long", "idle-short", "w-long", "w-short", "unknown"]
+    # unknown (oldest-created first), then waiting (longest first), then working
+    assert names == [
+        "unknown-old",
+        "unknown-new",
+        "idle-long",
+        "idle-short",
+        "w-long",
+        "w-short",
+    ]
 
 
-def test_draw_wip_splits_waiting_working_other(cy, capsys):
-    # The sessions render as separate WAITING / WORKING / OTHER tables.
+def test_draw_wip_renders_one_sessions_table_grouped(cy, capsys):
+    # One combined SESSIONS table (no separate WAITING/WORKING/OTHER headers), with
+    # the rows in the order given (unknown → waiting → working from _order_sessions).
+    sections = {
+        "session": [
+            session_item(
+                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "1m", "-", "-")
+            ),
+            session_item(
+                cy,
+                key="session:w1",
+                payload={"state": "waiting"},
+                cols=("w1", "-", "1m", "-", "waiting 9m"),
+            ),
+            session_item(
+                cy,
+                key="session:k1",
+                payload={"state": "working"},
+                cols=("k1", "-", "1m", "-", "working 2m"),
+            ),
+        ],
+        "worktree": [],
+        "project": [],
+    }
+    cy._draw_wip(sections, "session:s1", "")
+    out = capsys.readouterr().out
+    assert "SESSIONS" in out
+    assert "WAITING SESSIONS" not in out and "WORKING SESSIONS" not in out
+    assert out.index("s1") < out.index("w1") < out.index("k1")
+
+
+def test_draw_wip_sessions_blank_line_between_groups(cy, capsys):
+    # A blank line separates each status group; none within a group.
     sections = {
         "session": [
             session_item(
                 cy,
                 key="session:w1",
                 payload={"state": "waiting"},
-                cols=("w1", "-", "waiting 9m", "-", "1m"),
+                cols=("w1", "-", "1m", "-", "waiting 9m"),
+            ),
+            session_item(
+                cy,
+                key="session:w2",
+                payload={"state": "waiting"},
+                cols=("w2", "-", "1m", "-", "waiting 2m"),
             ),
             session_item(
                 cy,
                 key="session:k1",
                 payload={"state": "working"},
-                cols=("k1", "-", "working 2m", "-", "1m"),
-            ),
-            session_item(
-                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "-", "-", "1m")
+                cols=("k1", "-", "1m", "-", "working 1m"),
             ),
         ],
         "worktree": [],
         "project": [],
     }
-    cy._draw_wip(sections, "session:w1", "")
-    out = capsys.readouterr().out
-    assert "WAITING SESSIONS" in out and "WORKING SESSIONS" in out and "OTHER SESSIONS" in out
-    # each session lands under its own section, in order
-    assert out.index("w1") < out.index("WORKING SESSIONS") < out.index("k1")
-    assert out.index("k1") < out.index("OTHER SESSIONS") < out.index("s1")
+    cy._draw_wip(sections, None, "")
+    lines = capsys.readouterr().out.splitlines()
+    w1, w2, k1 = (next(i for i, ln in enumerate(lines) if n in ln) for n in ("w1", "w2", "k1"))
+    assert "w2" in lines[w1 + 1]  # same group: adjacent, no blank line
+    assert lines[k1 - 1].strip() == ""  # different group: blank line before working
 
 
-def test_draw_wip_omits_empty_other_section(cy, capsys):
-    # No `-`-state session → no OTHER table (but WAITING/WORKING always show).
-    sections = {
-        "session": [session_item(cy, payload={"state": "waiting"})],
-        "worktree": [],
-        "project": [],
-    }
+def test_draw_wip_sessions_none_when_empty(cy, capsys):
+    sections = {"session": [], "worktree": [], "project": []}
     cy._draw_wip(sections, None, "")
     out = capsys.readouterr().out
-    assert "WAITING SESSIONS" in out and "WORKING SESSIONS" in out
-    assert "OTHER SESSIONS" not in out
+    assert "SESSIONS" in out and "(none)" in out
 
 
 def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, repo, monkeypatch):

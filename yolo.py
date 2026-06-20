@@ -4766,8 +4766,13 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
 
 # One running session, for the dashboard. cid + labels come from a single
 # `docker ps`; state/age from the session's status file (_session_activity).
+# `created` is docker's humanized RunningFor (display); `created_at` is its
+# sortable CreatedAt timestamp (oldest-first ordering of the unknown group).
+# created_at defaults to "" so older 9-arg constructions (tests) still work.
 WipSession = collections.namedtuple(
-    "WipSession", "cid name topic cwd config_dir ports created state age"
+    "WipSession",
+    "cid name topic cwd config_dir ports created state age created_at",
+    defaults=("",),
 )
 
 # One selectable dashboard row: its kind, a stable selection key (so a refresh
@@ -4797,6 +4802,7 @@ def _wip_sessions(home: pathlib.Path) -> list:
             '{{.Label "yolo.config-dir"}}',
             "{{.Ports}}",
             "{{.RunningFor}}",
+            "{{.CreatedAt}}",
         )
     )
     try:
@@ -4810,29 +4816,31 @@ def _wip_sessions(home: pathlib.Path) -> list:
     now = time.time()
     sessions = []
     for line in out.splitlines():
-        cid, name, topic, cwd, cfgdir, ports, up = (line.split("\t") + [""] * 7)[:7]
+        cid, name, topic, cwd, cfgdir, ports, up, created_at = (line.split("\t") + [""] * 8)[:8]
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(cwd)}.state"
         activity = _session_activity(state_file, now)
         state, age = activity if activity else (None, 0)
         sessions.append(
-            WipSession(cid, name, topic, cwd, cfgdir, _condense_ports(ports), up, state, age)
+            WipSession(
+                cid, name, topic, cwd, cfgdir, _condense_ports(ports), up, state, age, created_at
+            )
         )
     return sessions
 
 
 def _order_sessions(sessions: list) -> list:
-    """Group sessions waiting → working → unknown; within each, longest first.
+    """Group sessions unknown → waiting → working, each by least-recent activity.
 
-    Waiting sessions (idle the longest = readiest to pick up) lead, then working
-    (longest-working first), then the unknown/`-` ones (a `yolo shell` or a session
-    that hasn't taken a turn). Ties and the unknown group sort by name for
-    stability across refreshes.
+    The unknown/`-` ones (a `yolo shell` or a session that hasn't taken a turn)
+    lead, oldest-created first; then waiting sessions, longest-idle first; then
+    working, longest-working first. So reading top-to-bottom runs from least to
+    most recently active. Ties break by name for refresh stability.
     """
+    unknown = sorted((s for s in sessions if s.state is None), key=lambda s: (s.created_at, s.name))
     waiting = sorted((s for s in sessions if s.state == "waiting"), key=lambda s: (-s.age, s.name))
     working = sorted((s for s in sessions if s.state == "working"), key=lambda s: (-s.age, s.name))
-    unknown = sorted((s for s in sessions if s.state is None), key=lambda s: s.name)
-    return waiting + working + unknown
+    return unknown + waiting + working
 
 
 def _wip_projects(home: pathlib.Path, sessions: list) -> list:
@@ -4989,6 +4997,36 @@ def _draw_wip_section(title: str, headers: tuple, items: list, selected: str | N
     print()
 
 
+def _draw_wip_sessions(items: list, selected: str | None) -> None:
+    """Draw the running sessions as one SESSIONS table.
+
+    A single table (unlike the per-status tables of old), but with a blank line
+    between the unknown / waiting / working groups `_order_sessions` produces, so
+    the categories still read apart at a glance. Group boundaries are detected from
+    each item's `state` payload (None = unknown), with a sentinel distinct from
+    None so the leading unknown group doesn't trip the "group changed" check.
+    """
+    print("\x1b[1mSESSIONS\x1b[0m")
+    if not items:
+        print("  (none)")
+        print()
+        return
+    lines = _format_table(WIP_SESSION_HEADERS, [it.cols for it in items])
+    print("  " + lines[0])
+    unset = object()
+    prev = unset
+    for it, line in zip(items, lines[1:], strict=True):
+        group = it.payload.get("state")
+        if prev is not unset and group != prev:
+            print()  # blank line between categories
+        prev = group
+        if it.key == selected:
+            print(f"> \x1b[7m{line}\x1b[0m")
+        else:
+            print(f"  {line}")
+    print()
+
+
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
     "worktree": "Enter resume · f finish · r rebase",
@@ -4999,21 +5037,14 @@ _WIP_HINTS = {
 def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     """One dashboard frame: the sections plus a status/help footer.
 
-    The running sessions are split into WAITING and WORKING tables (each already
-    longest-first from _order_sessions), so the time each has been idle/busy reads
-    at a glance. The `-`-state sessions (a `yolo shell` or a not-yet-started one)
-    get an OTHER table, shown only when any exist so it isn't dead weight.
+    The running sessions render as one SESSIONS table, ordered unknown → waiting →
+    working by _order_sessions with a blank line between those groups (see
+    _draw_wip_sessions), so the categories read apart without three separate
+    tables. Then the inactive worktrees and projects.
     """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
     print("\x1b[1myolo wip\x1b[0m — dashboard\n")
-    sess = sections["session"]
-    waiting = [it for it in sess if it.payload.get("state") == "waiting"]
-    working = [it for it in sess if it.payload.get("state") == "working"]
-    other = [it for it in sess if it.payload.get("state") not in ("waiting", "working")]
-    _draw_wip_section("WAITING SESSIONS", WIP_SESSION_HEADERS, waiting, selected)
-    _draw_wip_section("WORKING SESSIONS", WIP_SESSION_HEADERS, working, selected)
-    if other:
-        _draw_wip_section("OTHER SESSIONS", WIP_SESSION_HEADERS, other, selected)
+    _draw_wip_sessions(sections["session"], selected)
     _draw_wip_section("INACTIVE WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
     _draw_wip_section("PROJECTS", WIP_PROJECT_HEADERS, sections["project"], selected)
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)

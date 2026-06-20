@@ -1143,11 +1143,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   the shared focus helper extracted from `_launch_in_tmux`). Requires tmux.
   Sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
   `docker ps` carrying the cid + labels, ordered by `_order_sessions`:
-  waiting→working→unknown, longest-first within each, so the most-likely-to-need-
-  you rise) — which `_draw_wip` renders as **two separate tables, WAITING and
-  WORKING** (each already longest-first, so the idle/busy duration in the STATE
-  column reads at a glance), plus an **OTHER** table for the `-`-state sessions (a
-  `yolo shell` or a not-yet-started one), shown only when any exist; then
+  unknown→waiting→working, each by *least-recent activity first* — unknown
+  oldest-created first (its sortable `CreatedAt`, carried as the WipSession
+  `created_at` field), waiting longest-idle first, working longest-working first,
+  so reading down runs from least to most recently active) — which `_draw_wip`
+  renders via `_draw_wip_sessions` as **one SESSIONS table** with a blank line
+  between the unknown / waiting / working groups (a sentinel distinct from `None`
+  spots the group boundary, since the unknown group's state *is* `None`); then
   **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
@@ -1663,8 +1665,9 @@ clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 `wip --_dashboard` seed of window 0 is asserted here too.
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
-grouping/sorting, `_draw_wip` rendering the sessions as separate WAITING/WORKING/
-OTHER tables and omitting OTHER when empty, `_wip_items` splitting a running
+unknown→waiting→working grouping with unknown sorted oldest-`created_at`-first,
+`_draw_wip` rendering the sessions as one SESSIONS table with a blank line between
+status groups and `(none)` when empty, `_wip_items` splitting a running
 worktree into the sessions section vs the inactive list against a real repo,
 the `_worktree_rows` COMMITS counts (`_branch_ahead_behind` against a real
 repo with commits added on the branch and the base) and that column rendering in

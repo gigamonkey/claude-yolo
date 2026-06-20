@@ -22,13 +22,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   there is one, fresh otherwise), and its `n` key prompt for a topic and start a
   **new worktree** session there.
 
-- **`yolo wip` splits running sessions into WAITING and WORKING tables.** Instead
-  of one combined "RUNNING SESSIONS" list, the dashboard now shows waiting sessions
-  (sorted longest-idle first) and working sessions (sorted longest-busy first) as
-  separate sections, so the time each has been idle or busy reads at a glance — the
-  `ps --watch` STATE detail, now grouped. A `-`-state session (a `yolo shell` or one
-  that hasn't taken a turn) shows in an OTHER table, only when any exist. Each table
-  reads SESSION / TOPIC / CREATED / PORTS / STATE, with the activity state last.
+- **`yolo wip` groups running sessions by status in one table.** The SESSIONS
+  table is ordered unknown → waiting → working — a blank line between the groups —
+  with each group sorted by least-recent activity first: unknown (a `yolo shell` or
+  a session that hasn't taken a turn) oldest-created first, waiting longest-idle
+  first, working longest-working first. So reading down runs from least to most
+  recently active. Columns are SESSION / TOPIC / CREATED / PORTS / STATE, with the
+  activity state last.
 
 - **`yolo wip` lists projects you've opened, not just configured ones.** Every
   launch now stamps the project it opened into a new `~/.claude-yolo/recent-projects.json`
