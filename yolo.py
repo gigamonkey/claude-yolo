@@ -4670,6 +4670,22 @@ def _complete_dir(text, state):
     return matches[state] if state < len(matches) else None
 
 
+def _enable_dir_completion(readline) -> None:
+    """Point `readline` at `_complete_dir` and bind Tab to completion.
+
+    Binds Tab on **both** GNU readline (`tab: complete`) and libedit
+    (`bind ^I rl_complete`) — their bind syntaxes differ, and the usual
+    `"libedit" in readline.__doc__` sniff is unreliable (it's False on the non-Apple
+    libedit builds uv's Python links, so Tab silently self-inserts there). Each
+    backend ignores the other's syntax with no error or stderr noise, so binding
+    both is robust without having to detect which backend is in play.
+    """
+    readline.set_completer(_complete_dir)
+    readline.set_completer_delims(" \t\n")  # the whole path is one token, not split on /
+    readline.parse_and_bind("tab: complete")  # GNU readline
+    readline.parse_and_bind("bind ^I rl_complete")  # libedit
+
+
 class _PickerTerm:
     """The terminal surface a picker loop draws on: key input + cooked prompts.
 
@@ -4723,12 +4739,7 @@ class _PickerTerm:
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
         old_completer = readline.get_completer()
         old_delims = readline.get_completer_delims()
-        readline.set_completer(_complete_dir)
-        readline.set_completer_delims(" \t\n")  # the whole path is one token, not split on /
-        # macOS ships libedit under the readline name, which binds Tab differently.
-        readline.parse_and_bind(
-            "bind ^I rl_complete" if "libedit" in (readline.__doc__ or "") else "tab: complete"
-        )
+        _enable_dir_completion(readline)
         try:
             return input(prompt).strip()
         except (EOFError, KeyboardInterrupt):

@@ -746,6 +746,30 @@ def test_complete_dir_expands_tilde(cy, tmp_path, monkeypatch):
     assert cy._complete_dir("~/p", 0) == f"{tmp_path / 'proj'}/"  # ~ understood like a shell
 
 
+def test_enable_dir_completion_binds_tab_for_both_backends(cy):
+    # Tab must be bound for GNU readline *and* libedit (uv's macOS Python links
+    # libedit, where the GNU `tab: complete` syntax is a silent no-op).
+    class FakeReadline:
+        def __init__(self):
+            self.binds = []
+            self.completer = self.delims = None
+
+        def set_completer(self, fn):
+            self.completer = fn
+
+        def set_completer_delims(self, d):
+            self.delims = d
+
+        def parse_and_bind(self, s):
+            self.binds.append(s)
+
+    rl = FakeReadline()
+    cy._enable_dir_completion(rl)
+    assert rl.completer is cy._complete_dir
+    assert "tab: complete" in rl.binds  # GNU readline
+    assert "bind ^I rl_complete" in rl.binds  # libedit
+
+
 def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
     # The PROJECTS section always ends with a `+` row (open a session in any dir).
     r, home = repo
