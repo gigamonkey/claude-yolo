@@ -4055,40 +4055,65 @@ def do_rebase(
 ) -> None:
     """`rebase` verb: rebase a worktree's branch onto `base` (e.g. main's new work).
 
-    Resolves `base` (default HEAD) to a commit in the *main* checkout — run from
-    the current dir, so HEAD means the main repo's tip, not the worktree's own
-    branch — then runs `git rebase` inside the worktree onto that commit. So
-    commits landed on the base since the worktree branched are replayed under the
-    worktree's work, exactly like `git rebase main` from the branch.
-
-    Unlike `finish` (which removes the worktree and so can't tolerate a live
-    container at all), rebase only rewrites commits in a worktree that stays put,
-    so a running container isn't a hard blocker — only an *active* session is. So
-    when a container is running, we consult the session-activity state file the
-    hooks write (the same one `stop`/`finish`/`ps` read, via the container's own
-    labels): a `waiting` session (idle at a prompt) is rebased through; a
-    `working` one — or an unknown state (`-`: a `yolo shell`, which has no hooks,
-    or a session that hasn't taken a turn yet) — is refused unless `--force`.
-    The only residual race (the user prompting the session in
-    the instant between our check and the rebase) needs them driving the same
-    session from two places at once, so in practice it's a non-issue.
-
-    A dirty worktree is always refused (no `--force` bypass): `git rebase` needs a
-    clean tree regardless. A rebase that hits conflicts is left in-progress in the
-    worktree for the user to resolve (`git rebase --continue`) or abort.
+    A thin wrapper over `rebase_worktree`, which owns the dirty-tree and
+    session-activity guards for both the CLI and the dashboard (like
+    `finish_worktree`). Resolves the worktree path in this repo, then prints the
+    core's result; streaming git output (capture=False) goes straight to the
+    terminal, with the session note + outcome printed after.
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    print(rebase_worktree(worktree, main_root, slug, topic, home, base, force=force))
+
+
+def rebase_worktree(
+    worktree: pathlib.Path,
+    main_root: pathlib.Path,
+    slug: str,
+    topic: str,
+    home: pathlib.Path,
+    base: str,
+    *,
+    force: bool = False,
+    capture: bool = False,
+) -> str:
+    """Rebase `worktree`'s branch onto `base`; return a result message.
+
+    The in-process core behind the `rebase` verb and the dashboard's `r` action,
+    owning the same guards for both callers (like `finish_worktree`). `base` is
+    resolved to a concrete commit in `main_root` (`-C`) — so a ref like HEAD means
+    the main repo's tip, not the worktree's own branch — then `git rebase` runs
+    inside the worktree, replaying the worktree's commits onto the base's new work.
+
+    Session-activity guard: unlike `finish` (which removes the worktree and so must
+    free a live container's mount), rebase only rewrites commits in a worktree that
+    stays put, so a running container isn't a hard blocker — only an *active*
+    session is. When a container is running we read the session-activity state file
+    the hooks write (via the container's own labels, the same source
+    `stop`/`finish` use): a `waiting` session (idle at a prompt) is rebased through;
+    a `working` one — or an unknown state (`-`: a `yolo shell`, no hooks, or a
+    session yet to take a turn) — is refused unless `force`. The one residual race
+    (a prompt landing between the check and the rebase) needs the user driving the
+    session from two places at once, so in practice it's a non-issue.
+
+    A dirty worktree is always refused (no `force` bypass): `git rebase` needs a
+    clean tree regardless. Raises `YoloError` on those refusals, an unresolvable
+    base, or conflicts (leaving the rebase in-progress to resolve/abort). With
+    `capture=True` git's output is captured (and folded into the conflict error)
+    rather than streamed — for the dashboard, which can't let git scribble over its
+    frame.
+    """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+    msgs = []
     cid = running_container_for(slug, topic)
     if cid:
         state = _container_session_state(cid, home)
         activity = state.split()[0]  # "waiting" | "working" | "-"
         if activity == "waiting":
-            print(f"Session for '{topic}' is idle ({state}); rebasing.")
+            msgs.append(f"Session for '{topic}' is idle ({state}); rebasing.")
         elif force:
-            print(f"--force: rebasing '{topic}' despite a running container ({state}).")
+            msgs.append(f"--force: rebasing '{topic}' despite a running container ({state}).")
         else:
             detail = (
                 f"its session is active ({state})"
@@ -4099,33 +4124,6 @@ def do_rebase(
                 f"a container is running for '{topic}' and {detail}; wait for it "
                 "to finish or re-run with --force."
             )
-    # Stream git's output (capture=False) so the user sees the rebase progress.
-    print(rebase_worktree(worktree, main_root, topic, base))
-
-
-def rebase_worktree(
-    worktree: pathlib.Path,
-    main_root: pathlib.Path,
-    topic: str,
-    base: str,
-    *,
-    capture: bool = False,
-) -> str:
-    """Rebase `worktree`'s branch onto `base`; return a result message.
-
-    The in-process core behind the `rebase` verb and the dashboard's `r` action.
-    `base` is resolved to a concrete commit in `main_root` (`-C`) — so a ref like
-    HEAD means the main repo's tip, not the worktree's own branch — then `git
-    rebase` runs inside the worktree. Raises `YoloError` on a dirty tree, an
-    unresolvable base, or conflicts (leaving the rebase in-progress in the worktree
-    to resolve/abort). The session-activity guard is the *caller's* job: `do_rebase`
-    enforces it for the CLI, and the dashboard only offers `r` on idle (waiting) /
-    inactive worktrees. With `capture=True` git's output is captured (and folded
-    into the conflict error) rather than streamed — for the dashboard, which can't
-    let git scribble over its frame.
-    """
-    if not worktree.is_dir():
-        raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
     dirty = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
         capture_output=True,
@@ -4155,7 +4153,8 @@ def rebase_worktree(
             f"{worktree} and run `git rebase --continue`, or `git rebase --abort` "
             f"there to back out.{detail}"
         )
-    return f"Rebased '{topic}' onto '{base}'."
+    msgs.append(f"Rebased '{topic}' onto '{base}'.")
+    return "\n".join(msgs)
 
 
 def _format_table(headers: tuple, rows: list) -> list[str]:
@@ -5150,7 +5149,7 @@ def _wip_action(key, item, home, base, session, term, *, finish_action, finish_r
         if key == "f":
             return _wip_finish(kind, p, home, base, term, finish_action, finish_remote)
         if key == "r":
-            return _wip_rebase(kind, p, base, term)
+            return _wip_rebase(kind, p, home, base, term)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
     except YoloError as e:
@@ -5210,9 +5209,8 @@ def _wip_browse(p, term) -> str:
 
 
 def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
-    """`f`: finish an idle worktree, or stop-then-finish an idle (waiting) session."""
-    if kind == "worktree" and p.get("running"):
-        return "session running — stop it first, or finish from its session row when idle."
+    """`f`: finish a worktree (the core stops an idle session first, refuses a working
+    one), or stop-then-finish an idle (waiting) session row."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
@@ -5229,18 +5227,19 @@ def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
             action=finish_action,
             remote=finish_remote,
         )
-    return "finish applies to idle worktrees and idle sessions."
+    return "finish applies to worktrees and idle sessions."
 
 
-def _wip_rebase(kind, p, base, term) -> str:
-    """`r`: rebase an idle worktree or an idle (waiting) session onto base."""
-    if kind == "worktree" and p.get("running"):
-        return "session running — stop it first, or rebase from its session row when idle."
+def _wip_rebase(kind, p, home, base, term) -> str:
+    """`r`: rebase a worktree (the core guards a running session), or an idle
+    (waiting) session row, onto base."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        return rebase_worktree(p["worktree"], p["main_root"], p["topic"], base, capture=True)
-    return "rebase applies to idle worktrees and idle sessions."
+        return rebase_worktree(
+            p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
+        )
+    return "rebase applies to worktrees and idle sessions."
 
 
 def _wip_new_worktree(p, session, term) -> str:

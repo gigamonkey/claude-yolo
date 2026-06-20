@@ -399,20 +399,20 @@ def test_enter_active_worktree_focuses_window(cy, monkeypatch):
     assert spawned == []
 
 
-def test_finish_rebase_refused_on_running_worktree(cy, monkeypatch):
-    # f/r on a worktree with an active session are refused (manage it from the
-    # session row instead); the cores are never called.
+def test_finish_rebase_on_running_worktree_defer_to_core(cy, monkeypatch):
+    # The dashboard no longer refuses f/r on a running worktree row — it calls the
+    # cores, which own the session guard (finish stops an idle session; rebase
+    # guards a working one). Both cores are invoked, not short-circuited.
     called = []
-    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: called.append("finish"))
-    monkeypatch.setattr(cy, "rebase_worktree", lambda *a, **k: called.append("rebase"))
+    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: called.append("finish") or "f")
+    monkeypatch.setattr(cy, "rebase_worktree", lambda *a, **k: called.append("rebase") or "r")
     sections = {
         "session": [],
         "worktree": [worktree_item(cy, payload={"running": True, "window": "@8"})],
         "project": [],
     }
-    frames = run_loop(cy, monkeypatch, sections, ["f", "r", "q"], confirms=[True, True])
-    assert called == []
-    assert "session running" in frames[-1][1]
+    run_loop(cy, monkeypatch, sections, ["f", "r", "q"], confirms=[True])
+    assert called == ["finish", "rebase"]
 
 
 def test_enter_project_spawns_resume_window(cy, monkeypatch):
@@ -554,7 +554,7 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     monkeypatch.setattr(
         cy,
         "rebase_worktree",
-        lambda wt, mr, topic, base, **k: calls.append((topic, k)) or "rebased",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "rebased",
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
     frames = run_loop(cy, monkeypatch, sections, ["r", "q"])

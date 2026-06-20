@@ -1077,21 +1077,23 @@ gracefully outside one — there's just no repo slug to label/find by).
   abort (`git rebase --abort`) **in the worktree dir**, leaving it in-progress
   there. A terminal verb — no container; the `worktrees.json` overlay is
   untouched (the worktree lives on). **Running-container handling is
-  session-aware:** rebase only rewrites commits in a worktree that stays put — so
-  only an *active* session is a real hazard, not a live container per se. A
-  running container is checked against the **session-activity state file the hooks
-  write** (`<config-dir>/.yolo-status/<cwd-slug>.state`), read via the **shared
-  `_container_session_state` helper** that `stop`/`finish` also use: it resolves
-  the state file through the container's *own* `yolo.config-dir`/`yolo.cwd` labels
-  (not this invocation's `--config-dir`), so a session started under a different
-  config dir is still read correctly. A `waiting`
+  session-aware, and lives in the `rebase_worktree` core** (not the `do_rebase`
+  wrapper), so both the CLI and the dashboard's `r` enforce it identically — the
+  same shape as `finish_worktree`. rebase only rewrites commits in a worktree that
+  stays put — so only an *active* session is a real hazard, not a live container
+  per se. A running container is checked against the **session-activity state file
+  the hooks write** (`<config-dir>/.yolo-status/<cwd-slug>.state`), read via the
+  **shared `_container_session_state` helper** that `stop`/`finish` also use: it
+  resolves the state file through the container's *own* `yolo.config-dir`/`yolo.cwd`
+  labels (not this invocation's `--config-dir`), so a session started under a
+  different config dir is still read correctly. A `waiting`
   session (idle at a prompt) is rebased **through**; a `working` one — or an
   unknown state (`-`: a `yolo shell`, which runs no hooks, or a session that hasn't
-  taken a turn yet) — is **refused unless `--force`**. The one residual race (the
+  taken a turn yet) — is **refused unless `force`**. The one residual race (the
   user prompting the session in the gap between the check and the rebase) needs
   them driving the same session from two places at once, so it's a non-issue in
-  practice. The **dirty-tree refusal is independent and absolute** — no `--force`
-  bypass, since `git rebase` needs a clean tree regardless (this is why `--force`
+  practice. The **dirty-tree refusal is independent and absolute** — no `force`
+  bypass, since `git rebase` needs a clean tree regardless (this is why `force`
   here gates *only* the running-container check, not the dirty check as it does in
   `finish`).
 - **`list`** — the repo's worktrees as a table (TOPIC/STATUS/COMMITS/
@@ -1182,9 +1184,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path), `q` quits. `f`/`r`
-  are offered only on *waiting* sessions and idle (non-`running`) worktrees — a
-  worktree row with a running session refuses with a pointer to its session row,
-  and a `working` session is never offered them. **Quick ops run in-process** via the cores below and surface their
+  apply to any worktree row and to *waiting* session rows (a `working` session is
+  never offered them); the running-session guard lives in the
+  `finish_worktree`/`rebase_worktree` cores, so a worktree row with a `working`
+  session refuses in the footer while an idle one is finished/rebased through —
+  the CLI and dashboard share that one policy. **Quick ops run in-process** via the cores below and surface their
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux
   window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
@@ -1222,9 +1226,11 @@ Implementation shape:
   `finish_worktree` (from `do_finish`; all git runs against an explicit
   `main_root` via `-C`, and the finish helpers `_finish_merge`/`_finish_push`/
   `_branch_status_note`/`_current_branch` likewise take a `repo`), `rebase_worktree`
-  (from `do_rebase`; the session-activity guard stays in the wrapper, the dirty/
-  base-resolve/rebase moves to the core, which can `capture` git's output for the
-  dashboard's frame), `browse_session` (from `do_browse`; `_docker_port` now also
+  (from `do_rebase`; like `finish_worktree`, the core owns *all* its guards — the
+  session-activity check (taking `slug`/`home`/`force`), the dirty-tree refusal,
+  base-resolve, and the rebase itself — so the CLI and the dashboard's `r` enforce
+  the same policy; `capture` folds git's output into the result for the dashboard's
+  frame), `browse_session` (from `do_browse`; `_docker_port` now also
   raises `YoloError`), and `register_project` (from `config --init`). The cores
   **return** their result string rather than printing, so the wrapper prints it
   (CLI) and the dashboard shows it in the footer.
@@ -1687,7 +1693,8 @@ active-project-or-worktree, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
-`f`/`r` on idle worktrees and idle sessions (and refused on a running worktree), a raised `YoloError` landing in the
+`f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
+cores, which own the guard), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback).
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
