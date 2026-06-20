@@ -7,6 +7,7 @@ stubbed, mirroring how test_tmux drives the ps picker. The seeded-dashboard wind
 itself is covered in test_tmux (the `wip --_dashboard` command).
 """
 
+import json
 import pathlib
 import subprocess
 import types
@@ -668,8 +669,6 @@ def test_worktree_config_reads_global_base(cy, repo):
 def test_worktree_config_uses_the_worktrees_own_repo_entry(cy, repo):
     # The base comes from the worktree's *own* repo entry (keyed by main_root),
     # overriding global — so each cross-repo worktree uses its own configured base.
-    import json
-
     r, home = repo
     (home / ".yolo.json").write_text('{"base": "main"}')
     (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
@@ -679,3 +678,27 @@ def test_worktree_config_uses_the_worktrees_own_repo_entry(cy, repo):
 
 def test_worktree_config_none_is_defaults(cy):
     assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin")
+
+
+def test_dashboard_project_launch_uses_per_project_config(cy, run_cli, repo, tmp_path):
+    # Closing the loop on the dashboard's launch path: Enter on a project spawns
+    # `yolo resume --no-tmux` and `n` spawns `yolo start <topic> --no-tmux`, both
+    # with the window cwd set to the project dir (_spawn_session_window). Run those
+    # exact argv from the project dir and assert that dir's projects.json config (a
+    # mount) reaches the docker run argv — i.e. per-project, resolved by the fresh
+    # inner yolo, not the dashboard's own / a global default.
+    r, home = repo
+    ref = tmp_path / "refdocs"
+    ref.mkdir()
+    (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({str(r): {"mounts": [str(ref)]}})
+    )
+    for tail in (["resume", "--no-tmux"], ["start", "wt", "--no-tmux"]):
+        argv = run_cli(tail, home=home, cwd=r)
+        mounts = [argv[i + 1] for i, t in enumerate(argv) if t == "-v"]
+        assert f"{ref}:{ref}:ro" in mounts, tail  # the project's mount reached docker run
+        cargs = argv[
+            next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":")) :
+        ]
+        assert cargs[cargs.index("--add-dir") + 1] == str(ref)  # …and forwarded to claude
