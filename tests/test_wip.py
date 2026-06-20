@@ -81,7 +81,7 @@ def worktree_item(cy, **over):
     return cy.WipItem(
         "worktree",
         over.pop("key", "worktree:repo:old"),
-        over.pop("cols", ("repo", "old", "merged", "2/0", "~/old")),
+        over.pop("cols", ("repo", "old", "merged", "2 behind; 0 ahead", "~/old")),
         p,
     )
 
@@ -205,36 +205,38 @@ def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, r
     assert sess.payload["main_root"] is not None
 
 
-def test_worktree_rows_report_behind_ahead(cy, run_cli, repo):
+def test_worktree_rows_report_commits(cy, run_cli, repo):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
 
-    def ba():  # displayed behind/ahead (GitHub's order)
+    def commits():  # displayed "N behind; M ahead" (GitHub's order)
         rows = cy._worktree_rows(home, "HEAD", all_repos=True)
-        return next(w for w in rows if w.topic == "topic").behind_ahead
+        return next(w for w in rows if w.topic == "topic").commits
 
-    assert ba() == "0/0"  # just branched off HEAD
+    assert commits() == "0 behind; 0 ahead"  # just branched off HEAD
     (wt / "f").write_text("x\n")
     git(wt, "add", ".")
     git(wt, "commit", "-qm", "ahead")
-    assert ba() == "0/1"  # one commit ahead of base, none behind
+    assert commits() == "0 behind; 1 ahead"  # one commit ahead of base, none behind
     # advance the base (main's HEAD) so the worktree is now also one behind
     (r / "g").write_text("y\n")
     git(r, "add", ".")
     git(r, "commit", "-qm", "base moves")
-    assert ba() == "1/1"
+    assert commits() == "1 behind; 1 ahead"
 
 
-def test_draw_wip_renders_behind_ahead_column(cy, capsys):
+def test_draw_wip_renders_commits_column(cy, capsys):
     sections = {
         "session": [],
-        "worktree": [worktree_item(cy, cols=("repo", "old", "unmerged", "3/1", "~/old"))],
+        "worktree": [
+            worktree_item(cy, cols=("repo", "old", "unmerged", "3 behind; 1 ahead", "~/old"))
+        ],
         "project": [],
     }
     cy._draw_wip(sections, None, "")
     out = capsys.readouterr().out
-    assert "BEHIND/AHEAD" in out and "3/1" in out
+    assert "COMMITS" in out and "3 behind; 1 ahead" in out
 
 
 def test_wip_projects_flags_active(cy, tmp_path):

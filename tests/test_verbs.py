@@ -690,7 +690,7 @@ def test_list_shows_worktrees(cy, run_cli, repo, capsys):
     run_cli(["list"], home=home, cwd=r)
     lines = capsys.readouterr().out.splitlines()
     # header row, then one row per topic, each showing its worktree directory
-    assert lines[0].split() == ["TOPIC", "STATUS", "BEHIND/AHEAD", "DIRECTORY"]
+    assert lines[0].split() == ["TOPIC", "STATUS", "COMMITS", "DIRECTORY"]
     body = "\n".join(lines[1:])
     assert "alpha" in body and "beta" in body
     assert "~/.claude-yolo/worktrees" in body  # the worktree directory column
@@ -759,7 +759,7 @@ def test_list_unmerged_branch(cy, run_cli, repo, capsys):
     assert _status_for(capsys.readouterr().out, "wip") == "unmerged"
 
 
-def test_list_shows_behind_ahead(cy, run_cli, repo, capsys):
+def test_list_shows_commits(cy, run_cli, repo, capsys):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
     wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
@@ -768,11 +768,9 @@ def test_list_shows_behind_ahead(cy, run_cli, repo, capsys):
     git(wt, "commit", "-qm", "ahead")  # one ahead of base, none behind
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    # TOPIC STATUS BEHIND/AHEAD DIRECTORY -> behind/ahead at index 2
-    row = next(
-        c for line in capsys.readouterr().out.splitlines()[1:] if (c := line.split())[0] == "topic"
-    )
-    assert row[2] == "0/1"
+    # TOPIC STATUS COMMITS DIRECTORY -> COMMITS reads "N behind; M ahead"
+    line = next(ln for ln in capsys.readouterr().out.splitlines()[1:] if ln.split()[0] == "topic")
+    assert "0 behind; 1 ahead" in line
 
 
 def test_list_fast_forward_merge_reads_merged(cy, run_cli, repo, capsys):
@@ -844,7 +842,7 @@ def test_list_all_spans_repos(cy, run_cli, repo, tmp_path, capsys):
     capsys.readouterr()
     run_cli(["list", "--all"], home=home, cwd=r)
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["REPO", "TOPIC", "STATUS", "BEHIND/AHEAD", "DIRECTORY"]
+    assert lines[0].split() == ["REPO", "TOPIC", "STATUS", "COMMITS", "DIRECTORY"]
     body = "\n".join(lines[1:])
     # both repos' worktrees appear, even though we ran from `repo`
     assert "alpha" in body and "beta" in body
