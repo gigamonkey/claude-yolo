@@ -1178,7 +1178,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   session at that path to its tmux window — the same `_focus_tmux_window` a session
   row uses), else it launches: a worktree `resume`s, a project `resume`s with a
   fresh-session fallback when the dir has none (see `_has_resumable_session`), so
-  Enter "just opens" either one either way. `n` on a project prompts for a topic and
+  Enter "just opens" either one either way. The PROJECTS section also ends with a
+  synthetic **`+` row** (kind `newsession`); Enter on it prompts (via
+  `_PickerTerm.prompt_path` — readline with the `_complete_dir` completer, so Tab
+  completes `~`-aware directory paths) for a directory and `start`s a fresh session
+  there, for a dir that isn't a listed project yet. `n` on a project prompts for a topic and
   starts a **new worktree** session
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
@@ -1715,15 +1719,17 @@ resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with 
 preserving selection by key, Enter→switch/resume-worktree/resume-project/focus-
 active-project-or-worktree, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
-topic), `b` browse incl. the
+topic), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
+there (cancel on empty, reject a non-dir), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
-(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback) and
+(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a
 freshly-edited global `~/.yolo.json` *and* from the worktree's own repo entry
-overriding global; `None` home → built-in defaults).
+overriding global; `None` home → built-in defaults), and `_complete_dir`
+(directory-only, `~`-expanding Tab completion) + `_wip_items` appending the `+` row.
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
 assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker

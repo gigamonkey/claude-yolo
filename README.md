@@ -399,7 +399,8 @@ in three sections:
   `↓behind ↑ahead`.
 - **Projects** — the projects registered in `projects.json` *plus* any you've
   simply opened (yolo remembers those and flags them `(recent)`), so a project
-  shows up here without a `yolo config` step.
+  shows up here without a `yolo config` step. The section ends with a `+` row for
+  opening a session in any other directory (see `Enter` below).
 
 Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
 the selected row:
@@ -409,6 +410,7 @@ the selected row:
 | `Enter` | a running session                | switch to its tmux window |
 | `Enter` | a worktree                       | switch to its live session window if it's running, else resume it in a new window |
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
+| `Enter` | the `+` row                      | prompt for a directory (Tab-completes, `~`-aware) and start a session there |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |

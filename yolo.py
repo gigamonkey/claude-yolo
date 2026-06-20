@@ -8,6 +8,7 @@ import argparse
 import collections
 import datetime
 import getpass
+import glob
 import hashlib
 import json
 import os
@@ -4653,6 +4654,22 @@ def _wait_key(fd: int, timeout: float) -> str | None:
     return _read_key(fd)
 
 
+def _complete_dir(text, state):
+    """A readline completer for directory paths: `~`-aware, directories only, each
+    candidate a full expanded path with a trailing `/`.
+
+    Backs `_PickerTerm.prompt_path` (the `wip` dashboard's "open a session in a
+    directory" prompt). `~` is expanded before globbing, so `~/pr<Tab>` completes;
+    plain files are filtered out since the prompt wants a directory.
+    """
+    expanded = os.path.expanduser(text)
+    try:
+        matches = sorted(p + "/" for p in glob.glob(expanded + "*") if os.path.isdir(p))
+    except OSError:
+        matches = []
+    return matches[state] if state < len(matches) else None
+
+
 class _PickerTerm:
     """The terminal surface a picker loop draws on: key input + cooked prompts.
 
@@ -4682,6 +4699,43 @@ class _PickerTerm:
         except (EOFError, KeyboardInterrupt):
             return ""
         finally:
+            tty.setcbreak(self.fd)
+            sys.stdout.write("\x1b[?25l")
+
+    def prompt_path(self, prompt: str) -> str:
+        """Like `prompt_line` but with shell-style directory Tab-completion.
+
+        Installs `_complete_dir` as the readline completer for the duration, so Tab
+        completes `~`-aware directory paths. Restores the previous completer after.
+        Falls back to a plain cooked read if `readline` isn't available. The result
+        is returned as typed (the caller expands `~` — a path entered without Tab
+        won't have been expanded by completion).
+        """
+        import termios
+        import tty
+
+        try:
+            import readline
+        except ImportError:
+            return self.prompt_line(prompt)
+
+        sys.stdout.write("\x1b[?25h")  # show the cursor for typing
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+        old_completer = readline.get_completer()
+        old_delims = readline.get_completer_delims()
+        readline.set_completer(_complete_dir)
+        readline.set_completer_delims(" \t\n")  # the whole path is one token, not split on /
+        # macOS ships libedit under the readline name, which binds Tab differently.
+        readline.parse_and_bind(
+            "bind ^I rl_complete" if "libedit" in (readline.__doc__ or "") else "tab: complete"
+        )
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        finally:
+            readline.set_completer(old_completer)
+            readline.set_completer_delims(old_delims)
             tty.setcbreak(self.fd)
             sys.stdout.write("\x1b[?25l")
 
@@ -5015,6 +5069,9 @@ def _wip_items(home: pathlib.Path) -> dict:
         )
         for p in projects
     ]
+    # A trailing `+` row: Enter on it prompts for a directory and opens a session
+    # there (see _wip_enter), so you can launch in a dir that isn't listed yet.
+    project_items.append(WipItem("newsession", "newsession:+", ("+",), {}))
 
     return {"session": session_items, "worktree": worktree_items, "project": project_items}
 
@@ -5085,6 +5142,8 @@ def _color_worktree_row(it) -> tuple:
 
 def _color_project_row(it) -> tuple:
     (cell,) = it.cols
+    if it.kind == "newsession":  # the trailing `+` affordance
+        return (_fg(cell, _GREEN),)
     code = _GREEN if "(active)" in cell else _GREY if "(recent)" in cell else _CYAN
     return (_fg(cell, code),)
 
@@ -5119,6 +5178,7 @@ _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
     "worktree": "Enter open · f finish · r rebase (idle)",
     "project": "Enter open session · n new worktree · a register",
+    "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
 
@@ -5312,6 +5372,17 @@ def _wip_enter(item, session, term) -> str:
             return f"switched to session in {name}."
         _spawn_session_window(path, ["resume", "--no-tmux"], name, session)
         return f"opening a session in {name}…"
+    if kind == "newsession":
+        # The trailing `+`: prompt for any directory (Tab-completed, ~-aware) and
+        # start a fresh session there, like a project Enter for a dir not yet listed.
+        raw = term.prompt_path("Open a session in directory: ")
+        if not raw:
+            return "cancelled."
+        path = pathlib.Path(raw).expanduser()
+        if not path.is_dir():
+            return f"not a directory: {path}"
+        _spawn_session_window(path, ["start", "--no-tmux"], path.name, session)
+        return f"starting a session in {path.name}…"
     return ""
 
 

@@ -56,6 +56,8 @@ class FakeTerm:
     def prompt_line(self, prompt):
         return self._lines.pop(0) if self._lines else ""
 
+    prompt_path = prompt_line  # same scripted-line source; completion is the real term's job
+
     def confirm(self, prompt):
         return self._confirms.pop(0) if self._confirms else False
 
@@ -488,6 +490,44 @@ def test_n_on_project_cancels_on_empty_topic(cy, monkeypatch):
     assert frames[-1][1] == "cancelled."
 
 
+def _newsession_item(cy):
+    return cy.WipItem("newsession", "newsession:+", ("+",), {})
+
+
+def test_enter_new_session_prompts_dir_and_starts(cy, monkeypatch, tmp_path):
+    # Enter on the `+` row prompts for a directory and starts a fresh session there.
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
+    )
+    d = tmp_path / "somedir"
+    d.mkdir()
+    sections = {"session": [], "worktree": [], "project": [_newsession_item(cy)]}
+    run_loop(cy, monkeypatch, sections, ["\r", "q"], lines=[str(d)])
+    ((repo, argv, name),) = spawned
+    assert repo == d and argv == ["start", "--no-tmux"] and name == "somedir"
+
+
+def test_enter_new_session_cancels_on_empty(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    sections = {"session": [], "worktree": [], "project": [_newsession_item(cy)]}
+    frames = run_loop(cy, monkeypatch, sections, ["\r", "q"], lines=[""])
+    assert spawned == []
+    assert frames[-1][1] == "cancelled."
+
+
+def test_enter_new_session_rejects_non_dir(cy, monkeypatch, tmp_path):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    sections = {"session": [], "worktree": [], "project": [_newsession_item(cy)]}
+    frames = run_loop(cy, monkeypatch, sections, ["\r", "q"], lines=[str(tmp_path / "nope")])
+    assert spawned == []
+    assert "not a directory" in frames[-1][1]
+
+
 def test_browse_session_one_port(cy, monkeypatch):
     monkeypatch.setattr(cy, "_forwarded_ports", lambda cid: [8000])
     monkeypatch.setattr(cy, "browse_session", lambda cid, select=None: f"http://x/{select}")
@@ -678,6 +718,41 @@ def test_worktree_config_uses_the_worktrees_own_repo_entry(cy, repo):
 
 def test_worktree_config_none_is_defaults(cy):
     assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin")
+
+
+def _complete_all(cy, text):
+    out = []
+    i = 0
+    while (m := cy._complete_dir(text, i)) is not None:
+        out.append(m)
+        i += 1
+    return out
+
+
+def test_complete_dir_offers_directories_only(cy, tmp_path):
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "alps").mkdir()
+    (tmp_path / "afile").write_text("x")
+    got = _complete_all(cy, f"{tmp_path}/a")
+    assert got == [
+        f"{tmp_path / 'alpha'}/",
+        f"{tmp_path / 'alps'}/",
+    ]  # sorted, dirs only, trailing /
+
+
+def test_complete_dir_expands_tilde(cy, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "proj").mkdir()
+    assert cy._complete_dir("~/p", 0) == f"{tmp_path / 'proj'}/"  # ~ understood like a shell
+
+
+def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
+    # The PROJECTS section always ends with a `+` row (open a session in any dir).
+    r, home = repo
+    monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    projects = cy._wip_items(home)["project"]
+    assert projects[-1].kind == "newsession" and projects[-1].cols == ("+",)
 
 
 def test_dashboard_project_launch_uses_per_project_config(cy, run_cli, repo, tmp_path):

@@ -3,6 +3,13 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **`yolo wip` can open a session in any directory.** The PROJECTS section ends
+  with a `+` row; `Enter` on it prompts for a directory — with shell-style Tab
+  completion and `~` expansion — and starts a fresh session there, so you can
+  launch in a directory that isn't a registered or recently-opened project yet.
+
 ## v0.18.0 — 2026-06-20
 
 - **`yolo wip` — a colorized, tmux-resident dashboard for managing everything
