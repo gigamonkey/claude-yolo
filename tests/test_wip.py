@@ -214,9 +214,9 @@ def test_draw_wip_sessions_none_when_empty(cy, capsys):
     assert "SESSIONS" in out and "(none)" in out
 
 
-def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, repo, monkeypatch):
-    # Two worktrees; one has a running session. It must appear under sessions and be
-    # excluded from the inactive-worktrees section (which the other still fills).
+def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monkeypatch):
+    # Two worktrees; one has a running session. Both appear in the worktrees section
+    # (the running one also shows as a session), with `running` set accordingly.
     r, home = repo
     run_cli(["start", "alpha"], home=home, cwd=r)
     run_cli(["start", "beta"], home=home, cwd=r)
@@ -233,7 +233,11 @@ def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, r
 
     sections = cy._wip_items(home, "HEAD")
     assert [it.payload["topic"] for it in sections["session"]] == ["alpha"]
-    assert [it.payload["topic"] for it in sections["worktree"]] == ["beta"]
+    # every worktree is listed, including the running one (it also shows as a
+    # session); the running one is flagged so its row's f/r refuse and Enter switches
+    wt_by_topic = {it.payload["topic"]: it.payload for it in sections["worktree"]}
+    assert set(wt_by_topic) == {"alpha", "beta"}
+    assert wt_by_topic["alpha"]["running"] and not wt_by_topic["beta"]["running"]
     # the running session resolved its worktree + main repo for finish/rebase
     sess = sections["session"][0]
     assert sess.payload["worktree"] == wt_alpha
@@ -287,30 +291,29 @@ def _sess(cy, name, cwd):
     return cy.WipSession("c", name, "", cwd, "", "", "1m", "waiting", 1)
 
 
-def test_project_session_window_prefers_root(cy):
+def test_session_window_for_prefers_exact_path(cy):
     sessions = [
         _sess(cy, "proj-sub", "/work/proj/sub"),
         _sess(cy, "proj", "/work/proj"),
     ]
     windows = {"proj": ("@7", "yolo"), "proj-sub": ("@9", "yolo")}
-    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, windows) == "@7"
+    assert cy._session_window_for(pathlib.Path("/work/proj"), sessions, windows) == "@7"
 
 
-def test_project_session_window_falls_back_to_subdir(cy):
-    # No root-cwd session, but one running in a subdir of the project still counts.
+def test_session_window_for_falls_back_to_subdir(cy):
+    # No exact-path session, but one running in a subdir still counts.
     sessions = [_sess(cy, "proj-sub", "/work/proj/sub")]
     windows = {"proj-sub": ("@9", "yolo")}
-    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, windows) == "@9"
+    assert cy._session_window_for(pathlib.Path("/work/proj"), sessions, windows) == "@9"
 
 
-def test_project_session_window_none_without_window(cy):
+def test_session_window_for_none_without_window(cy):
     # Running but started outside tmux (no window) → nothing to focus.
     sessions = [_sess(cy, "proj", "/work/proj")]
-    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, {}) is None
+    assert cy._session_window_for(pathlib.Path("/work/proj"), sessions, {}) is None
     # And no session there at all → None.
     assert (
-        cy._project_session_window(pathlib.Path("/work/other"), sessions, {"proj": ("@7", "y")})
-        is None
+        cy._session_window_for(pathlib.Path("/work/other"), sessions, {"proj": ("@7", "y")}) is None
     )
 
 
@@ -377,6 +380,39 @@ def test_enter_worktree_spawns_resume_window(cy, monkeypatch):
     ((repo, argv),) = spawned
     assert repo == "/repo"
     assert argv == ["resume", "old", "--no-tmux"]
+
+
+def test_enter_active_worktree_focuses_window(cy, monkeypatch):
+    # A worktree with a live session window: Enter jumps to it (like an active
+    # project), rather than spawning a resume the already-running guard would reject.
+    focused = []
+    monkeypatch.setattr(cy, "_focus_tmux_window", lambda sess, win: focused.append((sess, win)))
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy, payload={"running": True, "window": "@8"})],
+        "project": [],
+    }
+    run_loop(cy, monkeypatch, sections, ["\r", "q"])
+    assert focused == [("yolo", "@8")]
+    assert spawned == []
+
+
+def test_finish_rebase_refused_on_running_worktree(cy, monkeypatch):
+    # f/r on a worktree with an active session are refused (manage it from the
+    # session row instead); the cores are never called.
+    called = []
+    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: called.append("finish"))
+    monkeypatch.setattr(cy, "rebase_worktree", lambda *a, **k: called.append("rebase"))
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy, payload={"running": True, "window": "@8"})],
+        "project": [],
+    }
+    frames = run_loop(cy, monkeypatch, sections, ["f", "r", "q"], confirms=[True, True])
+    assert called == []
+    assert "session running" in frames[-1][1]
 
 
 def test_enter_project_spawns_resume_window(cy, monkeypatch):

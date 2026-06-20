@@ -1150,10 +1150,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   renders via `_draw_wip_sessions` as **one SESSIONS table** with a blank line
   between the unknown / waiting / working groups (a sentinel distinct from `None`
   spots the group boundary, since the unknown group's state *is* `None`); then
-  **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
-  filtered to those whose worktree path isn't in the running set — the running
-  ones already show as sessions; passing `running_paths` avoids a per-worktree
-  `docker ps` at the 2s cadence; this table carries the same **COMMITS**
+  **worktrees** (the `_worktree_rows` extracted from `do_list` — *every* worktree,
+  including ones with a running session, which also appear as a session row;
+  `running_paths`, from the same single `docker ps`, both marks each `running` in
+  STATUS and spares `_worktree_rows` its own per-worktree `docker ps` at the 2s
+  cadence; this table carries the same **COMMITS**
   column `list` grows — `_branch_ahead_behind`'s `↓behind ↑ahead` counts vs
   `base`), and **projects** (`_wip_projects`: the
   `projects.json` keys **plus** the recent-projects registry — every launch stamps
@@ -1167,18 +1168,23 @@ gracefully outside one — there's just no repo slug to label/find by).
   keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under
   the cbreak `_run_picker` extracted from `_ps_picker`, selection tracked by a
   stable key like the ps picker) dispatches keys (`_wip_action`): `Enter`
-  switches to a session's window / resumes a worktree / **opens a project's
-  session** (a plain `resume` that falls back to a fresh session when the dir has
-  none — see `_has_resumable_session`, so Enter "just opens" the project either
-  way), `n` on a project prompts for a topic and starts a **new worktree** session
+  switches to a session's window / opens a worktree / **opens a project's
+  session**. For both a worktree and a project, Enter first jumps to a live
+  session window when one exists (`_session_window_for` resolves the running
+  session at that path to its tmux window — the same `_focus_tmux_window` a session
+  row uses), else it launches: a worktree `resume`s, a project `resume`s with a
+  fresh-session fallback when the dir has none (see `_has_resumable_session`), so
+  Enter "just opens" either one either way. `n` on a project prompts for a topic and
+  starts a **new worktree** session
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
   forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path), `q` quits. `f`/`r`
-  are offered only on *waiting* sessions and inactive worktrees (never a `working`
-  one). **Quick ops run in-process** via the cores below and surface their
+  are offered only on *waiting* sessions and idle (non-`running`) worktrees — a
+  worktree row with a running session refuses with a pointer to its session row,
+  and a `working` session is never offered them. **Quick ops run in-process** via the cores below and surface their
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux
   window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
@@ -1667,21 +1673,21 @@ surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
 unknown→waiting→working grouping with unknown sorted oldest-`created_at`-first,
 `_draw_wip` rendering the sessions as one SESSIONS table with a blank line between
-status groups and `(none)` when empty, `_wip_items` splitting a running
-worktree into the sessions section vs the inactive list against a real repo,
+status groups and `(none)` when empty, `_wip_items` listing *every* worktree
+(running ones flagged, also shown as a session) against a real repo,
 the `_worktree_rows` COMMITS counts (`_branch_ahead_behind` against a real
 repo with commits added on the branch and the base) and that column rendering in
 `_draw_wip`,
 `_wip_projects`' active flag plus the recent-projects union and the `a`-registers-
-selection flow, plus `_project_session_window` root-vs-subdir/no-window
+selection flow, plus `_session_window_for` exact-path/subdir/no-window
 resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
 `_draw_wip` and the action cores stubbed (navigation across sections, refresh
 preserving selection by key, Enter→switch/resume-worktree/resume-project/focus-
-active-project, `n` on a
+active-project-or-worktree, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
-`f`/`r` on worktrees and idle sessions, a raised `YoloError` landing in the
+`f`/`r` on idle worktrees and idle sessions (and refused on a running worktree), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback).
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch

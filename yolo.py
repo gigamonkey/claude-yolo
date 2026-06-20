@@ -4758,7 +4758,7 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
 # --- wip dashboard ---------------------------------------------------------------
 #
 # `yolo wip` is a tmux-resident dashboard for managing all yolo work: running
-# sessions (a superset of `ps --watch`), inactive worktrees (a la `list --all`),
+# sessions (a superset of `ps --watch`), worktrees (a la `list --all`),
 # and the projects registered in projects.json — with in-process lifecycle actions
 # (stop/finish/rebase/browse/add-project) and shell-out launches (start/resume into
 # a new tmux window). It seeds window 0 of the shared tmux session (see
@@ -4875,15 +4875,16 @@ def _wip_projects(home: pathlib.Path, sessions: list) -> list:
     return out
 
 
-def _project_session_window(path, sessions, windows) -> str | None:
-    """The tmux window id of a running session in `path` (root preferred), or None.
+def _session_window_for(path, sessions, windows) -> str | None:
+    """The tmux window id of a running session at `path` (exact match preferred).
 
-    Lets the dashboard's Enter on an *active* project jump to its live session
-    window — the same `_focus_tmux_window` a session row uses — instead of spawning
-    a `yolo resume` that the already-running guard would just reject. A session
-    counts if its cwd is the project root or under it (mirrors `_wip_projects`'
-    active rule); a root-cwd session wins over a subdirectory one, and we skip any
-    match that has no tmux window (started outside tmux — nothing to focus).
+    Lets the dashboard's Enter on an *active* project or worktree jump to its live
+    session window — the same `_focus_tmux_window` a session row uses — instead of
+    spawning a `yolo resume` that the already-running guard would just reject. A
+    session counts if its cwd is `path` or under it (mirrors `_wip_projects`' active
+    rule; for a worktree the match is exact); a cwd-at-`path` session wins over a
+    subdirectory one, and we skip any match with no tmux window (started outside
+    tmux — nothing to focus).
     """
     kp = pathlib.Path(path)
     matches = [
@@ -4902,21 +4903,16 @@ def _project_session_window(path, sessions, windows) -> str | None:
 def _wip_items(home: pathlib.Path, base: str) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
-    Sessions (ordered by _order_sessions), then inactive worktrees (the `list
-    --all` rows whose container isn't running — running ones already show as
-    sessions), then projects. One `docker ps` (via _wip_sessions) drives both the
-    sessions and the worktrees' running/inactive split (running_paths), so the
-    per-worktree docker call _worktree_rows would otherwise make is avoided at the
-    2s refresh.
+    Sessions (ordered by _order_sessions), then every worktree (the `list --all`
+    rows — including ones with a running session, which also appear as a session
+    row; `running_paths`, from the same single `docker ps`, both marks them
+    `running` in the STATUS column and spares _worktree_rows its own per-worktree
+    docker call at the 2s refresh), then projects.
     """
     sessions = _order_sessions(_wip_sessions(home))
     windows = _all_tmux_windows()
     running_paths = {pathlib.Path(s.cwd) for s in sessions if s.cwd}
-    worktrees = [
-        w
-        for w in _worktree_rows(home, base, all_repos=True, running_paths=running_paths)
-        if not w.running
-    ]
+    worktrees = _worktree_rows(home, base, all_repos=True, running_paths=running_paths)
     projects = _wip_projects(home, sessions)
 
     session_items = []
@@ -4954,6 +4950,8 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
                 "main_root": w.main_root,
                 "slug": w.slug,
                 "topic": w.topic,
+                "running": w.running,
+                "window": _session_window_for(w.worktree, sessions, windows),
             },
         )
         for w in worktrees
@@ -4971,7 +4969,7 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
             {
                 "path": p["path"],
                 "registered": p["registered"],
-                "window": _project_session_window(p["path"], sessions, windows),
+                "window": _session_window_for(p["path"], sessions, windows),
             },
         )
         for p in projects
@@ -5029,7 +5027,7 @@ def _draw_wip_sessions(items: list, selected: str | None) -> None:
 
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
-    "worktree": "Enter resume · f finish · r rebase",
+    "worktree": "Enter open · f finish · r rebase (idle)",
     "project": "Enter open session · n new worktree · a register",
 }
 
@@ -5040,12 +5038,12 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     The running sessions render as one SESSIONS table, ordered unknown → waiting →
     working by _order_sessions with a blank line between those groups (see
     _draw_wip_sessions), so the categories read apart without three separate
-    tables. Then the inactive worktrees and projects.
+    tables. Then the worktrees and projects.
     """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
     print("\x1b[1myolo wip\x1b[0m — dashboard\n")
     _draw_wip_sessions(sections["session"], selected)
-    _draw_wip_section("INACTIVE WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
+    _draw_wip_section("WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
     _draw_wip_section("PROJECTS", WIP_PROJECT_HEADERS, sections["project"], selected)
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")
@@ -5169,6 +5167,12 @@ def _wip_enter(item, session, term) -> str:
         _focus_tmux_window(session, p["window"])
         return f"switched to {p['name']}."
     if kind == "worktree":
+        # An active worktree already has a live session window: jump to it (like a
+        # session row / active project), rather than spawning a `resume` the
+        # already-running guard would reject. Otherwise resume it in a new window.
+        if p.get("window"):
+            _focus_tmux_window(session, p["window"])
+            return f"switched to {p['topic']}."
         repo = p["main_root"] or p["worktree"]
         name = f"{pathlib.Path(repo).name}-{p['topic']}" if p["main_root"] else p["topic"]
         _spawn_session_window(repo, ["resume", p["topic"], "--no-tmux"], name, session)
@@ -5206,7 +5210,9 @@ def _wip_browse(p, term) -> str:
 
 
 def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
-    """`f`: finish an inactive worktree, or stop-then-finish an idle (waiting) session."""
+    """`f`: finish an idle worktree, or stop-then-finish an idle (waiting) session."""
+    if kind == "worktree" and p.get("running"):
+        return "session running — stop it first, or finish from its session row when idle."
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
@@ -5223,16 +5229,18 @@ def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
             action=finish_action,
             remote=finish_remote,
         )
-    return "finish applies to inactive worktrees and idle sessions."
+    return "finish applies to idle worktrees and idle sessions."
 
 
 def _wip_rebase(kind, p, base, term) -> str:
-    """`r`: rebase an inactive worktree or an idle (waiting) session onto base."""
+    """`r`: rebase an idle worktree or an idle (waiting) session onto base."""
+    if kind == "worktree" and p.get("running"):
+        return "session running — stop it first, or rebase from its session row when idle."
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
         return rebase_worktree(p["worktree"], p["main_root"], p["topic"], base, capture=True)
-    return "rebase applies to inactive worktrees and idle sessions."
+    return "rebase applies to idle worktrees and idle sessions."
 
 
 def _wip_new_worktree(p, session, term) -> str:
