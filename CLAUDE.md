@@ -1103,7 +1103,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
-  the `base` config key/`--base`). **COMMITS** is the branch's `N behind; M ahead`
+  the `base` config key/`--base`). **COMMITS** is the branch's `↓behind ↑ahead`
   counts vs `base` (GitHub's order — behind first), from `_branch_ahead_behind`'s
   `git rev-list --left-right --count base...branch`, carried on the `WorktreeRow`
   and shown by both `list` and the `wip` dashboard. So a fast-forward-merged or never-diverged branch reads
@@ -1152,7 +1152,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
   `docker ps` at the 2s cadence; this table carries the same **COMMITS**
-  column `list` grows — `_branch_ahead_behind`'s `N behind; M ahead` counts vs
+  column `list` grows — `_branch_ahead_behind`'s `↓behind ↑ahead` counts vs
   `base`), and **projects** (`_wip_projects`: the
   `projects.json` keys **plus** the recent-projects registry — every launch stamps
   the project it opened (`_record_recent_project`, keyed by `_project_key`) into

@@ -768,9 +768,9 @@ def test_list_shows_commits(cy, run_cli, repo, capsys):
     git(wt, "commit", "-qm", "ahead")  # one ahead of base, none behind
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    # TOPIC STATUS COMMITS DIRECTORY -> COMMITS reads "N behind; M ahead"
+    # TOPIC STATUS COMMITS DIRECTORY -> COMMITS reads "↓behind ↑ahead"
     line = next(ln for ln in capsys.readouterr().out.splitlines()[1:] if ln.split()[0] == "topic")
-    assert "0 behind; 1 ahead" in line
+    assert "↓0 ↑1" in line
 
 
 def test_list_fast_forward_merge_reads_merged(cy, run_cli, repo, capsys):

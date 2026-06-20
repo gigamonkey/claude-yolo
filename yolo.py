@@ -4354,8 +4354,8 @@ def _worktree_rows(
                 flags.append("merged" if _branch_merged(branch, base, repo) else "unmerged")
             status = ", ".join(flags)
             ab = _branch_ahead_behind(branch, base, repo)
-            # Behind first, the order GitHub uses on its branch list.
-            commits = f"{ab[1]} behind; {ab[0]} ahead" if ab else "-"
+            # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
+            commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
             try:
                 directory = "~/" + str(wt.relative_to(home))
             except ValueError:
@@ -4393,7 +4393,7 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
     `merged` is judged against `base` (the same ref `start` branches off — default
     HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
     own main repo, since the branch/base only resolve there. COMMITS is the
-    branch's `N behind; M ahead` counts vs `base` (GitHub's order — behind first),
+    branch's `↓behind ↑ahead` counts vs `base` (GitHub's order — behind first),
     from `_branch_ahead_behind`.
     """
     rows = _worktree_rows(home, base, all_repos)

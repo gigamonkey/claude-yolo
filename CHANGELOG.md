@@ -7,9 +7,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 - **`yolo list` and `yolo wip` show a COMMITS column for worktrees.** Each
   worktree's row now reports how far it has diverged from `base` (the same ref
-  `start`/`finish` use) as `N behind; M ahead` (behind-first, as GitHub orders it
-  on its branch list), from `git rev-list --left-right --count base...branch` — so
-  you can see at a glance what's left before finishing or rebasing it.
+  `start`/`finish` use) as `↓behind ↑ahead` (behind-first, as GitHub orders it on
+  its branch list), from `git rev-list --left-right --count base...branch` — so you
+  can see at a glance what's left before finishing or rebasing it.
 
 - **`yolo resume` falls back to a fresh session when there's nothing to
   continue.** A plain `resume` issues `claude --continue`, which *errors* when no
