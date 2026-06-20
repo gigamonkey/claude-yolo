@@ -1149,9 +1149,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   oldest-created first (its sortable `CreatedAt`, carried as the WipSession
   `created_at` field), waiting longest-idle first, working longest-working first,
   so reading down runs from least to most recently active) — which `_draw_wip`
-  renders via `_draw_wip_sessions` as **one SESSIONS table** with a blank line
-  between the unknown / waiting / working groups (a sentinel distinct from `None`
-  spots the group boundary, since the unknown group's state *is* `None`); then
+  renders as **one SESSIONS table** (no blank lines between the groups; the
+  SESSION/STATE color — grey unknown / green waiting / yellow working — is the
+  group cue instead); then
   **worktrees** (the `_worktree_rows` extracted from `do_list` — *every* worktree,
   including ones with a running session, which also appear as a session row;
   `running_paths`, from the same single `docker ps`, both marks each `running` in
@@ -1194,6 +1194,15 @@ gracefully outside one — there's just no repo slug to label/find by).
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
   config and execs docker straight into the window). The `--_dashboard` loop only
   activates with a TTY + `$TMUX`; otherwise it degrades to `_ps_watch_passive`.
+  **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
+  data layer / `yolo list` / `ps` stay escape-free): `_draw_table` runs each row
+  through a per-section `_color_*_row` that SGR-wraps every cell (`_fg`) — session
+  SESSION/STATE by status group, worktree STATUS by `dirty`/`running`/`unmerged`,
+  COMMITS with nonzero behind red / ahead green / zeros grey, projects by
+  active/recent. `_format_table` measures **visible** width (`_visible_len` strips
+  the SGR via `_SGR_RE`) so colored cells still align; the selected row is rendered
+  as a plain reverse-video bar (ANSI stripped, then `\x1b[7m`) rather than tinted,
+  which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey.
 - **`browse [TOPIC]`** — open the host browser at a running session's forwarded
   port (`do_browse`): find the container by the same label query `shell` uses
   (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
@@ -1678,12 +1687,13 @@ surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 `wip --_dashboard` seed of window 0 is asserted here too.
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
 unknown→waiting→working grouping with unknown sorted oldest-`created_at`-first,
-`_draw_wip` rendering the sessions as one SESSIONS table with a blank line between
-status groups and `(none)` when empty, `_wip_items` listing *every* worktree
+`_draw_wip` rendering the sessions as one SESSIONS table with *no* blank lines
+between groups (distinguished by the green/yellow status-group color) and `(none)`
+when empty, `_wip_items` listing *every* worktree
 (running ones flagged, also shown as a session) against a real repo,
 the `_worktree_rows` COMMITS counts (`_branch_ahead_behind` against a real
-repo with commits added on the branch and the base) and that column rendering in
-`_draw_wip`,
+repo with commits added on the branch and the base) and that column's colorized
+(red-behind/green-ahead) rendering in `_draw_wip`,
 `_wip_projects`' active flag plus the recent-projects union and the `a`-registers-
 selection flow, plus `_session_window_for` exact-path/subdir/no-window
 resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/

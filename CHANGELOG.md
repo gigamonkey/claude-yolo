@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` is fully colorized.** Every column is color-coded — sessions by
+  status group (grey unknown / green waiting / yellow working), worktree STATUS by
+  `dirty`/`running`/`merged`/`unmerged`, the COMMITS arrows with nonzero behind in
+  red and ahead in green, projects by active/recent — so the running-session
+  groups now read apart by color rather than the blank lines between them (now
+  gone). Colors are added only on screen; `yolo list`/`ps` output stays plain.
+
 - **`yolo list` and `yolo wip` show a COMMITS column for worktrees.** Each
   worktree's row now reports how far it has diverged from `base` (the same ref
   `start`/`finish` use) as `↓behind ↑ahead` (behind-first, as GitHub orders it on

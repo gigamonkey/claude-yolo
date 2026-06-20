@@ -4157,15 +4157,31 @@ def rebase_worktree(
     return "\n".join(msgs)
 
 
+_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(s: str) -> int:
+    """Display width of `s`, ignoring SGR color escapes — so a colored cell still
+    aligns. Plain callers (`list`/`ps`/`tokens`) have no escapes, so == len."""
+    return len(_SGR_RE.sub("", s))
+
+
 def _format_table(headers: tuple, rows: list) -> list[str]:
-    """Rows as column-aligned table lines (no trailing whitespace)."""
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    """Rows as column-aligned table lines (no trailing whitespace).
+
+    Widths and padding are measured by _visible_len, so cells carrying ANSI color
+    escapes (the wip dashboard) line up exactly as plain ones do.
+    """
+    widths = [
+        max(_visible_len(h), *(_visible_len(r[i]) for r in rows)) for i, h in enumerate(headers)
+    ]
+
+    def pad(c, w):
+        return c + " " * max(0, w - _visible_len(c))
 
     def fmt(cols):
         # pad every column except the last so there's no trailing whitespace
-        return "  ".join(
-            c if i == len(cols) - 1 else c.ljust(widths[i]) for i, c in enumerate(cols)
-        )
+        return "  ".join(c if i == len(cols) - 1 else pad(c, widths[i]) for i, c in enumerate(cols))
 
     return [fmt(headers)] + [fmt(row) for row in rows]
 
@@ -4977,48 +4993,94 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
     return {"session": session_items, "worktree": worktree_items, "project": project_items}
 
 
-def _draw_wip_section(title: str, headers: tuple, items: list, selected: str | None) -> None:
-    """Draw one dashboard section: a bold title, then its table (or "(none)")."""
-    print(f"\x1b[1m{title}\x1b[0m")
-    if not items:
-        print("  (none)")
-        print()
-        return
-    lines = _format_table(headers, [it.cols for it in items])
-    print("  " + lines[0])
-    for it, line in zip(items, lines[1:], strict=True):
-        if it.key == selected:
-            print(f"> \x1b[7m{line}\x1b[0m")
-        else:
-            print(f"  {line}")
-    print()
+# SGR foreground codes for the dashboard's "angry fruit salad" coloring. Grey (90,
+# aixterm bright-black) doubles as "dim". Color is added only in the draw layer, so
+# the data layer / `yolo list` / `ps` stay escape-free.
+_GREY, _RED, _GREEN, _YELLOW, _BLUE, _MAGENTA, _CYAN = 90, 31, 32, 33, 34, 35, 36
+# Per-status-group accent for a session's SESSION/STATE cells (the cue that
+# replaces the old blank lines between groups).
+_SESSION_GROUP = {None: _GREY, "waiting": _GREEN, "working": _YELLOW}
 
 
-def _draw_wip_sessions(items: list, selected: str | None) -> None:
-    """Draw the running sessions as one SESSIONS table.
+def _fg(s: str, code: int) -> str:
+    """Wrap `s` in an SGR foreground color (full reset after)."""
+    return f"\x1b[{code}m{s}\x1b[0m"
 
-    A single table (unlike the per-status tables of old), but with a blank line
-    between the unknown / waiting / working groups `_order_sessions` produces, so
-    the categories still read apart at a glance. Group boundaries are detected from
-    each item's `state` payload (None = unknown), with a sentinel distinct from
-    None so the leading unknown group doesn't trip the "group changed" check.
+
+def _color_session_row(it) -> tuple:
+    name, topic, created, ports, state = it.cols
+    g = _SESSION_GROUP.get(it.payload.get("state"), _GREY)
+    return (
+        _fg(name, g),
+        _fg(topic, _CYAN),
+        _fg(created, _BLUE),
+        _fg(ports, _MAGENTA),
+        _fg(state, g),
+    )
+
+
+def _color_status(status: str) -> str:
+    """Color a worktree STATUS: dirty red, running green, unmerged yellow, else grey."""
+    code = (
+        _RED
+        if "dirty" in status
+        else _GREEN
+        if "running" in status
+        else _YELLOW
+        if status == "unmerged"
+        else _GREY
+    )
+    return _fg(status, code)
+
+
+def _color_commits(commits: str) -> str:
+    """Color a `↓behind ↑ahead` cell: nonzero behind red, nonzero ahead green, zeros grey."""
+    parts = commits.split()
+    if len(parts) != 2:
+        return _fg(commits, _GREY)  # "-"
+
+    def part(token, arrow, hot):
+        n = token.lstrip(arrow)
+        return _fg(token, hot if n.isdigit() and int(n) else _GREY)
+
+    return f"{part(parts[0], '↓', _RED)} {part(parts[1], '↑', _GREEN)}"
+
+
+def _color_worktree_row(it) -> tuple:
+    repo, topic, status, commits, directory = it.cols
+    return (
+        _fg(repo, _CYAN),
+        _fg(topic, _BLUE),
+        _color_status(status),
+        _color_commits(commits),
+        _fg(directory, _GREY),
+    )
+
+
+def _color_project_row(it) -> tuple:
+    (cell,) = it.cols
+    code = _GREEN if "(active)" in cell else _GREY if "(recent)" in cell else _CYAN
+    return (_fg(cell, code),)
+
+
+def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
+    """Draw one dashboard section: a bold colored title, then its color-coded,
+    column-aligned table (or "(none)").
+
+    `colorize(item)` returns the row's color-wrapped cells; _format_table measures
+    *visible* width, so they still line up. The selected row is rendered as a plain
+    reverse-video bar (ANSI stripped, then reversed) — cleaner than tinting a row
+    that already carries per-cell colors, and it sidesteps grey-on-grey.
     """
-    print("\x1b[1mSESSIONS\x1b[0m")
+    print(f"\x1b[1;{title_code}m{title}\x1b[0m")
     if not items:
-        print("  (none)")
-        print()
+        print("  (none)\n")
         return
-    lines = _format_table(WIP_SESSION_HEADERS, [it.cols for it in items])
-    print("  " + lines[0])
-    unset = object()
-    prev = unset
+    lines = _format_table(headers, [colorize(it) for it in items])
+    print(f"  \x1b[1m{lines[0]}\x1b[0m")
     for it, line in zip(items, lines[1:], strict=True):
-        group = it.payload.get("state")
-        if prev is not unset and group != prev:
-            print()  # blank line between categories
-        prev = group
         if it.key == selected:
-            print(f"> \x1b[7m{line}\x1b[0m")
+            print(f"> \x1b[7m{_SGR_RE.sub('', line)}\x1b[0m")
         else:
             print(f"  {line}")
     print()
@@ -5032,22 +5094,35 @@ _WIP_HINTS = {
 
 
 def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
-    """One dashboard frame: the sections plus a status/help footer.
+    """One dashboard frame: the colored sections plus a status/help footer.
 
     The running sessions render as one SESSIONS table, ordered unknown → waiting →
-    working by _order_sessions with a blank line between those groups (see
-    _draw_wip_sessions), so the categories read apart without three separate
-    tables. Then the worktrees and projects.
+    working by _order_sessions — no blank lines between groups anymore; the
+    SESSION/STATE color (grey / green / yellow) is the group cue instead. Then the
+    worktrees and projects, each column colored by _color_*_row.
     """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
-    print("\x1b[1myolo wip\x1b[0m — dashboard\n")
-    _draw_wip_sessions(sections["session"], selected)
-    _draw_wip_section("WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
-    _draw_wip_section("PROJECTS", WIP_PROJECT_HEADERS, sections["project"], selected)
+    print("\x1b[1;35myolo wip\x1b[0m \x1b[90m— dashboard\x1b[0m\n")
+    _draw_table(
+        "SESSIONS", _CYAN, WIP_SESSION_HEADERS, sections["session"], selected, _color_session_row
+    )
+    _draw_table(
+        "WORKTREES",
+        _GREEN,
+        WIP_WORKTREE_HEADERS,
+        sections["worktree"],
+        selected,
+        _color_worktree_row,
+    )
+    _draw_table(
+        "PROJECTS", _MAGENTA, WIP_PROJECT_HEADERS, sections["project"], selected, _color_project_row
+    )
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"updated {now} · a add-project · q quit · j/k move")
-    print(_WIP_HINTS.get(kind, "") if not footer else f"\x1b[33m{footer}\x1b[0m")
+    print(f"\x1b[90mupdated {now} · a add-project · q quit · j/k move\x1b[0m")
+    print(
+        f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m" if not footer else f"\x1b[1;33m{footer}\x1b[0m"
+    )
 
 
 def _wip_nav(sections: dict) -> list:

@@ -174,8 +174,9 @@ def test_draw_wip_renders_one_sessions_table_grouped(cy, capsys):
     assert out.index("s1") < out.index("w1") < out.index("k1")
 
 
-def test_draw_wip_sessions_blank_line_between_groups(cy, capsys):
-    # A blank line separates each status group; none within a group.
+def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
+    # No blank lines between status groups anymore — they're distinguished by the
+    # SESSION/STATE color (green waiting, yellow working) instead.
     sections = {
         "session": [
             session_item(
@@ -183,12 +184,6 @@ def test_draw_wip_sessions_blank_line_between_groups(cy, capsys):
                 key="session:w1",
                 payload={"state": "waiting"},
                 cols=("w1", "-", "1m", "-", "waiting 9m"),
-            ),
-            session_item(
-                cy,
-                key="session:w2",
-                payload={"state": "waiting"},
-                cols=("w2", "-", "1m", "-", "waiting 2m"),
             ),
             session_item(
                 cy,
@@ -202,9 +197,11 @@ def test_draw_wip_sessions_blank_line_between_groups(cy, capsys):
     }
     cy._draw_wip(sections, None, "")
     lines = capsys.readouterr().out.splitlines()
-    w1, w2, k1 = (next(i for i, ln in enumerate(lines) if n in ln) for n in ("w1", "w2", "k1"))
-    assert "w2" in lines[w1 + 1]  # same group: adjacent, no blank line
-    assert lines[k1 - 1].strip() == ""  # different group: blank line before working
+    w1 = next(i for i, ln in enumerate(lines) if "w1" in ln)
+    k1 = next(i for i, ln in enumerate(lines) if "k1" in ln)
+    assert k1 == w1 + 1  # adjacent rows, no blank line between groups
+    assert f"\x1b[{cy._GREEN}m" in lines[w1]  # waiting row tinted green
+    assert f"\x1b[{cy._YELLOW}m" in lines[k1]  # working row tinted yellow
 
 
 def test_draw_wip_sessions_none_when_empty(cy, capsys):
@@ -273,7 +270,10 @@ def test_draw_wip_renders_commits_column(cy, capsys):
     }
     cy._draw_wip(sections, None, "")
     out = capsys.readouterr().out
-    assert "COMMITS" in out and "↓3 ↑1" in out
+    # values are colorized so the cell isn't one contiguous string; check the parts
+    assert "COMMITS" in out and "↓3" in out and "↑1" in out
+    assert f"\x1b[{cy._RED}m↓3" in out  # nonzero behind in red
+    assert f"\x1b[{cy._GREEN}m↑1" in out  # nonzero ahead in green
 
 
 def test_wip_projects_flags_active(cy, tmp_path):
