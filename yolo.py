@@ -5063,7 +5063,7 @@ def _color_project_row(it) -> tuple:
     return (_fg(cell, code),)
 
 
-def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
+def _draw_table(title, title_code, headers, items, selected, colorize, show_header=True) -> None:
     """Draw one dashboard section: a bold colored title, then its color-coded,
     column-aligned table (or "(none)").
 
@@ -5071,13 +5071,16 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
     *visible* width, so they still line up. The selected row is rendered as a plain
     reverse-video bar (ANSI stripped, then reversed) — cleaner than tinting a row
     that already carries per-cell colors, and it sidesteps grey-on-grey.
+    `show_header=False` drops the column-name row — for a single-column section
+    (PROJECTS) whose lone header just repeats the title.
     """
     print(f"\x1b[1;{title_code}m{title}\x1b[0m")
     if not items:
         print("  (none)\n")
         return
     lines = _format_table(headers, [colorize(it) for it in items])
-    print(f"  \x1b[1m{lines[0]}\x1b[0m")
+    if show_header:
+        print(f"  \x1b[1m{lines[0]}\x1b[0m")
     for it, line in zip(items, lines[1:], strict=True):
         if it.key == selected:
             print(f"> \x1b[7m{_SGR_RE.sub('', line)}\x1b[0m")
@@ -5115,7 +5118,13 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
         _color_worktree_row,
     )
     _draw_table(
-        "PROJECTS", _MAGENTA, WIP_PROJECT_HEADERS, sections["project"], selected, _color_project_row
+        "PROJECTS",
+        _MAGENTA,
+        WIP_PROJECT_HEADERS,
+        sections["project"],
+        selected,
+        _color_project_row,
+        show_header=False,
     )
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")

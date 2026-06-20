@@ -211,6 +211,21 @@ def test_draw_wip_sessions_none_when_empty(cy, capsys):
     assert "SESSIONS" in out and "(none)" in out
 
 
+def test_draw_wip_projects_omits_column_header(cy, capsys):
+    # The single-column PROJECTS section drops the redundant "PROJECT" header row,
+    # but still lists the projects under the title.
+    sections = {
+        "session": [],
+        "worktree": [],
+        "project": [project_item(cy, key="project:/work/a", cols=("/work/a",))],
+    }
+    cy._draw_wip(sections, None, "")
+    lines = cy._SGR_RE.sub("", capsys.readouterr().out).splitlines()
+    assert "PROJECTS" in lines  # the section title
+    assert "  PROJECT" not in lines  # ...but not a separate column-header row
+    assert any("/work/a" in ln for ln in lines)  # the project still listed
+
+
 def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monkeypatch):
     # Two worktrees; one has a running session. Both appear in the worktrees section
     # (the running one also shows as a session), with `running` set accordingly.

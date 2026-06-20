@@ -1202,7 +1202,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   active/recent. `_format_table` measures **visible** width (`_visible_len` strips
   the SGR via `_SGR_RE`) so colored cells still align; the selected row is rendered
   as a plain reverse-video bar (ANSI stripped, then `\x1b[7m`) rather than tinted,
-  which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey.
+  which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey. The
+  single-column PROJECTS section passes `show_header=False`, dropping its lone
+  `PROJECT` column header (it just repeated the title).
 - **`browse [TOPIC]`** — open the host browser at a running session's forwarded
   port (`do_browse`): find the container by the same label query `shell` uses
   (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
