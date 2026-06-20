@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.18.0 — 2026-06-20
 
 - **`yolo wip` — a colorized, tmux-resident dashboard for managing everything
   yolo.** A full-screen dashboard (window 0 of the shared `--tmux` session, which
