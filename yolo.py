@@ -4329,6 +4329,7 @@ def _worktree_rows(
     base: str,
     all_repos: bool,
     running_paths: set | None = None,
+    base_resolver=None,
 ) -> list:
     """The worktrees under ~/.claude-yolo/worktrees as WorktreeRow records.
 
@@ -4338,6 +4339,12 @@ def _worktree_rows(
     per-worktree `running_container_for` (a docker ps each) — but a caller that
     already has the set of running worktree paths (the dashboard, from one docker
     ps) passes `running_paths` to avoid N docker calls at its 2s refresh.
+
+    `base` judges the merged/COMMITS columns. `base_resolver(main_root, wt)` (the
+    dashboard) overrides it **per worktree** — each cross-repo worktree judged
+    against the base its *own* config sets, not one global value; without it the
+    single `base` applies to all (`do_list`, which is one repo / an explicit
+    `--base`).
     """
     root = home / ".claude-yolo" / "worktrees"
     if all_repos:
@@ -4367,6 +4374,7 @@ def _worktree_rows(
             # Under --all, resolve the branch in its own repo (the current dir
             # isn't it); also names the REPO column.
             repo = _worktree_main_repo(wt) if all_repos else None
+            wt_base = base_resolver(repo, wt) if base_resolver else base
             running = (
                 wt in running_paths
                 if running_paths is not None
@@ -4376,9 +4384,9 @@ def _worktree_rows(
             # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
             # when it's actually a candidate to `finish`.
             if not flags:
-                flags.append("merged" if _branch_merged(branch, base, repo) else "unmerged")
+                flags.append("merged" if _branch_merged(branch, wt_base, repo) else "unmerged")
             status = ", ".join(flags)
-            ab = _branch_ahead_behind(branch, base, repo)
+            ab = _branch_ahead_behind(branch, wt_base, repo)
             # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
             commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
             try:
@@ -4925,19 +4933,27 @@ def _session_window_for(path, sessions, windows) -> str | None:
     return None
 
 
-def _wip_items(home: pathlib.Path, base: str) -> dict:
+def _wip_items(home: pathlib.Path) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
     Sessions (ordered by _order_sessions), then every worktree (the `list --all`
     rows — including ones with a running session, which also appear as a session
     row; `running_paths`, from the same single `docker ps`, both marks them
     `running` in the STATUS column and spares _worktree_rows its own per-worktree
-    docker call at the 2s refresh), then projects.
+    docker call at the 2s refresh; each worktree's COMMITS/STATUS is judged against
+    the base its *own* config sets, via the `_worktree_config` base resolver), then
+    projects.
     """
     sessions = _order_sessions(_wip_sessions(home))
     windows = _all_tmux_windows()
     running_paths = {pathlib.Path(s.cwd) for s in sessions if s.cwd}
-    worktrees = _worktree_rows(home, base, all_repos=True, running_paths=running_paths)
+    worktrees = _worktree_rows(
+        home,
+        "HEAD",  # fallback; the resolver supplies each worktree's own base
+        all_repos=True,
+        running_paths=running_paths,
+        base_resolver=lambda root, wt: _worktree_config(home, root, wt)[0],
+    )
     projects = _wip_projects(home, sessions)
 
     session_items = []
@@ -5149,19 +5165,21 @@ def _wip_nav(sections: dict) -> list:
     return sections["session"] + sections["worktree"] + sections["project"]
 
 
-def _wip_live_config(home) -> tuple:
-    """`(base, finish_action, finish_remote)` re-read from config for the dashboard.
+def _worktree_config(home, main_root, worktree) -> tuple:
+    """`(base, finish_action, finish_remote)` from *this worktree's* config.
 
-    The dashboard is long-lived, so it resolves these *live* (each refresh/action)
-    rather than capturing them at launch — otherwise a `yolo config` edit (e.g.
-    `base main`) wouldn't take effect until the dashboard was restarted. Scope
-    mirrors how `yolo wip` first resolved them: global `~/.yolo.json` + the project
-    entry for the dashboard's own cwd (read quietly, so no provenance over the
-    frame). `home is None` is the test path (the loop is driven with a stub home).
+    The dashboard spans repos, so each worktree's base / finish settings come from
+    its **own** repo (project entry, keyed by `main_root`) + its worktree overlay +
+    global `~/.yolo.json` — exactly what `yolo rebase TOPIC` / `yolo list` resolve
+    from inside that repo. Read live (each refresh/action) and `quiet` so a `yolo
+    config` edit reaches the long-lived dashboard without scribbling its frame.
+    `home`/`main_root` None is the test/standalone path → built-in defaults.
     """
-    if home is None:
+    if home is None or main_root is None:
         return "HEAD", "delete-if-merged", "origin"
-    cfg, _ = load_yolo_config(pathlib.Path.cwd(), home, quiet=True)
+    cfg, _ = load_yolo_config(
+        pathlib.Path(main_root), home, worktree_dir=pathlib.Path(worktree), quiet=True
+    )
     return (
         cfg.get("base") or "HEAD",
         cfg.get("finish_action") or "delete-if-merged",
@@ -5176,11 +5194,11 @@ def _wip_loop(home, session, term) -> None:
     tests). Selection is tracked by stable key, so the 2s auto-refresh — and the
     immediate refresh after an action — never drags the highlight onto a different
     row. `session` is the tmux session the dashboard lives in (for switch/spawn).
-    base / finish-action / finish-remote are re-read from config (`_wip_live_config`)
-    at each rebuild, so a config edit reaches the running dashboard.
+    base / finish settings aren't carried here: each worktree resolves its own from
+    config (`_worktree_config`) at display and action time, so a config edit reaches
+    the running dashboard and each repo uses its own base.
     """
-    base, finish_action, finish_remote = _wip_live_config(home)
-    sections = _wip_items(home, base)
+    sections = _wip_items(home)
     nav = _wip_nav(sections)
     selected = nav[0].key if nav else None
     footer = ""
@@ -5192,8 +5210,7 @@ def _wip_loop(home, session, term) -> None:
         _draw_wip(sections, selected, footer)
         key = term.wait_key(max(0.0, deadline - time.monotonic()))
         if key is None:  # refresh deadline, no keypress
-            base, finish_action, finish_remote = _wip_live_config(home)
-            sections = _wip_items(home, base)
+            sections = _wip_items(home)
             nav = _wip_nav(sections)
             deadline = time.monotonic() + PS_WATCH_INTERVAL
             continue
@@ -5207,30 +5224,15 @@ def _wip_loop(home, session, term) -> None:
             selected = keys[min(len(keys) - 1, keys.index(selected) + 1)]
             continue
         item = next((it for it in nav if it.key == selected), None)
-        # Re-read config right before the action, so a `yolo config` edit (base,
-        # finish-action, …) takes effect without restarting the dashboard.
-        base, finish_action, finish_remote = _wip_live_config(home)
-        footer = (
-            _wip_action(
-                key,
-                item,
-                home,
-                base,
-                session,
-                term,
-                finish_action=finish_action,
-                finish_remote=finish_remote,
-            )
-            or ""
-        )
+        footer = _wip_action(key, item, home, session, term) or ""
         # An action may have changed the world (a stop, finish, launch): refresh now
         # rather than waiting out the tick, so the dashboard reflects it immediately.
-        sections = _wip_items(home, base)
+        sections = _wip_items(home)
         nav = _wip_nav(sections)
         deadline = time.monotonic() + PS_WATCH_INTERVAL
 
 
-def _wip_action(key, item, home, base, session, term, *, finish_action, finish_remote) -> str:
+def _wip_action(key, item, home, session, term) -> str:
     """Dispatch one keypress against the selected item; return a footer message.
 
     The mutating cores (stop/finish/rebase/browse/register) run in-process and may
@@ -5268,9 +5270,9 @@ def _wip_action(key, item, home, base, session, term, *, finish_action, finish_r
                 return "cancelled."
             return stop_session(p["cid"], f"for '{label}'", home, force=working)
         if key == "f":
-            return _wip_finish(kind, p, home, base, term, finish_action, finish_remote)
+            return _wip_finish(kind, p, home, term)
         if key == "r":
-            return _wip_rebase(kind, p, home, base, term)
+            return _wip_rebase(kind, p, home, term)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
     except YoloError as e:
@@ -5329,14 +5331,16 @@ def _wip_browse(p, term) -> str:
     return f"opened {browse_session(p['cid'], select=select)}"
 
 
-def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
+def _wip_finish(kind, p, home, term) -> str:
     """`f`: finish a worktree (the core stops an idle session first, refuses a working
-    one), or stop-then-finish an idle (waiting) session row."""
+    one), or stop-then-finish an idle (waiting) session row. base / finish-action /
+    finish-remote come from *this worktree's* own config (`_worktree_config`)."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
         if not term.confirm(f"Finish '{p['topic']}' (remove worktree)?"):
             return "cancelled."
+        base, action, remote = _worktree_config(home, p["main_root"], p["worktree"])
         return finish_worktree(
             p["worktree"],
             p["main_root"],
@@ -5345,18 +5349,19 @@ def _wip_finish(kind, p, home, base, term, finish_action, finish_remote) -> str:
             home,
             base,
             force=False,
-            action=finish_action,
-            remote=finish_remote,
+            action=action,
+            remote=remote,
         )
     return "finish applies to worktrees and idle sessions."
 
 
-def _wip_rebase(kind, p, home, base, term) -> str:
+def _wip_rebase(kind, p, home, term) -> str:
     """`r`: rebase a worktree (the core guards a running session), or an idle
-    (waiting) session row, onto base."""
+    (waiting) session row, onto the base from *this worktree's* own config."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
+        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return rebase_worktree(
             p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
         )
@@ -5407,8 +5412,9 @@ def do_wip(home, *, dashboard, tmux_session) -> None:
     ensures the shared tmux session exists (seeding that dashboard window) and
     focuses it — attaching this terminal, or switching the client if we're already
     in tmux. Requires tmux either way. (base / finish-action / finish-remote aren't
-    passed in: the long-lived loop re-reads them from config itself, so a config
-    edit reaches a running dashboard — see `_wip_live_config`.)
+    passed in: each worktree resolves its own from config at display/action time —
+    see `_worktree_config` — so a config edit reaches a running dashboard and each
+    repo uses its own base.)
     """
     if dashboard:
         if not (sys.stdin.isatty() and os.environ.get("TMUX")):

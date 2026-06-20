@@ -1194,14 +1194,17 @@ gracefully outside one — there's just no repo slug to label/find by).
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux
   window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
-  config and execs docker straight into the window). The dashboard is long-lived,
-  so it does **not** capture `base`/`finish-action`/`finish-remote` at launch:
-  `_wip_loop` re-reads them from config (`_wip_live_config` → `load_yolo_config(...,
-  quiet=True)` against the dashboard's cwd) on every rebuild and before every
-  action, so a `yolo config` edit (e.g. `base main`) reaches a *running* dashboard
-  — both its display (the COMMITS/STATUS columns judged vs `base`) and its
-  in-process `f`/`r` — without a restart. (`quiet=True` keeps the provenance line
-  and dangling-key warnings off the frame.) The `--_dashboard` loop only
+  config and execs docker straight into the window). The dashboard is long-lived
+  *and* spans repos, so it does **not** carry a single `base`/`finish-action`/
+  `finish-remote`: **each worktree resolves its own** from config at display and
+  action time via `_worktree_config(home, main_root, worktree)` → `load_yolo_config(
+  main_root, …, worktree_dir=worktree, quiet=True)` — that worktree's repo entry +
+  its overlay + global `~/.yolo.json`, exactly what `yolo rebase TOPIC` from inside
+  that repo would use. So `f`/`r` rebase/finish onto the *right* base per repo, the
+  COMMITS/STATUS columns are judged per worktree (`_worktree_rows`' `base_resolver`
+  hook; `do_list`/an explicit `--base` still pass a single `base`), and a `yolo
+  config` edit reaches the *running* dashboard with no restart. (`quiet=True` keeps
+  the provenance line and dangling-key warnings off the frame.) The `--_dashboard` loop only
   activates with a TTY + `$TMUX`; otherwise it degrades to `_ps_watch_passive`.
   **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
   data layer / `yolo list` / `ps` stay escape-free): `_draw_table` runs each row
@@ -1718,8 +1721,9 @@ multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 cores, which own the guard), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback) and
-`_wip_live_config` (re-reads `base`/`finish-action`/`finish-remote` from a
-freshly-edited `~/.yolo.json`; `None` home → built-in defaults).
+`_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a
+freshly-edited global `~/.yolo.json` *and* from the worktree's own repo entry
+overriding global; `None` home → built-in defaults).
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
 assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker

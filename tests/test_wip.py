@@ -104,12 +104,12 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
 
     Each frame is (selected_key, footer) as _draw_wip would have rendered it.
     """
-    monkeypatch.setattr(cy, "_wip_items", lambda home, base: sections)
+    monkeypatch.setattr(cy, "_wip_items", lambda home: sections)
     frames = []
     monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
     term = FakeTerm(keys, lines=lines, confirms=confirms)
-    # home=None → _wip_live_config returns the built-in defaults (base HEAD,
-    # delete-if-merged, origin), so the loop runs without touching real config.
+    # home=None → per-worktree _worktree_config returns built-in defaults, so the
+    # loop runs without touching real config.
     cy._wip_loop(None, "yolo", term)
     return frames
 
@@ -243,7 +243,7 @@ def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monke
         ],
     )
 
-    sections = cy._wip_items(home, "HEAD")
+    sections = cy._wip_items(home)
     assert [it.payload["topic"] for it in sections["session"]] == ["alpha"]
     # every worktree is listed, including the running one (it also shows as a
     # session); the running one is flagged so its row's f/r refuse and Enter switches
@@ -655,19 +655,27 @@ def test_do_wip_dashboard_without_tty_falls_back_to_passive(cy, tmp_path, monkey
     assert called == [tmp_path]
 
 
-def test_wip_live_config_rereads_base(cy, tmp_path, monkeypatch):
-    # The long-lived dashboard re-resolves base/finish-action/finish-remote from
-    # config, so editing ~/.yolo.json takes effect without a restart.
-    home = tmp_path / "home"
-    home.mkdir()
-    work = tmp_path / "work"
-    work.mkdir()
-    monkeypatch.chdir(work)
-    assert cy._wip_live_config(home) == ("HEAD", "delete-if-merged", "origin")  # no config yet
+def test_worktree_config_reads_global_base(cy, repo):
+    # The dashboard re-resolves each worktree's base/finish-action/finish-remote
+    # from config; a freshly-edited global ~/.yolo.json takes effect (no restart).
+    r, home = repo
+    assert cy._worktree_config(home, r, r / "wt") == ("HEAD", "delete-if-merged", "origin")
     (home / ".yolo.json").write_text('{"base": "main", "finish-action": "push"}')
-    base, action, remote = cy._wip_live_config(home)
+    base, action, remote = cy._worktree_config(home, r, r / "wt")
     assert base == "main" and action == "push" and remote == "origin"
 
 
-def test_wip_live_config_none_home_is_defaults(cy):
-    assert cy._wip_live_config(None) == ("HEAD", "delete-if-merged", "origin")
+def test_worktree_config_uses_the_worktrees_own_repo_entry(cy, repo):
+    # The base comes from the worktree's *own* repo entry (keyed by main_root),
+    # overriding global — so each cross-repo worktree uses its own configured base.
+    import json
+
+    r, home = repo
+    (home / ".yolo.json").write_text('{"base": "main"}')
+    (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({str(r): {"base": "develop"}}))
+    assert cy._worktree_config(home, r, r / "wt")[0] == "develop"
+
+
+def test_worktree_config_none_is_defaults(cy):
+    assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin")
