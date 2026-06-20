@@ -4832,6 +4832,30 @@ def _wip_projects(home: pathlib.Path, sessions: list) -> list:
     return out
 
 
+def _project_session_window(path, sessions, windows) -> str | None:
+    """The tmux window id of a running session in `path` (root preferred), or None.
+
+    Lets the dashboard's Enter on an *active* project jump to its live session
+    window — the same `_focus_tmux_window` a session row uses — instead of spawning
+    a `yolo resume` that the already-running guard would just reject. A session
+    counts if its cwd is the project root or under it (mirrors `_wip_projects`'
+    active rule); a root-cwd session wins over a subdirectory one, and we skip any
+    match that has no tmux window (started outside tmux — nothing to focus).
+    """
+    kp = pathlib.Path(path)
+    matches = [
+        s
+        for s in sessions
+        if s.cwd and (pathlib.Path(s.cwd) == kp or kp in pathlib.Path(s.cwd).parents)
+    ]
+    matches.sort(key=lambda s: pathlib.Path(s.cwd) != kp)  # exact-root first
+    for s in matches:
+        win = windows.get(s.name)
+        if win:
+            return win[0]
+    return None
+
+
 def _wip_items(home: pathlib.Path, base: str) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
@@ -4901,7 +4925,11 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
                 + (" (active)" if p["active"] else "")
                 + ("" if p["registered"] else " (recent)"),
             ),
-            {"path": p["path"], "registered": p["registered"]},
+            {
+                "path": p["path"],
+                "registered": p["registered"],
+                "window": _project_session_window(p["path"], sessions, windows),
+            },
         )
         for p in projects
     ]
@@ -5081,11 +5109,17 @@ def _wip_enter(item, session, term) -> str:
         return f"resuming '{p['topic']}'…"
     if kind == "project":
         path = p["path"]
-        # `resume` continues the dir's most recent session, falling back to a fresh
-        # one when there's nothing to continue (or it aged out) — see
-        # _has_resumable_session — so Enter "just opens" the project either way.
-        _spawn_session_window(path, ["resume", "--no-tmux"], pathlib.Path(path).name, session)
-        return f"opening a session in {pathlib.Path(path).name}…"
+        name = pathlib.Path(path).name
+        # An active project already has a live session window: jump to it (as a
+        # session row would) rather than spawning a `resume` the already-running
+        # guard would reject. Otherwise open one — `resume` continues the dir's most
+        # recent session, falling back to a fresh one when there's nothing to
+        # continue (see _has_resumable_session), so Enter "just opens" it either way.
+        if p.get("window"):
+            _focus_tmux_window(session, p["window"])
+            return f"switched to session in {name}."
+        _spawn_session_window(path, ["resume", "--no-tmux"], name, session)
+        return f"opening a session in {name}…"
     return ""
 
 

@@ -7,6 +7,7 @@ stubbed, mirroring how test_tmux drives the ps picker. The seeded-dashboard wind
 itself is covered in test_tmux (the `wip --_dashboard` command).
 """
 
+import pathlib
 import subprocess
 import types
 
@@ -90,7 +91,11 @@ def project_item(cy, **over):
         "project",
         over.pop("key", "project:/p"),
         over.pop("cols", ("/p",)),
-        {"path": over.pop("path", "/p"), "registered": over.pop("registered", True)},
+        {
+            "path": over.pop("path", "/p"),
+            "registered": over.pop("registered", True),
+            "window": over.pop("window", None),
+        },
     )
 
 
@@ -211,6 +216,37 @@ def test_wip_projects_flags_active(cy, tmp_path):
     assert all(p["registered"] for p in projects)
 
 
+def _sess(cy, name, cwd):
+    return cy.WipSession("c", name, "", cwd, "", "", "1m", "waiting", 1)
+
+
+def test_project_session_window_prefers_root(cy):
+    sessions = [
+        _sess(cy, "proj-sub", "/work/proj/sub"),
+        _sess(cy, "proj", "/work/proj"),
+    ]
+    windows = {"proj": ("@7", "yolo"), "proj-sub": ("@9", "yolo")}
+    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, windows) == "@7"
+
+
+def test_project_session_window_falls_back_to_subdir(cy):
+    # No root-cwd session, but one running in a subdir of the project still counts.
+    sessions = [_sess(cy, "proj-sub", "/work/proj/sub")]
+    windows = {"proj-sub": ("@9", "yolo")}
+    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, windows) == "@9"
+
+
+def test_project_session_window_none_without_window(cy):
+    # Running but started outside tmux (no window) → nothing to focus.
+    sessions = [_sess(cy, "proj", "/work/proj")]
+    assert cy._project_session_window(pathlib.Path("/work/proj"), sessions, {}) is None
+    # And no session there at all → None.
+    assert (
+        cy._project_session_window(pathlib.Path("/work/other"), sessions, {"proj": ("@7", "y")})
+        is None
+    )
+
+
 def test_wip_projects_unions_recent_registry(cy, tmp_path):
     # A recently-opened project (in recent-projects.json) shows up alongside the
     # registered ones, flagged unregistered — but only if its directory still exists.
@@ -288,6 +324,23 @@ def test_enter_project_spawns_resume_window(cy, monkeypatch):
     ((repo, argv),) = spawned
     assert repo == "/work/proj"
     assert argv == ["resume", "--no-tmux"]
+
+
+def test_enter_active_project_focuses_window(cy, monkeypatch):
+    # A project with a live session window: Enter jumps to it (like a session row),
+    # rather than spawning a `resume` the already-running guard would reject.
+    focused = []
+    monkeypatch.setattr(cy, "_focus_tmux_window", lambda sess, win: focused.append((sess, win)))
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    sections = {
+        "session": [],
+        "worktree": [],
+        "project": [project_item(cy, path="/work/proj", window="@7")],
+    }
+    run_loop(cy, monkeypatch, sections, ["\r", "q"])
+    assert focused == [("yolo", "@7")]
+    assert spawned == []
 
 
 def test_n_on_project_prompts_topic_and_starts_worktree(cy, monkeypatch):
