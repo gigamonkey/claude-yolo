@@ -4673,17 +4673,25 @@ def _complete_dir(text, state):
 def _enable_dir_completion(readline) -> None:
     """Point `readline` at `_complete_dir` and bind Tab to completion.
 
-    Binds Tab on **both** GNU readline (`tab: complete`) and libedit
-    (`bind ^I rl_complete`) — their bind syntaxes differ, and the usual
-    `"libedit" in readline.__doc__` sniff is unreliable (it's False on the non-Apple
-    libedit builds uv's Python links, so Tab silently self-inserts there). Each
-    backend ignores the other's syntax with no error or stderr noise, so binding
-    both is robust without having to detect which backend is in play.
+    GNU readline and libedit use different bind syntaxes (`tab: complete` vs
+    `bind ^I rl_complete`), and the macOS Python uv ships links **libedit** — where
+    the GNU syntax is a silent no-op, so Tab self-inserts. The old
+    `"libedit" in readline.__doc__` sniff is False on those non-Apple libedit
+    builds, so we don't trust it. `readline.backend` (Python 3.13+) is the reliable
+    signal — bind the matching syntax when it's present; on older Pythons that lack
+    it, bind **both** (each backend ignores the other's line — verified a no-op on
+    GNU, and the documented incantation on libedit).
     """
     readline.set_completer(_complete_dir)
     readline.set_completer_delims(" \t\n")  # the whole path is one token, not split on /
-    readline.parse_and_bind("tab: complete")  # GNU readline
-    readline.parse_and_bind("bind ^I rl_complete")  # libedit
+    backend = getattr(readline, "backend", None)  # 3.13+: "readline" | "editline"
+    if backend == "editline":
+        readline.parse_and_bind("bind ^I rl_complete")  # libedit
+    elif backend == "readline":
+        readline.parse_and_bind("tab: complete")  # GNU readline
+    else:  # pre-3.13: no reliable backend signal, so cover both
+        readline.parse_and_bind("tab: complete")
+        readline.parse_and_bind("bind ^I rl_complete")
 
 
 class _PickerTerm:

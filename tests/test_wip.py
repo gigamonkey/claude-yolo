@@ -746,13 +746,13 @@ def test_complete_dir_expands_tilde(cy, tmp_path, monkeypatch):
     assert cy._complete_dir("~/p", 0) == f"{tmp_path / 'proj'}/"  # ~ understood like a shell
 
 
-def test_enable_dir_completion_binds_tab_for_both_backends(cy):
-    # Tab must be bound for GNU readline *and* libedit (uv's macOS Python links
-    # libedit, where the GNU `tab: complete` syntax is a silent no-op).
+def _fake_readline(backend="__unset__"):
     class FakeReadline:
         def __init__(self):
             self.binds = []
             self.completer = self.delims = None
+            if backend != "__unset__":
+                self.backend = backend  # mimic Python 3.13+'s readline.backend
 
         def set_completer(self, fn):
             self.completer = fn
@@ -763,11 +763,25 @@ def test_enable_dir_completion_binds_tab_for_both_backends(cy):
         def parse_and_bind(self, s):
             self.binds.append(s)
 
-    rl = FakeReadline()
-    cy._enable_dir_completion(rl)
-    assert rl.completer is cy._complete_dir
-    assert "tab: complete" in rl.binds  # GNU readline
-    assert "bind ^I rl_complete" in rl.binds  # libedit
+    return FakeReadline()
+
+
+def test_enable_dir_completion_binds_per_backend(cy):
+    # libedit (uv's macOS Python) needs `bind ^I rl_complete`; GNU needs
+    # `tab: complete`. With readline.backend (3.13+) we bind exactly the right one.
+    edit = _fake_readline("editline")
+    cy._enable_dir_completion(edit)
+    assert edit.completer is cy._complete_dir
+    assert edit.binds == ["bind ^I rl_complete"]
+
+    gnu = _fake_readline("readline")
+    cy._enable_dir_completion(gnu)
+    assert gnu.binds == ["tab: complete"]
+
+    # pre-3.13 (no backend attr): bind both, since neither errors on the other
+    old = _fake_readline()  # no .backend
+    cy._enable_dir_completion(old)
+    assert "tab: complete" in old.binds and "bind ^I rl_complete" in old.binds
 
 
 def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
