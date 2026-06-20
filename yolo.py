@@ -1791,7 +1791,11 @@ def _warn_dangling_keys(projects: dict, *, no_entry: bool) -> None:
 
 
 def load_yolo_config(
-    start: pathlib.Path, home: pathlib.Path, *, worktree_dir: pathlib.Path | None = None
+    start: pathlib.Path,
+    home: pathlib.Path,
+    *,
+    worktree_dir: pathlib.Path | None = None,
+    quiet: bool = False,
 ) -> tuple[dict, str | None]:
     """Merge ~/.yolo.json with the matching ~/.claude-yolo/projects.json entry.
 
@@ -1805,7 +1809,9 @@ def load_yolo_config(
     only — outside every container mount — so nothing Claude writes inside a
     container can change what the next launch mounts or which credentials it uses.
     Also prints the config provenance line and the stale-state warnings (dangling
-    project keys, leftover in-directory .yolo.json files) to stderr.
+    project keys, leftover in-directory .yolo.json files) to stderr — unless
+    `quiet` (the `wip` dashboard re-reads config on a loop and mustn't scribble
+    the provenance over its frame, nor re-warn every 2s).
     """
     merged = {}
     layers = []
@@ -1825,7 +1831,8 @@ def load_yolo_config(
     projects_file = home / ".claude-yolo" / "projects.json"
     projects = _read_projects_file(projects_file)
     matched_key, entry = _match_project_entry(projects, start)
-    _warn_dangling_keys(projects, no_entry=matched_key is None)
+    if not quiet:
+        _warn_dangling_keys(projects, no_entry=matched_key is None)
     if matched_key is not None:
         merge(_parse_yolo_dict(entry, f"{projects_file} [{matched_key}]"))
         layers.append(f"projects.json[{matched_key}]")
@@ -1839,6 +1846,9 @@ def load_yolo_config(
         if wt_entry:
             merge(_parse_yolo_dict(wt_entry, f"worktrees.json [{worktree_dir.name}]"))
             layers.append(f"worktrees.json[{worktree_dir.name}]")
+
+    if quiet:
+        return merged, matched_key
 
     # Warn about (but never read) a leftover in-directory .yolo.json — loudly
     # enough that a file planted by a container can't go unnoticed, on every
@@ -5139,14 +5149,37 @@ def _wip_nav(sections: dict) -> list:
     return sections["session"] + sections["worktree"] + sections["project"]
 
 
-def _wip_loop(home, base, session, term, *, finish_action, finish_remote) -> None:
+def _wip_live_config(home) -> tuple:
+    """`(base, finish_action, finish_remote)` re-read from config for the dashboard.
+
+    The dashboard is long-lived, so it resolves these *live* (each refresh/action)
+    rather than capturing them at launch — otherwise a `yolo config` edit (e.g.
+    `base main`) wouldn't take effect until the dashboard was restarted. Scope
+    mirrors how `yolo wip` first resolved them: global `~/.yolo.json` + the project
+    entry for the dashboard's own cwd (read quietly, so no provenance over the
+    frame). `home is None` is the test path (the loop is driven with a stub home).
+    """
+    if home is None:
+        return "HEAD", "delete-if-merged", "origin"
+    cfg, _ = load_yolo_config(pathlib.Path.cwd(), home, quiet=True)
+    return (
+        cfg.get("base") or "HEAD",
+        cfg.get("finish_action") or "delete-if-merged",
+        cfg.get("finish_remote") or "origin",
+    )
+
+
+def _wip_loop(home, session, term) -> None:
     """The dashboard's event loop (terminal plumbing is _run_picker's job).
 
     `term` supplies key input and cooked prompts (a real _PickerTerm, or a fake in
     tests). Selection is tracked by stable key, so the 2s auto-refresh — and the
     immediate refresh after an action — never drags the highlight onto a different
     row. `session` is the tmux session the dashboard lives in (for switch/spawn).
+    base / finish-action / finish-remote are re-read from config (`_wip_live_config`)
+    at each rebuild, so a config edit reaches the running dashboard.
     """
+    base, finish_action, finish_remote = _wip_live_config(home)
     sections = _wip_items(home, base)
     nav = _wip_nav(sections)
     selected = nav[0].key if nav else None
@@ -5159,6 +5192,7 @@ def _wip_loop(home, base, session, term, *, finish_action, finish_remote) -> Non
         _draw_wip(sections, selected, footer)
         key = term.wait_key(max(0.0, deadline - time.monotonic()))
         if key is None:  # refresh deadline, no keypress
+            base, finish_action, finish_remote = _wip_live_config(home)
             sections = _wip_items(home, base)
             nav = _wip_nav(sections)
             deadline = time.monotonic() + PS_WATCH_INTERVAL
@@ -5173,6 +5207,9 @@ def _wip_loop(home, base, session, term, *, finish_action, finish_remote) -> Non
             selected = keys[min(len(keys) - 1, keys.index(selected) + 1)]
             continue
         item = next((it for it in nav if it.key == selected), None)
+        # Re-read config right before the action, so a `yolo config` edit (base,
+        # finish-action, …) takes effect without restarting the dashboard.
+        base, finish_action, finish_remote = _wip_live_config(home)
         footer = (
             _wip_action(
                 key,
@@ -5362,14 +5399,16 @@ def _wip_add_project(home, term) -> str:
         return str(e)
 
 
-def do_wip(home, base, *, dashboard, tmux_session, finish_action, finish_remote) -> None:
+def do_wip(home, *, dashboard, tmux_session) -> None:
     """`wip` verb: open (or run) the tmux dashboard for managing yolo work.
 
     Two roles. As the **window-0 command** the tmux session seeds (`--_dashboard`),
     it runs the interactive loop in cbreak mode. As a **user-typed `yolo wip`**, it
     ensures the shared tmux session exists (seeding that dashboard window) and
     focuses it — attaching this terminal, or switching the client if we're already
-    in tmux. Requires tmux either way.
+    in tmux. Requires tmux either way. (base / finish-action / finish-remote aren't
+    passed in: the long-lived loop re-reads them from config itself, so a config
+    edit reaches a running dashboard — see `_wip_live_config`.)
     """
     if dashboard:
         if not (sys.stdin.isatty() and os.environ.get("TMUX")):
@@ -5378,16 +5417,7 @@ def do_wip(home, base, *, dashboard, tmux_session, finish_action, finish_remote)
             # passive ps table rather than a broken cbreak loop.
             _ps_watch_passive(home)
             return
-        _run_picker(
-            lambda term: _wip_loop(
-                home,
-                base,
-                _tmux_session_name(),
-                term,
-                finish_action=finish_action,
-                finish_remote=finish_remote,
-            )
-        )
+        _run_picker(lambda term: _wip_loop(home, _tmux_session_name(), term))
         return
     if not shutil.which("tmux"):
         sys.exit("`yolo wip` needs tmux installed and on PATH (brew install tmux).")
@@ -5763,14 +5793,7 @@ def _main():
         do_ps(home, watch=parsed.watch)
         return
     if verb == "wip":
-        do_wip(
-            home,
-            parsed.base,
-            dashboard=parsed.wip_dashboard,
-            tmux_session=parsed.tmux_session,
-            finish_action=parsed.finish_action,
-            finish_remote=parsed.finish_remote,
-        )
+        do_wip(home, dashboard=parsed.wip_dashboard, tmux_session=parsed.tmux_session)
         return
     if verb == "browse":
         # Selection comes from cli_ports (the pre-config parse), NOT parsed.ports:

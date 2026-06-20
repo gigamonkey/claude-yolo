@@ -108,9 +108,9 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
     frames = []
     monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
     term = FakeTerm(keys, lines=lines, confirms=confirms)
-    cy._wip_loop(
-        None, "HEAD", "yolo", term, finish_action="delete-if-merged", finish_remote="origin"
-    )
+    # home=None → _wip_live_config returns the built-in defaults (base HEAD,
+    # delete-if-merged, origin), so the loop runs without touching real config.
+    cy._wip_loop(None, "yolo", term)
     return frames
 
 
@@ -636,14 +636,7 @@ def test_do_wip_bootstrap_focuses_dashboard(cy, tmp_path, monkeypatch):
     monkeypatch.setattr(cy.shutil, "which", lambda n: "/usr/bin/tmux" if n == "tmux" else None)
     focused = []
     monkeypatch.setattr(cy, "_focus_tmux_window", lambda s, w: focused.append((s, w)))
-    cy.do_wip(
-        tmp_path,
-        "HEAD",
-        dashboard=False,
-        tmux_session="yolo",
-        finish_action="delete-if-merged",
-        finish_remote="origin",
-    )
+    cy.do_wip(tmp_path, dashboard=False, tmux_session="yolo")
     assert fake.named("new-session")  # session was created (seeded the dashboard)
     assert focused and focused[0][0] == "yolo"  # and we focused its window
 
@@ -651,26 +644,30 @@ def test_do_wip_bootstrap_focuses_dashboard(cy, tmp_path, monkeypatch):
 def test_do_wip_without_tmux_exits(cy, tmp_path, monkeypatch):
     monkeypatch.setattr(cy.shutil, "which", lambda n: None)
     with pytest.raises(SystemExit, match="needs tmux"):
-        cy.do_wip(
-            tmp_path,
-            "HEAD",
-            dashboard=False,
-            tmux_session="yolo",
-            finish_action="delete-if-merged",
-            finish_remote="origin",
-        )
+        cy.do_wip(tmp_path, dashboard=False, tmux_session="yolo")
 
 
 def test_do_wip_dashboard_without_tty_falls_back_to_passive(cy, tmp_path, monkeypatch):
     monkeypatch.setattr(cy.sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
     called = []
     monkeypatch.setattr(cy, "_ps_watch_passive", lambda home: called.append(home))
-    cy.do_wip(
-        tmp_path,
-        "HEAD",
-        dashboard=True,
-        tmux_session="yolo",
-        finish_action="delete-if-merged",
-        finish_remote="origin",
-    )
+    cy.do_wip(tmp_path, dashboard=True, tmux_session="yolo")
     assert called == [tmp_path]
+
+
+def test_wip_live_config_rereads_base(cy, tmp_path, monkeypatch):
+    # The long-lived dashboard re-resolves base/finish-action/finish-remote from
+    # config, so editing ~/.yolo.json takes effect without a restart.
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    assert cy._wip_live_config(home) == ("HEAD", "delete-if-merged", "origin")  # no config yet
+    (home / ".yolo.json").write_text('{"base": "main", "finish-action": "push"}')
+    base, action, remote = cy._wip_live_config(home)
+    assert base == "main" and action == "push" and remote == "origin"
+
+
+def test_wip_live_config_none_home_is_defaults(cy):
+    assert cy._wip_live_config(None) == ("HEAD", "delete-if-merged", "origin")

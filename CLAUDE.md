@@ -860,7 +860,9 @@ means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
 (`_parse_yolo_dict` / `_read_projects_file` / `_read_worktrees_file`).
 
-Every load also prints a one-line **provenance note** to stderr — e.g.
+Every load also prints a one-line **provenance note** to stderr (suppressed by
+`quiet=True`, which the long-lived `wip` dashboard passes when it re-reads config
+each tick so the note/warnings don't scribble its frame) — e.g.
 `config: ~/.yolo.json + projects.json[/Users/peter/hacks/foo]`, with a
 `+ worktrees.json[<topic>]` tail when a (non-empty) worktree overlay applies, or
 `config: built-in defaults (no project entry)` — and warns about **dangling
@@ -1192,7 +1194,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux
   window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
-  config and execs docker straight into the window). The `--_dashboard` loop only
+  config and execs docker straight into the window). The dashboard is long-lived,
+  so it does **not** capture `base`/`finish-action`/`finish-remote` at launch:
+  `_wip_loop` re-reads them from config (`_wip_live_config` → `load_yolo_config(...,
+  quiet=True)` against the dashboard's cwd) on every rebuild and before every
+  action, so a `yolo config` edit (e.g. `base main`) reaches a *running* dashboard
+  — both its display (the COMMITS/STATUS columns judged vs `base`) and its
+  in-process `f`/`r` — without a restart. (`quiet=True` keeps the provenance line
+  and dangling-key warnings off the frame.) The `--_dashboard` loop only
   activates with a TTY + `$TMUX`; otherwise it degrades to `_ps_watch_passive`.
   **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
   data layer / `yolo list` / `ps` stay escape-free): `_draw_table` runs each row
@@ -1708,7 +1717,9 @@ multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
-(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback).
+(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback) and
+`_wip_live_config` (re-reads `base`/`finish-action`/`finish-remote` from a
+freshly-edited `~/.yolo.json`; `None` home → built-in defaults).
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
 assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker

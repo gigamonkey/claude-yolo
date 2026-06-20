@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` picks up config edits without a restart.** The dashboard is a
+  long-lived process; it used to capture `base`/`finish-action`/`finish-remote` at
+  launch, so changing e.g. `base` to `main` in `~/.yolo.json` had no effect on a
+  running dashboard — `r` (rebase) still used the old base. It now re-reads those
+  from config on each refresh and before each action, so both the COMMITS/STATUS
+  columns and the in-process finish/rebase reflect the current config.
+
 - **`yolo wip` is fully colorized.** Every column is color-coded — sessions by
   status group (grey unknown / green waiting / yellow working), worktree STATUS by
   `dirty`/`running`/`merged`/`unmerged`, the COMMITS arrows with nonzero behind in
