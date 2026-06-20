@@ -5,6 +5,25 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo resume` falls back to a fresh session when there's nothing to
+  continue.** A plain `resume` issues `claude --continue`, which *errors* when no
+  prior session exists for the directory — one was never started, or it aged out
+  via `cleanupPeriodDays`. yolo now checks host-side for a transcript
+  (`~/.claude/projects/<slug>/*.jsonl`) before launching and, finding none, starts
+  a fresh session (named after the worktree topic in worktree mode) with a note,
+  instead of letting the error blow up inside the container. This also makes the
+  `wip` dashboard's **Enter on a project** open that project's session (resuming if
+  there is one, fresh otherwise), and its `n` key prompt for a topic and start a
+  **new worktree** session there.
+
+- **`yolo wip` splits running sessions into WAITING and WORKING tables.** Instead
+  of one combined "RUNNING SESSIONS" list, the dashboard now shows waiting sessions
+  (sorted longest-idle first) and working sessions (sorted longest-busy first) as
+  separate sections, so the time each has been idle or busy reads at a glance — the
+  `ps --watch` STATE detail, now grouped. A `-`-state session (a `yolo shell` or one
+  that hasn't taken a turn) shows in an OTHER table, only when any exist. Each table
+  reads SESSION / TOPIC / CREATED / PORTS / STATE, with the activity state last.
+
 - **`yolo wip` lists projects you've opened, not just configured ones.** Every
   launch now stamps the project it opened into a new `~/.claude-yolo/recent-projects.json`
   registry, and the dashboard's **projects** section unions those with the

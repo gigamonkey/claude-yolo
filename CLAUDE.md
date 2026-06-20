@@ -1137,10 +1137,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   hidden flag that means "run the loop", vs a user-typed `yolo wip` that
   bootstraps the session + focuses the dashboard window via `_focus_tmux_window`,
   the shared focus helper extracted from `_launch_in_tmux`). Requires tmux.
-  Three sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
+  Sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
   `docker ps` carrying the cid + labels, ordered by `_order_sessions`:
   waiting→working→unknown, longest-first within each, so the most-likely-to-need-
-  you rise), **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
+  you rise) — which `_draw_wip` renders as **two separate tables, WAITING and
+  WORKING** (each already longest-first, so the idle/busy duration in the STATE
+  column reads at a glance), plus an **OTHER** table for the `-`-state sessions (a
+  `yolo shell` or a not-yet-started one), shown only when any exist; then
+  **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
   `docker ps` at the 2s cadence), and **projects** (`_wip_projects`: the
@@ -1155,8 +1159,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under
   the cbreak `_run_picker` extracted from `_ps_picker`, selection tracked by a
   stable key like the ps picker) dispatches keys (`_wip_action`): `Enter`
-  switches to a session's window / resumes a worktree / starts a project session,
-  `n` starts a new worktree, `b` browses a forwarded port (prompting if >1), `s`
+  switches to a session's window / resumes a worktree / **opens a project's
+  session** (a plain `resume` that falls back to a fresh session when the dir has
+  none — see `_has_resumable_session`, so Enter "just opens" the project either
+  way), `n` on a project prompts for a topic and starts a **new worktree** session
+  there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
+  <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
+  forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path), `q` quits. `f`/`r`
@@ -1439,6 +1448,18 @@ worktree's path. The `--name` injection is **suppressed** when resuming, because
 its identity); `resume TOPIC --new` is the exception — it *does* name a fresh
 worktree session and so omits the resume flags.
 
+A plain `resume` (the `--continue` path) **falls back to a fresh session when
+there's nothing to continue.** `claude --continue` *errors* if no transcript
+exists for the dir — never started, or expired via `cleanupPeriodDays` — so before
+launching, `_has_resumable_session` checks host-side for
+`~/.claude/projects/<slug>/*.jsonl` (the same slug-from-the-bind-mounted-cwd that
+makes resume work at all). Finding none, the launch path drops `--continue`, prints
+a note, and builds a fresh session instead — *named* like `--new` in worktree mode
+(`session_name` = the topic), unnamed in cwd mode. This is what lets a "resume this
+project" affordance be safe even when the dir has never had a session. Scoped to
+the `--continue` path only: `-r [ID]` is left to `claude` (an explicit ID/picker
+request shouldn't silently become a fresh session).
+
 ## Conventions / gotchas
 
 - **macOS + Linux hosts (Windows via WSL2); Docker Desktop, OrbStack, or native
@@ -1596,7 +1617,10 @@ is still read correctly), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
-the verb gating), the non-tmux already-running `resume` refusal, and the `stop`
+the verb gating), the non-tmux already-running `resume` refusal, the
+`resume`-with-no-session fallback to a fresh session (worktree mode names it after
+the topic, cwd mode leaves it unnamed; a seeded `projects/<slug>/*.jsonl`
+transcript exercises the real `--continue` path), and the `stop`
 verb (`docker stop`ping the worktree's container by label, the nothing-running
 no-op, and the actively-`working` guard — refused without `--force`, stopped with
 it; the cwd variant is in `test_cli.py`).
@@ -1632,11 +1656,15 @@ clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 `wip --_dashboard` seed of window 0 is asserted here too.
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
-grouping/sorting, `_wip_items` splitting a running worktree into the sessions
-section vs the inactive list against a real repo, `_wip_projects`' active flag)
-and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
+grouping/sorting, `_draw_wip` rendering the sessions as separate WAITING/WORKING/
+OTHER tables and omitting OTHER when empty, `_wip_items` splitting a running
+worktree into the sessions section vs the inactive list against a real repo,
+`_wip_projects`' active flag plus the recent-projects union and the `a`-registers-
+selection flow) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
 `_draw_wip` and the action cores stubbed (navigation across sections, refresh
-preserving selection by key, Enter→switch/resume/start, `b` browse incl. the
+preserving selection by key, Enter→switch/resume-worktree/resume-project, `n` on a
+project prompting a topic then spawning `start <topic>` (and cancelling on an empty
+topic), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions, a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap

@@ -51,6 +51,18 @@ def claude_command(cy, argv):
     return argv[i + 1 :]
 
 
+def seed_session(cy, home, session_dir):
+    """Plant a fake Claude transcript so a plain `resume` finds a session to continue.
+
+    Mirrors ~/.claude/projects/<slug>/*.jsonl, which `_has_resumable_session`
+    checks before issuing `claude --continue`. Without one, `resume` falls back to
+    a fresh session.
+    """
+    proj = home / ".claude" / "projects" / cy._cwd_slug(session_dir)
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "sess.jsonl").write_text("{}\n")
+
+
 # --- start ------------------------------------------------------------------
 
 
@@ -99,10 +111,24 @@ def test_resume_errors_without_worktree(cy, run_cli, repo):
 def test_resume_defaults_to_continue(cy, run_cli, repo):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    seed_session(cy, home, wt)
     argv = run_cli(["resume", "topic"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
     assert "--continue" in cmd
     assert "--name" not in cmd
+
+
+def test_resume_without_session_falls_back_to_fresh(cy, run_cli, repo, capsys):
+    # No transcript for the worktree (claude --continue would error inside the
+    # container): resume starts a fresh *named* session instead and says so.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    argv = run_cli(["resume", "topic"], home=home, cwd=r)
+    cmd = claude_command(cy, argv)
+    assert "--continue" not in cmd
+    assert cmd[cmd.index("--name") + 1] == "topic"
+    assert "No previous Claude session" in capsys.readouterr().err
 
 
 def test_resume_new_starts_named_fresh_session(cy, run_cli, repo):
@@ -868,9 +894,18 @@ def test_bare_is_equivalent_to_start(cy, run_cli, repo):
 
 def test_resume_no_topic_continues_cwd(cy, run_cli, repo):
     r, home = repo
+    seed_session(cy, home, r)
     argv = run_cli(["resume"], home=home, cwd=r)
     assert worktree_label(argv) is None
     assert "--continue" in claude_command(cy, argv)
+
+
+def test_resume_no_topic_without_session_falls_back_to_fresh(cy, run_cli, repo):
+    r, home = repo  # no transcript for the cwd
+    argv = run_cli(["resume"], home=home, cwd=r)
+    cmd = claude_command(cy, argv)
+    assert "--continue" not in cmd
+    assert "--name" not in cmd  # a plain cwd session is unnamed, even on fallback
 
 
 def test_resume_no_topic_with_session_id(cy, run_cli, repo):

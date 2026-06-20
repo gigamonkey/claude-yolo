@@ -1472,6 +1472,21 @@ def _cwd_slug(cwd) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
 
 
+def _has_resumable_session(host_claude_dir, cwd) -> bool:
+    """Whether a resumable Claude transcript exists for `cwd` under the config dir.
+
+    Sessions live as <config-dir>/projects/<slug>/*.jsonl, where the slug is the
+    cwd path slugified the way Claude buckets ~/.claude/projects — host and
+    container agree because the cwd is bind-mounted at its identical path. A plain
+    `yolo resume` issues `claude --continue`, which *errors* when no transcript
+    exists (never created, or expired via cleanupPeriodDays). The launch path
+    checks this first and falls back to a fresh session rather than letting that
+    error blow up inside the container.
+    """
+    proj = pathlib.Path(host_claude_dir).expanduser() / "projects" / _cwd_slug(cwd)
+    return proj.is_dir() and any(proj.glob("*.jsonl"))
+
+
 def _branch_exists(name: str) -> bool:
     return (
         subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]).returncode
@@ -4725,7 +4740,7 @@ WipSession = collections.namedtuple(
 # section's table, and the payload an action needs.
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
-WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "STATE", "PORTS", "UP")
+WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
 WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "DIRECTORY")
 WIP_PROJECT_HEADERS = ("PROJECT",)
 
@@ -4856,9 +4871,9 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
         cols = (
             s.name + ("" if win else " *"),
             s.topic or "-",
-            state_disp,
-            s.ports or "-",
             s.created,
+            s.ports or "-",
+            state_disp,
         )
         session_items.append(WipItem("session", f"session:{s.name}", cols, payload))
 
@@ -4914,15 +4929,28 @@ def _draw_wip_section(title: str, headers: tuple, items: list, selected: str | N
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
     "worktree": "Enter resume · f finish · r rebase",
-    "project": "Enter start session · a register · n new worktree",
+    "project": "Enter open session · n new worktree · a register",
 }
 
 
 def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
-    """One dashboard frame: the three sections plus a status/help footer."""
+    """One dashboard frame: the sections plus a status/help footer.
+
+    The running sessions are split into WAITING and WORKING tables (each already
+    longest-first from _order_sessions), so the time each has been idle/busy reads
+    at a glance. The `-`-state sessions (a `yolo shell` or a not-yet-started one)
+    get an OTHER table, shown only when any exist so it isn't dead weight.
+    """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
     print("\x1b[1myolo wip\x1b[0m — dashboard\n")
-    _draw_wip_section("RUNNING SESSIONS", WIP_SESSION_HEADERS, sections["session"], selected)
+    sess = sections["session"]
+    waiting = [it for it in sess if it.payload.get("state") == "waiting"]
+    working = [it for it in sess if it.payload.get("state") == "working"]
+    other = [it for it in sess if it.payload.get("state") not in ("waiting", "working")]
+    _draw_wip_section("WAITING SESSIONS", WIP_SESSION_HEADERS, waiting, selected)
+    _draw_wip_section("WORKING SESSIONS", WIP_SESSION_HEADERS, working, selected)
+    if other:
+        _draw_wip_section("OTHER SESSIONS", WIP_SESSION_HEADERS, other, selected)
     _draw_wip_section("INACTIVE WORKTREES", WIP_WORKTREE_HEADERS, sections["worktree"], selected)
     _draw_wip_section("PROJECTS", WIP_PROJECT_HEADERS, sections["project"], selected)
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
@@ -5031,6 +5059,8 @@ def _wip_action(key, item, home, base, session, term, *, finish_action, finish_r
             return _wip_finish(kind, p, home, base, term, finish_action, finish_remote)
         if key == "r":
             return _wip_rebase(kind, p, base, term)
+        if key == "n" and kind == "project":
+            return _wip_new_worktree(p, session, term)
     except YoloError as e:
         return str(e)
     return ""
@@ -5051,8 +5081,11 @@ def _wip_enter(item, session, term) -> str:
         return f"resuming '{p['topic']}'…"
     if kind == "project":
         path = p["path"]
-        _spawn_session_window(path, ["start", "--no-tmux"], pathlib.Path(path).name, session)
-        return f"starting a session in {pathlib.Path(path).name}…"
+        # `resume` continues the dir's most recent session, falling back to a fresh
+        # one when there's nothing to continue (or it aged out) — see
+        # _has_resumable_session — so Enter "just opens" the project either way.
+        _spawn_session_window(path, ["resume", "--no-tmux"], pathlib.Path(path).name, session)
+        return f"opening a session in {pathlib.Path(path).name}…"
     return ""
 
 
@@ -5100,6 +5133,24 @@ def _wip_rebase(kind, p, base, term) -> str:
             return "couldn't resolve the worktree's main repo."
         return rebase_worktree(p["worktree"], p["main_root"], p["topic"], base, capture=True)
     return "rebase applies to inactive worktrees and idle sessions."
+
+
+def _wip_new_worktree(p, session, term) -> str:
+    """`n`: prompt for a topic, then start a new worktree session in this project.
+
+    Shells out (like Enter's launches) into a fresh tmux window running `yolo start
+    <topic> --no-tmux` in the project dir, so the inner yolo creates the worktree +
+    branch and execs docker into the window. Topic validation (existing worktree/
+    branch, bad branch name) is left to that spawned `yolo start`, surfacing in the
+    window — the same place Enter's launch errors land.
+    """
+    topic = term.prompt_line("New worktree topic: ")
+    if not topic:
+        return "cancelled."
+    path = p["path"]
+    name = f"{pathlib.Path(path).name}-{topic}"
+    _spawn_session_window(path, ["start", topic, "--no-tmux"], name, session)
+    return f"starting worktree '{topic}'…"
 
 
 def _wip_add_project(home, term) -> str:
@@ -5744,15 +5795,35 @@ def _main():
             extra_hooks=session_hooks,
         )
     elif verb == "resume" and not parsed.new:
-        command = build_claude_args(
-            parsed.prompts,
-            ssh_agent=parsed.ssh_agent,
-            continue_session=True,
-            add_dirs=mount_dirs,
-            forwarded_ports=container_ports,
-            status_state_path=session_status_path,
-            extra_hooks=session_hooks,
-        )
+        # `claude --continue` errors when there's no prior session for this dir
+        # (never started one, or it aged out via cleanupPeriodDays). Detect that
+        # host-side and fall back to a fresh session, so a plain `resume` — or a
+        # dashboard "resume this project" — never dies on that error.
+        host_claude_dir = parsed.config_dir or f"{home}/.claude"
+        if _has_resumable_session(host_claude_dir, cwd):
+            command = build_claude_args(
+                parsed.prompts,
+                ssh_agent=parsed.ssh_agent,
+                continue_session=True,
+                add_dirs=mount_dirs,
+                forwarded_ports=container_ports,
+                status_state_path=session_status_path,
+                extra_hooks=session_hooks,
+            )
+        else:
+            print(
+                f"No previous Claude session for {cwd}; starting a fresh one.",
+                file=sys.stderr,
+            )
+            command = build_claude_args(
+                parsed.prompts,
+                ssh_agent=parsed.ssh_agent,
+                name=session_name,
+                add_dirs=mount_dirs,
+                forwarded_ports=container_ports,
+                status_state_path=session_status_path,
+                extra_hooks=session_hooks,
+            )
     else:
         # start, or `resume TOPIC --new` (a fresh named session in the worktree).
         command = build_claude_args(

@@ -130,6 +130,50 @@ def test_order_sessions_waiting_then_working_longest_first(cy):
     assert names == ["idle-long", "idle-short", "w-long", "w-short", "unknown"]
 
 
+def test_draw_wip_splits_waiting_working_other(cy, capsys):
+    # The sessions render as separate WAITING / WORKING / OTHER tables.
+    sections = {
+        "session": [
+            session_item(
+                cy,
+                key="session:w1",
+                payload={"state": "waiting"},
+                cols=("w1", "-", "waiting 9m", "-", "1m"),
+            ),
+            session_item(
+                cy,
+                key="session:k1",
+                payload={"state": "working"},
+                cols=("k1", "-", "working 2m", "-", "1m"),
+            ),
+            session_item(
+                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "-", "-", "1m")
+            ),
+        ],
+        "worktree": [],
+        "project": [],
+    }
+    cy._draw_wip(sections, "session:w1", "")
+    out = capsys.readouterr().out
+    assert "WAITING SESSIONS" in out and "WORKING SESSIONS" in out and "OTHER SESSIONS" in out
+    # each session lands under its own section, in order
+    assert out.index("w1") < out.index("WORKING SESSIONS") < out.index("k1")
+    assert out.index("k1") < out.index("OTHER SESSIONS") < out.index("s1")
+
+
+def test_draw_wip_omits_empty_other_section(cy, capsys):
+    # No `-`-state session → no OTHER table (but WAITING/WORKING always show).
+    sections = {
+        "session": [session_item(cy, payload={"state": "waiting"})],
+        "worktree": [],
+        "project": [],
+    }
+    cy._draw_wip(sections, None, "")
+    out = capsys.readouterr().out
+    assert "WAITING SESSIONS" in out and "WORKING SESSIONS" in out
+    assert "OTHER SESSIONS" not in out
+
+
 def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, repo, monkeypatch):
     # Two worktrees; one has a running session. It must appear under sessions and be
     # excluded from the inactive-worktrees section (which the other still fills).
@@ -232,7 +276,9 @@ def test_enter_worktree_spawns_resume_window(cy, monkeypatch):
     assert argv == ["resume", "old", "--no-tmux"]
 
 
-def test_enter_project_spawns_start_window(cy, monkeypatch):
+def test_enter_project_spawns_resume_window(cy, monkeypatch):
+    # Enter on a project resumes the dir's session (falling back to a fresh one
+    # when there's nothing to continue — handled inside the spawned `yolo resume`).
     spawned = []
     monkeypatch.setattr(
         cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append((repo, argv))
@@ -241,7 +287,33 @@ def test_enter_project_spawns_start_window(cy, monkeypatch):
     run_loop(cy, monkeypatch, sections, ["\r", "q"])
     ((repo, argv),) = spawned
     assert repo == "/work/proj"
-    assert argv == ["start", "--no-tmux"]
+    assert argv == ["resume", "--no-tmux"]
+
+
+def test_n_on_project_prompts_topic_and_starts_worktree(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
+    )
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["fix-auth"])
+    ((repo, argv, name),) = spawned
+    assert repo == "/work/proj"
+    assert argv == ["start", "fix-auth", "--no-tmux"]
+    assert name == "proj-fix-auth"
+
+
+def test_n_on_project_cancels_on_empty_topic(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
+    )
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=[""])
+    assert spawned == []
+    assert frames[-1][1] == "cancelled."
 
 
 def test_browse_session_one_port(cy, monkeypatch):
