@@ -187,7 +187,8 @@ yolo stop                              # stop the running session in this direct
 
 As a shorthand a bare `yolo` is the same as `yolo start`. `resume` continues the
 most recent session (`-r` picks a specific one, opening Claude's interactive
-picker when given no ID). `shell` joins the **running** container for this
+picker when given no ID); if there's nothing to continue it just starts a fresh
+session. `shell` joins the **running** container for this
 directory if there is one — handy while a session works in another terminal —
 and otherwise starts a fresh throwaway container; either way the prompt is
 flagged so you know where you are (`yolo:<dir>$`). `stop` stops the running
@@ -226,7 +227,9 @@ Verb details:
   if the topic already exists — use `resume`.
 
 - **`resume TOPIC`** continues that worktree's most recent session (`-r` for a
-  specific one); `--new` starts a fresh named session there instead.
+  specific one); `--new` starts a fresh named session there instead. If there's no
+  session to continue (none was ever started, or it expired), it quietly starts a
+  fresh one rather than erroring.
 
 - **`rebase TOPIC`** rebases the worktree's branch onto `--base` (default
   `HEAD`, the same ref `start` branches off and `finish`/`list` judge against),
@@ -247,11 +250,14 @@ Verb details:
   [`--finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
   (default: delete it if merged, else keep it).
 
-- **`list`** shows TOPIC / BRANCH / STATUS / DIRECTORY, where STATUS is
-  `running`, `dirty` (uncommitted changes), or — when idle and clean —
-  `merged`/`unmerged` depending on whether the branch is already contained in
-  the base branch (`git branch --merged` semantics, so `merged` means it's
-  ready to `finish`; a squash-merge reads as `unmerged`).
+- **`list`** shows TOPIC / STATUS / COMMITS / DIRECTORY. STATUS is `running`,
+  `dirty` (uncommitted changes), or — when idle and clean — `merged`/`unmerged`
+  depending on whether the branch is already contained in the base branch (`git
+  branch --merged` semantics, so `merged` means it's ready to `finish`; a
+  squash-merge reads as `unmerged`). COMMITS shows how far the branch has diverged
+  from its base as `↓behind ↑ahead`. The branch name is folded into TOPIC and shown
+  only when it differs from the topic — e.g. if someone switched branches inside
+  the container.
 
 - **`dir [TOPIC]`** prints a session's directory — the worktree's root with a
   `TOPIC` (it errors if that worktree doesn't exist), or the current directory
@@ -375,21 +381,25 @@ for one run.
 
 ### The `wip` dashboard
 
-`yolo wip` opens a full-screen, tmux-resident dashboard for managing *everything*
-yolo — it's the window-0 dashboard a `--tmux` session opens onto, and you can jump
-to it any time with `yolo wip` (it ensures the shared session exists and focuses
-the dashboard window). It refreshes every 2 seconds like `ps --watch`, in three
-sections:
+`yolo wip` opens a full-screen, color-coded, tmux-resident dashboard for managing
+*everything* yolo — it's the window-0 dashboard a `--tmux` session opens onto, and
+you can jump to it any time with `yolo wip` (it ensures the shared session exists
+and focuses the dashboard window). It refreshes every 2 seconds like `ps --watch`,
+in three sections:
 
-- **Running sessions** — every running yolo container across all repos (a superset
-  of `ps --watch`), grouped so the ones most likely to need you rise to the top:
-  **waiting** sessions first (longest-idle first), then **working** ones
-  (longest-working first), then anything whose state is unknown (a `yolo shell`, or
-  a session that hasn't taken a turn).
-- **Inactive worktrees** — every worktree under `~/.claude-yolo/worktrees` that
-  *isn't* currently running (a la `yolo list --all`), ready to resume.
-- **Projects** — the directories registered in `projects.json`, where you can start
-  fresh work.
+- **Sessions** — every running yolo session across all repos, in one table
+  (SESSION / TOPIC / CREATED / PORTS / STATE). Rows are grouped by state — unknown
+  (a `yolo shell`, or a session that hasn't taken a turn) first, then **waiting**,
+  then **working** — and within each group sorted by least-recent activity first,
+  so reading top to bottom runs from "longest idle / least recently touched" toward
+  "busy right now". The groups are told apart by color rather than blank lines.
+- **Worktrees** — every worktree across all repos (a la `yolo list --all`),
+  *including* ones with a running session (which also appear up in Sessions). The
+  **COMMITS** column shows how far each branch has diverged from its base as
+  `↓behind ↑ahead`.
+- **Projects** — the projects registered in `projects.json` *plus* any you've
+  simply opened (yolo remembers those and flags them `(recent)`), so a project
+  shows up here without a `yolo config` step.
 
 Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
 the selected row:
@@ -397,21 +407,26 @@ the selected row:
 | Key     | On…                              | Does |
 |---------|----------------------------------|------|
 | `Enter` | a running session                | switch to its tmux window |
-| `Enter` | an inactive worktree             | resume it in a new window |
-| `Enter` | a project                        | start a session there (no worktree) |
-| `n`     | a project                        | prompt for a topic, start a new worktree |
+| `Enter` | a worktree                       | switch to its live session window if it's running, else resume it in a new window |
+| `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
+| `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
-| `f`     | an inactive worktree / idle session | finish it (stops an idle session first, then removes the worktree) |
-| `r`     | an inactive worktree / idle session | rebase its branch onto `--base` |
-| `a`     | anything                         | register a new project (prompts for a path) |
+| `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
+| `r`     | a worktree / idle session        | rebase its branch onto its base |
+| `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path) |
 | `q`     | anything                         | quit the dashboard |
 
-`f` and `r` are offered only on idle (`waiting`) sessions and inactive worktrees,
-never on an actively `working` one — the same not-interrupt-active-work stance
-`yolo stop`/`yolo rebase` take (stop a working session with `s` first). Stops,
+`f` and `r` won't interrupt an actively `working` session: applied to a worktree
+(or an idle `waiting` session) they go through, but a worktree whose session is
+busy refuses in the footer — stop it with `s` first. This is the same
+not-interrupt-active-work stance `yolo stop`/`yolo rebase` take on the command
+line. Each worktree's base and finish settings come from **its own repo's config**
+(that repo's `projects.json` entry + worktree overlay + global `~/.yolo.json`),
+resolved live — so the COMMITS column, `r`, and `f` all use the right base per
+repo, and editing a config takes effect without restarting the dashboard. Stops,
 finishes, rebases, and project registration happen **in place** (their result, or
-any error, shows in the footer); starting and resuming a session **shell out** into
+any error, shows in the footer); opening or starting a session **shells out** into
 a new tmux window, where a fresh `yolo` resolves that project's own config.
 Requires tmux. (`wip` replaced the old `ps --watch` dashboard, of which it's a
 superset; `ps`/`ps --watch` remain as standalone verbs, handy outside tmux.)
