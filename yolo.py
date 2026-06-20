@@ -4017,6 +4017,35 @@ def _branch_merged(branch: str, base: str, cwd: pathlib.Path | None = None) -> b
     return run(["merge-base", "--is-ancestor", branch, base]).returncode == 0
 
 
+def _branch_ahead_behind(branch: str, base: str, cwd: pathlib.Path | None = None):
+    """`(ahead, behind)` commit counts of `branch` vs `base`, or None if unresolvable.
+
+    `ahead` = commits on `branch` not in `base`; `behind` = the reverse. Straight
+    from `git rev-list --left-right --count base...branch`, whose two numbers are
+    the base-only (left = behind) and branch-only (right = ahead) counts. `cwd`
+    resolves the refs in another repo (like `_branch_merged`, for `list --all` /
+    the dashboard, where each worktree's branch lives in its own main repo). None
+    when either ref doesn't resolve or git's output isn't the expected pair.
+    """
+    res = subprocess.run(
+        [
+            "git",
+            *(["-C", str(cwd)] if cwd else []),
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"{base}...{branch}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    parts = res.stdout.split()
+    if res.returncode != 0 or len(parts) != 2:
+        return None
+    behind, ahead = parts
+    return int(ahead), int(behind)
+
+
 def do_rebase(
     topic: str,
     home: pathlib.Path,
@@ -4266,7 +4295,7 @@ def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
 # cores need; `topic_label` folds in a diverged branch for display.
 WorktreeRow = collections.namedtuple(
     "WorktreeRow",
-    "repo_name topic topic_label status directory running worktree main_root slug",
+    "repo_name topic topic_label status ahead_behind directory running worktree main_root slug",
 )
 
 
@@ -4324,6 +4353,8 @@ def _worktree_rows(
             if not flags:
                 flags.append("merged" if _branch_merged(branch, base, repo) else "unmerged")
             status = ", ".join(flags)
+            ab = _branch_ahead_behind(branch, base, repo)
+            ahead_behind = f"{ab[0]}/{ab[1]}" if ab else "-"
             try:
                 directory = "~/" + str(wt.relative_to(home))
             except ValueError:
@@ -4337,6 +4368,7 @@ def _worktree_rows(
                     topic=topic,
                     topic_label=label,
                     status=status,
+                    ahead_behind=ahead_behind,
                     directory=directory,
                     running=running,
                     worktree=wt,
@@ -4741,7 +4773,7 @@ WipSession = collections.namedtuple(
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
 WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
-WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "DIRECTORY")
+WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "AHEAD/BEHIND", "DIRECTORY")
 WIP_PROJECT_HEADERS = ("PROJECT",)
 
 
@@ -4905,7 +4937,7 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
         WipItem(
             "worktree",
             f"worktree:{w.slug}:{w.topic}",
-            (w.repo_name, w.topic_label, w.status, w.directory),
+            (w.repo_name, w.topic_label, w.status, w.ahead_behind, w.directory),
             {
                 "worktree": w.worktree,
                 "main_root": w.main_root,

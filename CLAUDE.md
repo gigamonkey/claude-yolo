@@ -1147,7 +1147,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
-  `docker ps` at the 2s cadence), and **projects** (`_wip_projects`: the
+  `docker ps` at the 2s cadence; the dashboard shows an extra **AHEAD/BEHIND**
+  column here — `_branch_ahead_behind`'s `ahead/behind` commit counts vs `base`
+  from `git rev-list --left-right --count base...branch`, carried on the
+  `WorktreeRow` but rendered only in the dashboard, not in `do_list`), and
+  **projects** (`_wip_projects`: the
   `projects.json` keys **plus** the recent-projects registry — every launch stamps
   the project it opened (`_record_recent_project`, keyed by `_project_key`) into
   `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
@@ -1659,10 +1663,15 @@ surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 grouping/sorting, `_draw_wip` rendering the sessions as separate WAITING/WORKING/
 OTHER tables and omitting OTHER when empty, `_wip_items` splitting a running
 worktree into the sessions section vs the inactive list against a real repo,
+the `_worktree_rows` AHEAD/BEHIND counts (`_branch_ahead_behind` against a real
+repo with commits added on the branch and the base) and that column rendering in
+`_draw_wip`,
 `_wip_projects`' active flag plus the recent-projects union and the `a`-registers-
-selection flow) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
+selection flow, plus `_project_session_window` root-vs-subdir/no-window
+resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
 `_draw_wip` and the action cores stubbed (navigation across sections, refresh
-preserving selection by key, Enter→switch/resume-worktree/resume-project, `n` on a
+preserving selection by key, Enter→switch/resume-worktree/resume-project/focus-
+active-project, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,

@@ -81,7 +81,7 @@ def worktree_item(cy, **over):
     return cy.WipItem(
         "worktree",
         over.pop("key", "worktree:repo:old"),
-        over.pop("cols", ("repo", "old", "merged", "~/old")),
+        over.pop("cols", ("repo", "old", "merged", "2/0", "~/old")),
         p,
     )
 
@@ -203,6 +203,38 @@ def test_wip_items_running_worktree_shows_as_session_not_inactive(cy, run_cli, r
     sess = sections["session"][0]
     assert sess.payload["worktree"] == wt_alpha
     assert sess.payload["main_root"] is not None
+
+
+def test_worktree_rows_report_ahead_behind(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+
+    def ab():
+        rows = cy._worktree_rows(home, "HEAD", all_repos=True)
+        return next(w for w in rows if w.topic == "topic").ahead_behind
+
+    assert ab() == "0/0"  # just branched off HEAD
+    (wt / "f").write_text("x\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "ahead")
+    assert ab() == "1/0"  # one commit ahead of base
+    # advance the base (main's HEAD) so the worktree is now also one behind
+    (r / "g").write_text("y\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "base moves")
+    assert ab() == "1/1"
+
+
+def test_draw_wip_renders_ahead_behind_column(cy, capsys):
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy, cols=("repo", "old", "unmerged", "3/1", "~/old"))],
+        "project": [],
+    }
+    cy._draw_wip(sections, None, "")
+    out = capsys.readouterr().out
+    assert "AHEAD/BEHIND" in out and "3/1" in out
 
 
 def test_wip_projects_flags_active(cy, tmp_path):

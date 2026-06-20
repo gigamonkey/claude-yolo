@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` shows an AHEAD/BEHIND column for inactive worktrees.** Each
+  worktree's row now reports its commit counts ahead/behind `base` (the same ref
+  `start`/`list`/`finish` use), from `git rev-list --left-right --count
+  base...branch` — so you can see at a glance how far a branch has diverged before
+  finishing or rebasing it.
+
 - **`yolo resume` falls back to a fresh session when there's nothing to
   continue.** A plain `resume` issues `claude --continue`, which *errors* when no
   prior session exists for the directory — one was never started, or it aged out
