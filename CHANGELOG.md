@@ -5,88 +5,57 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **`yolo wip` resolves each worktree's base/finish settings from its own repo's
-  config.** The dashboard spans repos, but used to apply one launch-captured
-  `base`/`finish-action`/`finish-remote` to every worktree — so `r` (rebase) could
-  use the wrong base, and a config edit didn't take effect on the running
-  dashboard. Each worktree now resolves these from *its own* config (that repo's
-  `projects.json` entry + worktree overlay + global `~/.yolo.json`) at display and
-  action time — the same values `yolo rebase TOPIC` would use from inside that
-  repo — so the COMMITS/STATUS columns and the in-process finish/rebase are correct
-  per repo, and config edits land without a restart.
+- **`yolo wip` — a colorized, tmux-resident dashboard for managing everything
+  yolo.** A full-screen dashboard (window 0 of the shared `--tmux` session, which
+  it now seeds — superseding the old `ps --watch` seed; `ps`/`ps --watch` stay as
+  standalone verbs) that refreshes every 2s, in three sections:
 
-- **`yolo wip` is fully colorized.** Every column is color-coded — sessions by
-  status group (grey unknown / green waiting / yellow working), worktree STATUS by
-  `dirty`/`running`/`merged`/`unmerged`, the COMMITS arrows with nonzero behind in
-  red and ahead in green, projects by active/recent — so the running-session
-  groups now read apart by color rather than the blank lines between them (now
-  gone). Colors are added only on screen; `yolo list`/`ps` output stays plain.
+  - **Sessions** — every running yolo session in one table (SESSION / TOPIC /
+    CREATED / PORTS / STATE), grouped unknown → waiting → working and, within each
+    group, ordered by least-recent activity first (unknown oldest-created, waiting
+    longest-idle, working longest-working). The groups read apart by color.
 
-- **`yolo list` and `yolo wip` show a COMMITS column for worktrees.** Each
-  worktree's row now reports how far it has diverged from `base` (the same ref
-  `start`/`finish` use) as `↓behind ↑ahead` (behind-first, as GitHub orders it on
-  its branch list), from `git rev-list --left-right --count base...branch` — so you
-  can see at a glance what's left before finishing or rebasing it.
+  - **Worktrees** — every worktree (à la `list --all`, including ones with a
+    running session), with a STATUS column and a **COMMITS** column showing how far
+    the branch has diverged from its base as `↓behind ↑ahead`.
 
-- **`yolo resume` falls back to a fresh session when there's nothing to
-  continue.** A plain `resume` issues `claude --continue`, which *errors* when no
-  prior session exists for the directory — one was never started, or it aged out
-  via `cleanupPeriodDays`. yolo now checks host-side for a transcript
-  (`~/.claude/projects/<slug>/*.jsonl`) before launching and, finding none, starts
-  a fresh session (named after the worktree topic in worktree mode) with a note,
-  instead of letting the error blow up inside the container. This also makes the
-  `wip` dashboard's **Enter on a project** open that project's session (resuming if
-  there is one, fresh otherwise), and its `n` key prompt for a topic and start a
-  **new worktree** session there.
+  - **Projects** — the projects configured in `projects.json` *plus* ones you've
+    simply opened (stamped into a new `~/.claude-yolo/recent-projects.json` and
+    flagged `(recent)`), so a project shows up with no `yolo config` step.
 
-- **`yolo wip` groups running sessions by status in one table.** The SESSIONS
-  table is ordered unknown → waiting → working — a blank line between the groups —
-  with each group sorted by least-recent activity first: unknown (a `yolo shell` or
-  a session that hasn't taken a turn) oldest-created first, waiting longest-idle
-  first, working longest-working first. So reading down runs from least to most
-  recently active. Columns are SESSION / TOPIC / CREATED / PORTS / STATE, with the
-  activity state last.
+  Navigate with `j`/`k`/arrows. `Enter` switches to a session's window, or opens a
+  worktree/project — jumping to its live session window if one is running, else
+  resuming (falling back to a fresh session) or starting one. `n` starts a new
+  worktree in a project, `b` browses a forwarded port, `s` stops a session, `f`
+  finishes, `r` rebases, `a` registers a project, `q` quits. Quick actions run
+  in-process (results/errors in the footer); launches open a fresh tmux window.
+  base / finish settings (for `r`/`f` and the COMMITS/STATUS columns) and a
+  launched session's config all resolve from **each worktree/project's own config**
+  (its `projects.json` entry + worktree overlay + global `~/.yolo.json`), live — so
+  a `yolo config` edit takes effect without restarting the dashboard. Requires tmux.
 
-- **`yolo wip` lists projects you've opened, not just configured ones.** Every
-  launch now stamps the project it opened into a new `~/.claude-yolo/recent-projects.json`
-  registry, and the dashboard's **projects** section unions those with the
-  `projects.json` keys — so a project shows up (flagged `(recent)`) the first time
-  you run yolo there, with no `yolo config` step. Pressing `a` on a selected
-  recent-only project registers *that* one into `projects.json` directly. The
-  registry is deliberately separate from `projects.json`, which stays a
-  config-only ledger so its dangling-key warning and `require-project-entry`
-  guardrail keep their meaning.
+- **`yolo list` gained a COMMITS column.** Each worktree row now shows how far its
+  branch has diverged from `base` as `↓behind ↑ahead` (behind-first, as GitHub
+  orders it), from `git rev-list --left-right --count base...branch`.
 
-- **`yolo rebase` now reliably reads a session's idle/working state.** It already
-  rebased through an idle (`waiting`) session and refused an actively `working`
-  one, but it located the session-activity file from the invoking command's
-  `--config-dir` rather than the container's. A session started under a different
-  config dir was read as unknown, so an idle one was wrongly refused without
-  `--force`. It now reads the state through the container's own labels — the same
-  way `stop` and `finish` do — so the config dir no longer matters.
+- **`yolo resume` falls back to a fresh session when there's nothing to continue.**
+  A plain `resume` runs `claude --continue`, which *errors* when no prior session
+  exists for the directory (never started, or expired via `cleanupPeriodDays`).
+  yolo now checks host-side for a transcript first and, finding none, starts a
+  fresh session (named after the worktree topic in worktree mode) instead of
+  letting the error blow up inside the container.
 
-- **`yolo wip` — a tmux dashboard for managing everything yolo.** A full-screen,
-  tmux-resident dashboard in three sections: **running sessions** (a superset of
-  `ps --watch`, grouped unknown→waiting→working, each by least-recent activity
-  first), **worktrees** (a la `list --all` — every worktree, with the running
-  ones also shown as a session), and the
-  **projects** registered in `projects.json` (plus ones you've recently opened).
-  Navigate with `j`/`k`/arrows; `Enter` switches to a running session's window,
-  opens a worktree or project (jumping to its live session window when one is
-  running, else resuming/starting one); `n` starts a new worktree in a project;
-  `b` browses a session's forwarded port; `s` stops a session; `f` finishes; `r`
-  rebases; `a` registers a new project; `q` quits. It refreshes every 2s like `ps
-  --watch`. `wip` is now the window-0 dashboard the shared `--tmux` session opens
-  onto (it replaces the old `ps --watch` seed; `ps`/`ps --watch` remain standalone
-  verbs). Quick actions run in-process and surface results/errors in the footer;
-  launches shell out into a fresh tmux window. Requires tmux.
+- **`yolo finish` stops an idle session for you.** It used to refuse outright while
+  a container was still running for the worktree; now it stops the session first —
+  exactly as `yolo stop` would — so a quiescent session can be closed and its
+  worktree cleaned up in one step. An actively `working` session is still refused
+  unless you pass `--force`.
 
-- **`yolo finish` stops an idle session for you.** It used to refuse outright if a
-  container was still running for the worktree; now it stops the session first —
-  exactly as `yolo stop` would — so a quiescent session can be closed, its branch
-  handled, and its worktree cleaned up in one step. An actively `working` session
-  is still refused unless you pass `--force` (the same flag that overrides the
-  uncommitted-changes guard), so `finish` can't cut off a running task by accident.
+- **`yolo rebase` reliably reads a session's idle/working state.** It located the
+  session-activity file from the invoking command's `--config-dir` rather than the
+  container's, so a session started under a different config dir was read as
+  unknown and an idle one wrongly refused without `--force`. It now reads the state
+  through the container's own labels, like `stop`/`finish` do.
 
 ## v0.17.0 — 2026-06-17
 
