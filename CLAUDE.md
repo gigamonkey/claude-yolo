@@ -1094,7 +1094,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   bypass, since `git rebase` needs a clean tree regardless (this is why `--force`
   here gates *only* the running-container check, not the dirty check as it does in
   `finish`).
-- **`list`** — the repo's worktrees as a table (TOPIC/STATUS/DIRECTORY). The
+- **`list`** — the repo's worktrees as a table (TOPIC/STATUS/BEHIND/AHEAD/
+  DIRECTORY). The
   TOPIC cell is just the topic, since yolo names the worktree's branch the same;
   it's only shown as `topic (branch: X)` when the worktree has a *different*
   branch checked out (someone switched it inside the container) — so there's no
@@ -1102,7 +1103,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
-  the `base` config key/`--base`). So a fast-forward-merged or never-diverged branch reads
+  the `base` config key/`--base`). **BEHIND/AHEAD** is the branch's commit counts
+  vs `base` (GitHub's order — behind first), from `_branch_ahead_behind`'s
+  `git rev-list --left-right --count base...branch`, carried on the `WorktreeRow`
+  and shown by both `list` and the `wip` dashboard. So a fast-forward-merged or never-diverged branch reads
   `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
   the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
   to the main checkout, not the worktree's own branch. **`--all`** (verb-only,
@@ -1147,11 +1151,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   **inactive worktrees** (the `_worktree_rows` extracted from `do_list`,
   filtered to those whose worktree path isn't in the running set — the running
   ones already show as sessions; passing `running_paths` avoids a per-worktree
-  `docker ps` at the 2s cadence; the dashboard shows an extra **AHEAD/BEHIND**
-  column here — `_branch_ahead_behind`'s `ahead/behind` commit counts vs `base`
-  from `git rev-list --left-right --count base...branch`, carried on the
-  `WorktreeRow` but rendered only in the dashboard, not in `do_list`), and
-  **projects** (`_wip_projects`: the
+  `docker ps` at the 2s cadence; this table carries the same **BEHIND/AHEAD**
+  column `list` grows — `_branch_ahead_behind`'s behind/ahead commit counts vs
+  `base`), and **projects** (`_wip_projects`: the
   `projects.json` keys **plus** the recent-projects registry — every launch stamps
   the project it opened (`_record_recent_project`, keyed by `_project_key`) into
   `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
@@ -1619,7 +1621,8 @@ overrides — driven by a stamped `.yolo-status` state file read through the
 container's own labels, including that a session under an alternate `--config-dir`
 is still read correctly), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
-diverges, and `--all` spanning two repos under one fake HOME, the REPO column,
+diverges, the BEHIND/AHEAD column value for a branch one commit ahead, and `--all`
+spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
 the verb gating), the non-tmux already-running `resume` refusal, the
 `resume`-with-no-session fallback to a fresh session (worktree mode names it after
@@ -1663,7 +1666,7 @@ surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 grouping/sorting, `_draw_wip` rendering the sessions as separate WAITING/WORKING/
 OTHER tables and omitting OTHER when empty, `_wip_items` splitting a running
 worktree into the sessions section vs the inactive list against a real repo,
-the `_worktree_rows` AHEAD/BEHIND counts (`_branch_ahead_behind` against a real
+the `_worktree_rows` BEHIND/AHEAD counts (`_branch_ahead_behind` against a real
 repo with commits added on the branch and the base) and that column rendering in
 `_draw_wip`,
 `_wip_projects`' active flag plus the recent-projects union and the `a`-registers-

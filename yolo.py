@@ -4295,7 +4295,7 @@ def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
 # cores need; `topic_label` folds in a diverged branch for display.
 WorktreeRow = collections.namedtuple(
     "WorktreeRow",
-    "repo_name topic topic_label status ahead_behind directory running worktree main_root slug",
+    "repo_name topic topic_label status behind_ahead directory running worktree main_root slug",
 )
 
 
@@ -4354,7 +4354,8 @@ def _worktree_rows(
                 flags.append("merged" if _branch_merged(branch, base, repo) else "unmerged")
             status = ", ".join(flags)
             ab = _branch_ahead_behind(branch, base, repo)
-            ahead_behind = f"{ab[0]}/{ab[1]}" if ab else "-"
+            # Displayed behind/ahead, the order GitHub uses on its branch list.
+            behind_ahead = f"{ab[1]}/{ab[0]}" if ab else "-"
             try:
                 directory = "~/" + str(wt.relative_to(home))
             except ValueError:
@@ -4368,7 +4369,7 @@ def _worktree_rows(
                     topic=topic,
                     topic_label=label,
                     status=status,
-                    ahead_behind=ahead_behind,
+                    behind_ahead=behind_ahead,
                     directory=directory,
                     running=running,
                     worktree=wt,
@@ -4391,7 +4392,8 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
 
     `merged` is judged against `base` (the same ref `start` branches off — default
     HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
-    own main repo, since the branch/base only resolve there.
+    own main repo, since the branch/base only resolve there. BEHIND/AHEAD is the
+    branch's commit counts vs `base` (GitHub's order), from `_branch_ahead_behind`.
     """
     rows = _worktree_rows(home, base, all_repos)
     if not rows:
@@ -4400,13 +4402,13 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
 
     if all_repos:
         _print_table(
-            ("REPO", "TOPIC", "STATUS", "DIRECTORY"),
-            [(r.repo_name, r.topic_label, r.status, r.directory) for r in rows],
+            ("REPO", "TOPIC", "STATUS", "BEHIND/AHEAD", "DIRECTORY"),
+            [(r.repo_name, r.topic_label, r.status, r.behind_ahead, r.directory) for r in rows],
         )
     else:
         _print_table(
-            ("TOPIC", "STATUS", "DIRECTORY"),
-            [(r.topic_label, r.status, r.directory) for r in rows],
+            ("TOPIC", "STATUS", "BEHIND/AHEAD", "DIRECTORY"),
+            [(r.topic_label, r.status, r.behind_ahead, r.directory) for r in rows],
         )
 
 
@@ -4773,7 +4775,7 @@ WipSession = collections.namedtuple(
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
 WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
-WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "AHEAD/BEHIND", "DIRECTORY")
+WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "BEHIND/AHEAD", "DIRECTORY")
 WIP_PROJECT_HEADERS = ("PROJECT",)
 
 
@@ -4937,7 +4939,7 @@ def _wip_items(home: pathlib.Path, base: str) -> dict:
         WipItem(
             "worktree",
             f"worktree:{w.slug}:{w.topic}",
-            (w.repo_name, w.topic_label, w.status, w.ahead_behind, w.directory),
+            (w.repo_name, w.topic_label, w.status, w.behind_ahead, w.directory),
             {
                 "worktree": w.worktree,
                 "main_root": w.main_root,
