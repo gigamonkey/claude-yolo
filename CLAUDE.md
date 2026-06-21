@@ -993,8 +993,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   session named `TOPIC`; **errors if the worktree or branch already exists** (use
   `resume`). Any **explicit config flags** passed here are snapshotted into the
   worktree's `worktrees.json` overlay (see the config section), so a later
-  `resume TOPIC` reuses them. *No `TOPIC`:* a fresh (unnamed) session in the
-  current directory.
+  `resume TOPIC` reuses them. *No `TOPIC`:* a fresh session in the current
+  directory, named after the directory basename (`= --hostname`).
 - **`resume [TOPIC]`** — continue the most recent session (`claude --continue`).
   *With `TOPIC`:* on that existing worktree (**errors if it doesn't exist** — use
   `start`), layering in that worktree's overlay config; any **explicit config
@@ -1538,7 +1538,7 @@ launching, `_has_resumable_session` checks host-side for
 `~/.claude/projects/<slug>/*.jsonl` (the same slug-from-the-bind-mounted-cwd that
 makes resume work at all). Finding none, the launch path drops `--continue`, prints
 a note, and builds a fresh session instead — *named* like `--new` in worktree mode
-(`session_name` = the topic), unnamed in cwd mode. This is what lets a "resume this
+(`session_name` = the topic), or after the directory basename in cwd mode. This is what lets a "resume this
 project" affordance be safe even when the dir has never had a session. Scoped to
 the `--continue` path only: `-r [ID]` is left to `claude` (an explicit ID/picker
 request shouldn't silently become a fresh session).
@@ -1706,7 +1706,7 @@ spanning two repos under one fake HOME, the REPO column,
 the per-repo `merged` judgement run from a different repo, the empty case, and
 the verb gating), the non-tmux already-running `resume` refusal, the
 `resume`-with-no-session fallback to a fresh session (worktree mode names it after
-the topic, cwd mode leaves it unnamed; a seeded `projects/<slug>/*.jsonl`
+the topic, cwd mode after the directory; a seeded `projects/<slug>/*.jsonl`
 transcript exercises the real `--continue` path), and the `stop`
 verb (`docker stop`ping the worktree's container by label, the nothing-running
 no-op, and the actively-`working` guard — refused without `--force`, stopped with

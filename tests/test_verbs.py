@@ -960,7 +960,7 @@ def test_start_no_topic_runs_in_cwd(cy, run_cli, repo):
     assert not (home / ".claude-yolo" / "worktrees.json").exists()
     assert worktree_label(argv) is None
     cmd = claude_command(cy, argv)
-    assert "--name" not in cmd  # a plain cwd session is unnamed
+    assert cmd[cmd.index("--name") + 1] == r.name  # cwd session named after the dir
     assert "--continue" not in cmd and "--resume" not in cmd  # fresh
 
 
@@ -984,7 +984,7 @@ def test_resume_no_topic_without_session_falls_back_to_fresh(cy, run_cli, repo):
     argv = run_cli(["resume"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
     assert "--continue" not in cmd
-    assert "--name" not in cmd  # a plain cwd session is unnamed, even on fallback
+    assert cmd[cmd.index("--name") + 1] == r.name  # fresh fallback names it after the dir
 
 
 def test_resume_no_topic_with_session_id(cy, run_cli, repo):

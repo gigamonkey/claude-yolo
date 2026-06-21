@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **A current-directory session is now named after its directory.** Worktree
+  sessions were started with `claude --name <topic>` (so the topic shows on the
+  divider above Claude's prompt and in the resume picker); plain cwd sessions were
+  unnamed. They now get `--name <directory basename>` — the same as the container
+  hostname — so they get that label too.
+
 - **`yolo wip` can set a worktree/project's config inline.** Press `c` on a
   worktree or project row, type a line of yolo flags (e.g. `--mount ~/refdocs
   --port 8000 --auth bedrock`), and they're saved to that worktree's overlay (or

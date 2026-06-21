@@ -6267,7 +6267,11 @@ def _main():
     else:
         slug = _repo_slug_or_none()
         container_base = cwd.name
-        session_name = None  # a plain cwd session is unnamed
+        # Name a cwd session after the directory (= the container hostname), so it
+        # gets the same label above Claude's prompt that a worktree's topic does and
+        # is identifiable in the resume picker. Only one yolo session runs per
+        # directory anyway (the already-running guard), so the shared name is fine.
+        session_name = cwd.name
 
     # A custom Dockerfile must exist and be a readable file. Checked here on the
     # launch paths only (like the mount/port resolution above), so a stale
