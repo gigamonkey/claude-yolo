@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.19.0 — 2026-06-21
 
 - **`yolo wip`'s PROJECTS section is now a REPO / DIRECTORY table.** It matches the
   WORKTREES table's shape (the repo basename and its `~`-relative directory),
