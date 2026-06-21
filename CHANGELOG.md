@@ -3,6 +3,22 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **`--plugin-dir PATH` loads a local Claude Code plugin into every yolo session.**
+  The clean way to give yolo sessions their own **skills** without those skills
+  leaking into your host Claude sessions: Claude Code discovers skills only at
+  fixed paths (and yolo mounts your whole `~/.claude`, so anything dropped in
+  `~/.claude/skills` shows up on the host too), but a plugin loaded via
+  `--plugin-dir` is session-only — present in every yolo session, never in a plain
+  host session, with your regular `~/.claude/skills` still available. Package the
+  skills as a local plugin kept outside `~/.claude` and point yolo at it; the path
+  (a directory or `.zip`) is bind-mounted read-only and passed to claude as
+  `--plugin-dir`. Repeatable; also settable as `plugin-dirs` in config (a
+  concatenating list like `mounts`/`ports`/`secrets`), with `yolo config
+  --add-plugin-dir`/`--remove-plugin-dir` to edit it element-wise. Unlike `mounts`,
+  a plugin dir isn't also announced as an `--add-dir` working directory.
+
 ## v0.19.0 — 2026-06-21
 
 - **`yolo wip`'s PROJECTS section is now a REPO / DIRECTORY table.** It matches the

@@ -817,6 +817,44 @@ dotfile** — it does not make the secret invisible to Claude. Anything you inje
 is exactly why injection is opt-in per project. See also [What the container does
 and doesn't protect](#what-the-container-does-and-doesnt-protect).
 
+### `plugin-dirs` (`--plugin-dir PATH`, repeatable)
+
+Load a **local Claude Code plugin** into the session — the clean way to give every
+yolo session a set of **yolo-specific skills** without those skills showing up in
+your plain host Claude sessions. Claude Code only discovers skills at fixed paths
+(`~/.claude/skills/<name>`, a project's `.claude/skills/`, and plugins), with no
+"extra skills directory" setting; and yolo mounts your whole `~/.claude` into the
+container, so a skill dropped in `~/.claude/skills` would appear on the host too. A
+plugin loaded with `--plugin-dir` sidesteps that: it's **session-only** (a host
+Claude session never passes the flag, so never loads it), while your regular
+`~/.claude/skills` stay available in the container untouched.
+
+Package the skills as a local plugin kept **outside `~/.claude`** (so the host
+can't discover it):
+
+```
+~/.claude-yolo/skills-plugin/
+├── .claude-plugin/plugin.json      # name, description, version
+└── skills/
+    ├── skill-a/SKILL.md
+    └── skill-b/SKILL.md
+```
+
+Then point yolo at it — once globally for "every yolo session", or per project:
+
+```bash
+yolo --plugin-dir ~/.claude-yolo/skills-plugin     # one session
+yolo config --global --plugin-dir ~/.claude-yolo/skills-plugin   # every session
+yolo config --add-plugin-dir ./tools-plugin        # just this project
+```
+
+The path (a directory or a `.zip`) is bind-mounted **read-only at its identical
+host path** and passed to claude as `--plugin-dir`. It must exist. In config it's a
+string or list; like `mounts`/`ports`/`secrets` the lists concatenate across the
+global / project / worktree layers and the CLI (exact-path duplicates collapse).
+Unlike `mounts`, a plugin dir is **not** also added as a `--add-dir` working
+directory — it's a plugin, not a source tree.
+
 ### `dockerfile` (`--dockerfile PATH`)
 
 Build the container image from your own Dockerfile instead of the built-in

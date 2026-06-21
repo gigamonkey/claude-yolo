@@ -54,6 +54,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py --secret GH_TOKEN        # inject secret GH_TOKEN as env var $GH_TOKEN
 ./yolo.py --secret DB_PW:PGPASSWORD # ...as env var $PGPASSWORD (renamed)
 ./yolo.py --secret KEY:~/.ssh/id_ed25519  # ...mounted as a file at that path
+./yolo.py --plugin-dir ~/.claude-yolo/skills-plugin  # load a local plugin (its skills) into every yolo session
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py                          # == `yolo start`: fresh session in the cwd
 ./yolo.py resume                   # continue most recent session in this dir
@@ -309,6 +310,29 @@ on top of whichever auth is chosen:
   `--yolorc`/`--dockerfile` — the *key* is host-side (Claude can't grant its next
   session a new secret). See [Secrets](#secrets). The Anthropic OAuth token rides
   this same env transport in oauth-token mode (see that section).
+- **`--plugin-dir PATH`** (repeatable; `plugin-dirs` in config) → load a **local
+  Claude Code plugin** (a directory or `.zip`) into the session. A **list/concat
+  dest** in `_CONCAT_DESTS`, like `mounts`/`ports`/`secrets` — accumulates across
+  the global / project / worktree layers and the CLI (exact-path dups deduped via
+  the resolved path). Each resolved dir is bind-mounted **read-only at its
+  identical host path** (`_resolve_plugin_dirs` / `launch_container`, beside the
+  `mounts` loop) **and** appended to the claude command as `--plugin-dir <abspath>`
+  (`build_claude_args`, like the per-mount `--add-dir`) — so claude's own
+  session-only plugin loader picks it up. The point is **yolo-specific skills**:
+  Claude Code discovers skills only at fixed paths (`~/.claude/skills/<name>`,
+  project `.claude/skills/`, plugins) with no "extra skills dir" knob, and yolo
+  mounts the host `~/.claude` wholesale — so a skill dropped there shows up in
+  *host* sessions too. A plugin loaded via `--plugin-dir` is **session-only**
+  (host Claude never passes the flag), so its bundled skills are available in every
+  yolo session yet never leak into a plain host session, while the regular
+  `~/.claude/skills` stay available (the `~/.claude` mount is untouched). Kept
+  **separate from `mounts`** so a plugin dir is *not* also announced to claude as
+  an `--add-dir` working directory. Validation is launch-time (the path must exist,
+  like a mount; else a pointed exit) — resolved only on the launch paths, so a
+  stale `plugin-dirs` path can't break `list`/`finish`/`config`. The opt-in gate is
+  the same host-side-key model as `--secret`/`--yolorc`. **Keep the plugin dir
+  outside `~/.claude`** so the host can't discover it; a `.claude-plugin/plugin.json`
+  + `skills/<name>/SKILL.md` layout is the plugin shape claude expects.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -850,6 +874,7 @@ bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `append-system-prompt` draws a pointed rename error),
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
 `[HOST:]CONTAINER`), `secrets` (string or list, `NAME[:TARGET][!]`),
+`plugin-dirs` (string or list of plugin dir/`.zip` paths),
 `require-project-entry`, `tmux`, `tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
@@ -947,9 +972,15 @@ Behavior à la `git config`:
   `secrets`, but modeled on `prompts` (the spec is an opaque string): add validates
   via `_parse_secret_spec` and dedups by **exact spec** (a name needed both env and
   file is two distinct specs); remove matches the exact spec.
+  **`--add-plugin-dir PATH` / `--remove-plugin-dir PATH`** likewise for
+  `plugin-dirs`, matched by **resolved path** (`_plugin_dir_key`, like mounts) so
+  `~/x` and its absolute form are one entry: add validates via
+  `_parse_plugin_dir_spec` (the path must exist) and is a no-op if already listed;
+  remove needn't have an existing path, so a stale one is removable.
   Contradictory instructions in one call (set + `--unset` of the same key,
   `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`,
-  `--port` with `--add/--remove-port`, `--secret` with `--add/--remove-secret`)
+  `--port` with `--add/--remove-port`, `--secret` with `--add/--remove-secret`,
+  `--plugin-dir` with `--add/--remove-plugin-dir`)
   are errors, not silently ordered; sets apply first, then unsets, then list
   edits.
 - **`yolo config --global`** targets the flat `~/.yolo.json` instead of the
@@ -1380,7 +1411,8 @@ Implementation shape:
   (browse), and the
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
-  `--add-port`/`--remove-port`, `--add-secret`/`--remove-secret`.
+  `--add-port`/`--remove-port`, `--add-secret`/`--remove-secret`,
+  `--add-plugin-dir`/`--remove-plugin-dir`.
   Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
   `--new` without a `TOPIC`, or `--new` with `-r` all error). (`--port` is the
   exception: a launch flag that doubles as `browse`'s selection.)
@@ -1818,6 +1850,13 @@ assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker
 queries stubbed at `running_container_for`/`_container_label`/`_docker_port`
 and the `_open_url` seam).
+`test_plugin_dirs.py` covers the `--plugin-dir`/`plugin-dirs` axis: spec parsing
+(`_parse_plugin_dir_spec` resolve/missing, `_resolve_plugin_dirs` dedup), launch
+assembly (the read-only `-v` at the identical path + the `--plugin-dir` claude
+arg, that it's *not* also an `--add-dir`, the missing-path exit that doesn't break
+terminal verbs, layer concatenation), and the `config` verb (persist, validate,
+`--add`/`--remove-plugin-dir` incl. idempotent add and stale remove, the
+replace-conflict guard, and the verb gating).
 `test_status.py` covers the session-activity feature: the injected
 `Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
 status path), the `yolo.config-dir` label, the stale-status-file reset (and that

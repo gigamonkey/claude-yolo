@@ -1548,6 +1548,7 @@ YOLO_KEYS = {
     "mounts": ("mounts", "list"),
     "ports": ("ports", "list"),
     "secrets": ("secrets", "list"),
+    "plugin_dirs": ("plugin_dirs", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
     "tmux": ("tmux", "bool"),
     "tmux_session": ("tmux_session", "str"),
@@ -1555,7 +1556,7 @@ YOLO_KEYS = {
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets")
+_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets", "plugin_dirs")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -1906,6 +1907,45 @@ def _resolve_mounts(specs: list[str]) -> list[tuple[pathlib.Path, str]]:
     return list(out.items())
 
 
+def _plugin_dir_key(spec: str) -> pathlib.Path:
+    """The (expanded, resolved) path a plugin-dir spec names, for matching.
+
+    Like _spec_path but for plugin dirs (no :ro/:rw mode); never requires the
+    path to exist, so a stale --remove-plugin-dir target is still removable.
+    """
+    return pathlib.Path(os.path.expanduser(spec)).resolve()
+
+
+def _parse_plugin_dir_spec(spec: str) -> pathlib.Path:
+    """One --plugin-dir / `plugin-dirs` value -> resolved path.
+
+    A local Claude Code plugin: a directory or a .zip. The source must exist
+    (like a mount; docker would otherwise create a missing one as a root-owned
+    directory on the host).
+    """
+    path = pathlib.Path(os.path.expanduser(spec))
+    if not path.exists():
+        sys.exit(f"plugin-dir: no such file or directory: {spec}")
+    return path.resolve()
+
+
+def _resolve_plugin_dirs(specs: list[str]) -> list[pathlib.Path]:
+    """Parse + dedupe the merged plugin-dir specs into resolved paths.
+
+    Each is a host directory (or .zip) holding a local Claude Code plugin. yolo
+    bind-mounts it read-only at its identical path and passes it to claude as
+    --plugin-dir, which loads the plugin (and its bundled skills) *for that
+    session only* — so yolo-specific skills are available in every yolo session
+    yet never leak into a plain host Claude session, which never passes the flag.
+    Specs arrive lowest-precedence first; exact-path dups collapse, order
+    preserved.
+    """
+    out: dict[pathlib.Path, None] = {}
+    for spec in specs:
+        out[_parse_plugin_dir_spec(spec)] = None
+    return list(out)
+
+
 def _parse_port_spec(spec: str) -> tuple[int | None, int]:
     """One --port / `ports` value, `[HOST:]CONTAINER` -> (host or None, container).
 
@@ -2051,6 +2091,11 @@ def _apply_config_edits(
             "--secret replaces the whole `secrets` list; "
             "don't combine it with --add-secret/--remove-secret."
         )
+    if "plugin-dirs" in explicit and (parsed.add_plugin_dirs or parsed.remove_plugin_dirs):
+        sys.exit(
+            "--plugin-dir replaces the whole `plugin-dirs` list; "
+            "don't combine it with --add-plugin-dir/--remove-plugin-dir."
+        )
     unsets = [u.replace("_", "-") for u in parsed.unsets]
     for u in unsets:
         if u in explicit:
@@ -2063,6 +2108,8 @@ def _apply_config_edits(
         sys.exit("can't combine --unset ports with --add-port/--remove-port.")
     if "secrets" in unsets and (parsed.add_secrets or parsed.remove_secrets):
         sys.exit("can't combine --unset secrets with --add-secret/--remove-secret.")
+    if "plugin-dirs" in unsets and (parsed.add_plugin_dirs or parsed.remove_plugin_dirs):
+        sys.exit("can't combine --unset plugin-dirs with --add-plugin-dir/--remove-plugin-dir.")
 
     for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
@@ -2070,6 +2117,8 @@ def _apply_config_edits(
         _parse_port_spec(spec)  # likewise: a malformed port spec can't be pinned
     for spec in [*explicit.get("secrets", []), *parsed.add_secrets]:
         _parse_secret_spec(spec)  # likewise: a malformed secret spec can't be pinned
+    for spec in [*explicit.get("plugin-dirs", []), *parsed.add_plugin_dirs]:
+        _parse_plugin_dir_spec(spec)  # likewise: a missing plugin path can't be pinned
     df = explicit.get("dockerfile")
     if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
         sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
@@ -2149,6 +2198,21 @@ def _apply_config_edits(
                 secrets.append(add)
         if secrets:
             entry["secrets"] = secrets
+
+    if parsed.add_plugin_dirs or parsed.remove_plugin_dirs:
+        # Match by resolved path (like mounts), so `~/x` and its absolute form are
+        # the same entry; the stored string stays as the user wrote it.
+        plugin_dirs = _take_list_key(entry, "plugin-dirs", where)
+        for rm in parsed.remove_plugin_dirs:
+            kept = [s for s in plugin_dirs if _plugin_dir_key(s) != _plugin_dir_key(rm)]
+            if len(kept) == len(plugin_dirs):
+                sys.exit(f"--remove-plugin-dir {rm}: no such plugin dir in {where}.")
+            plugin_dirs = kept
+        for add in parsed.add_plugin_dirs:
+            if not any(_plugin_dir_key(s) == _plugin_dir_key(add) for s in plugin_dirs):
+                plugin_dirs.append(add)  # already-listed path -> no-op (idempotent)
+        if plugin_dirs:
+            entry["plugin-dirs"] = plugin_dirs
 
     return entry
 
@@ -2311,6 +2375,8 @@ def do_config(
         or parsed.remove_ports
         or parsed.add_secrets
         or parsed.remove_secrets
+        or parsed.add_plugin_dirs
+        or parsed.remove_plugin_dirs
         or parsed.unsets
     )
 
@@ -2698,6 +2764,26 @@ PARSER.add_argument(
     "Errors if not present. Repeatable.",
 )
 PARSER.add_argument(
+    "--add-plugin-dir",
+    dest="add_plugin_dirs",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="For `config`: add one path to the stored `plugin-dirs` list (no-op if "
+    "already present), leaving the rest alone — unlike --plugin-dir, which replaces "
+    "the whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-plugin-dir",
+    dest="remove_plugin_dirs",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="For `config`: remove PATH's entry from the stored `plugin-dirs` list (the "
+    "path needn't exist, so a stale one can be removed). Errors if not listed. "
+    "Repeatable.",
+)
+PARSER.add_argument(
     "--add-prompt",
     dest="add_prompts",
     action="append",
@@ -2908,6 +2994,19 @@ PARSER.add_argument(
     "file mount, file secrets a read-only bind mount.",
 )
 PARSER.add_argument(
+    "--plugin-dir",
+    dest="plugin_dirs",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="Load a local Claude Code plugin (a directory or .zip) into the session "
+    "via claude's --plugin-dir, so its bundled skills are available in every yolo "
+    "session but never in a plain host Claude session. The path is bind-mounted "
+    "read-only at its identical host path. Repeatable; also settable as "
+    "`plugin-dirs` in config, where the lists concatenate across the layers and "
+    "the CLI. Keep the plugin dir outside ~/.claude so the host can't discover it.",
+)
+PARSER.add_argument(
     "--project",
     action="store_true",
     help="For `secret set`/`secret rm`: act on this project's scope (keyed to the "
@@ -3048,6 +3147,7 @@ def build_claude_args(
     resume=None,
     name: str | None = None,
     add_dirs=(),
+    plugin_dirs=(),
     forwarded_ports=(),
     status_state_path: str | None = None,
     extra_hooks: dict | None = None,
@@ -3056,7 +3156,9 @@ def build_claude_args(
 
     Always includes the container-only sandbox override and the built-in
     "you're in a container" system prompt (plus any -p additions). Extra mounts
-    are forwarded as --add-dir so they're first-class working directories;
+    are forwarded as --add-dir so they're first-class working directories; each
+    plugin dir is forwarded as --plugin-dir so its bundled skills load for this
+    session only (yolo-specific skills that a host Claude session never sees);
     forwarded container ports get a prompt line telling Claude servers must bind
     0.0.0.0 — the single most common reason a forwarded port "doesn't work" is a
     dev server defaulting to loopback inside the container, where docker's
@@ -3134,6 +3236,11 @@ def build_claude_args(
         # Extra mounts double as claude working dirs so they're visible in /context;
         # a mount Claude doesn't know about only helps if the user mentions it.
         args += ["--add-dir", str(d)]
+    for pd in plugin_dirs:
+        # Load a local plugin (and its bundled skills) for this session only. The
+        # dir is bind-mounted read-only at its identical host path, so the
+        # container path equals this resolved path (no ~ to expand).
+        args += ["--plugin-dir", str(pd)]
     if continue_session:
         args += ["--continue"]
     elif resume is not None:
@@ -3490,6 +3597,7 @@ def launch_container(
     docker_args=(),
     mounts=(),
     ports=(),
+    plugin_dirs=(),
 ) -> None:
     """Assemble the `docker run` argv from the credential/config flags and exec it.
 
@@ -3499,7 +3607,8 @@ def launch_container(
     the container later. `command` is the args after the image; `entrypoint`
     overrides the image ENTRYPOINT (used to drop into bash for `shell`); `mounts`
     is the resolved (dir, mode) list from --mount / the `mounts` config key;
-    `ports` the resolved (host-or-None, container) pairs from --port / `ports`.
+    `ports` the resolved (host-or-None, container) pairs from --port / `ports`;
+    `plugin_dirs` the resolved local-plugin dirs from --plugin-dir / `plugin-dirs`.
     """
     # Stamp this project as recently opened so `wip` can list it even without a
     # projects.json entry (recorded here, the single launch path, so it covers
@@ -3582,6 +3691,13 @@ def launch_container(
     # identical host paths, like the cwd, so paths match host<->container.
     for path, mode in mounts:
         args += ["-v", f"{path}:{path}:{mode}"]
+
+    # Local plugin dirs (--plugin-dir / `plugin-dirs` config): bind-mount each
+    # read-only at its identical host path so claude's --plugin-dir (added in
+    # build_claude_args) can read it. Kept separate from `mounts` so they're not
+    # also announced to claude as --add-dir working directories.
+    for pd in plugin_dirs:
+        args += ["-v", f"{pd}:{pd}:ro"]
 
     # Port forwards (--port / `ports` config): loopback-bound, never the LAN.
     # Host port 0 = docker assigns a free ephemeral port, so parallel sessions
@@ -6045,6 +6161,8 @@ def _main():
         ("--remove-port", parsed.remove_ports),
         ("--add-secret", parsed.add_secrets),
         ("--remove-secret", parsed.remove_secrets),
+        ("--add-plugin-dir", parsed.add_plugin_dirs),
+        ("--remove-plugin-dir", parsed.remove_plugin_dirs),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
@@ -6219,6 +6337,10 @@ def _main():
     mount_dirs = [path for path, _ in mounts if path.is_dir()]
     ports = _resolve_ports(parsed.ports)
     container_ports = [c for _, c in ports]
+    # Local plugin dirs: bind-mounted ro (in launch_container) and passed to
+    # claude as --plugin-dir (in build_claude_args), so their bundled skills load
+    # for yolo sessions only.
+    plugin_dirs = _resolve_plugin_dirs(parsed.plugin_dirs)
 
     # Resolve where we run and the trailing command per verb.
     common_git = None
@@ -6320,6 +6442,7 @@ def _main():
             ssh_agent=parsed.ssh_agent,
             resume=parsed.resume,
             add_dirs=mount_dirs,
+            plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
@@ -6336,6 +6459,7 @@ def _main():
                 ssh_agent=parsed.ssh_agent,
                 continue_session=True,
                 add_dirs=mount_dirs,
+                plugin_dirs=plugin_dirs,
                 forwarded_ports=container_ports,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
@@ -6350,6 +6474,7 @@ def _main():
                 ssh_agent=parsed.ssh_agent,
                 name=session_name,
                 add_dirs=mount_dirs,
+                plugin_dirs=plugin_dirs,
                 forwarded_ports=container_ports,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
@@ -6361,6 +6486,7 @@ def _main():
             ssh_agent=parsed.ssh_agent,
             name=session_name,
             add_dirs=mount_dirs,
+            plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
@@ -6379,6 +6505,7 @@ def _main():
         docker_args=docker_args,
         mounts=mounts,
         ports=ports,
+        plugin_dirs=plugin_dirs,
     )
 
 
