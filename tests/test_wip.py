@@ -93,10 +93,11 @@ def project_item(cy, **over):
     return cy.WipItem(
         "project",
         over.pop("key", "project:/p"),
-        over.pop("cols", ("/p",)),
+        over.pop("cols", ("p", "/p")),  # REPO, DIRECTORY
         {
             "path": over.pop("path", "/p"),
             "registered": over.pop("registered", True),
+            "active": over.pop("active", False),
             "window": over.pop("window", None),
         },
     )
@@ -214,19 +215,18 @@ def test_draw_wip_sessions_none_when_empty(cy, capsys):
     assert "SESSIONS" in out and "(none)" in out
 
 
-def test_draw_wip_projects_omits_column_header(cy, capsys):
-    # The single-column PROJECTS section drops the redundant "PROJECT" header row,
-    # but still lists the projects under the title.
+def test_draw_wip_projects_is_repo_directory_table(cy, capsys):
+    # PROJECTS is a REPO / DIRECTORY table (like WORKTREES, minus the extra columns).
     sections = {
         "session": [],
         "worktree": [],
-        "project": [project_item(cy, key="project:/work/a", cols=("/work/a",))],
+        "project": [project_item(cy, key="project:/work/a", cols=("a", "~/work/a"))],
     }
     cy._draw_wip(sections, None, "")
-    lines = cy._SGR_RE.sub("", capsys.readouterr().out).splitlines()
-    assert "PROJECTS" in lines  # the section title
-    assert "  PROJECT" not in lines  # ...but not a separate column-header row
-    assert any("/work/a" in ln for ln in lines)  # the project still listed
+    out = cy._SGR_RE.sub("", capsys.readouterr().out)
+    header = next(ln for ln in out.splitlines() if "REPO" in ln and "DIRECTORY" in ln)
+    assert header.index("REPO") < header.index("DIRECTORY")  # two-column header
+    assert "a" in out and "~/work/a" in out  # the repo basename and its directory
 
 
 def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monkeypatch):
@@ -907,7 +907,20 @@ def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
     monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
     monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
     projects = cy._wip_items(home)["project"]
-    assert projects[-1].kind == "newsession" and projects[-1].cols == ("+",)
+    assert projects[-1].kind == "newsession" and projects[-1].cols == ("+", "")
+
+
+def test_wip_items_project_cols_are_repo_and_dir(cy, repo, monkeypatch):
+    # A project row is (REPO basename, ~-relative DIRECTORY) — the WORKTREES format.
+    r, home = repo
+    proj = home / "myproj"
+    proj.mkdir()
+    (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({str(proj): {}}))
+    monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    item = next(it for it in cy._wip_items(home)["project"] if it.kind == "project")
+    assert item.cols == ("myproj", "~/myproj")
 
 
 def test_dashboard_project_launch_uses_per_project_config(cy, run_cli, repo, tmp_path):

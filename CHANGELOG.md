@@ -5,6 +5,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip`'s PROJECTS section is now a REPO / DIRECTORY table.** It matches the
+  WORKTREES table's shape (the repo basename and its `~`-relative directory, with
+  the `(active)`/`(recent)` flags), instead of the old single-column path list.
+
 - **Sessions get clearer names.** The Claude session name (shown on the divider
   above the prompt and in `claude --resume`) is now set for every session: a cwd
   session is named after its directory (the container hostname), and a worktree

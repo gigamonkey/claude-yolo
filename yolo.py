@@ -5036,7 +5036,7 @@ WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
 WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
 WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "COMMITS", "DIRECTORY")
-WIP_PROJECT_HEADERS = ("PROJECT",)
+WIP_PROJECT_HEADERS = ("REPO", "DIRECTORY")
 
 
 def _wip_sessions(home: pathlib.Path) -> list:
@@ -5219,26 +5219,31 @@ def _wip_items(home: pathlib.Path) -> dict:
         for w in worktrees
     ]
 
-    project_items = [
-        WipItem(
-            "project",
-            f"project:{p['path']}",
-            (
-                str(p["path"])
-                + (" (active)" if p["active"] else "")
-                + ("" if p["registered"] else " (recent)"),
-            ),
-            {
-                "path": p["path"],
-                "registered": p["registered"],
-                "window": _session_window_for(p["path"], sessions, windows),
-            },
+    project_items = []
+    for p in projects:
+        path = pathlib.Path(p["path"])
+        try:
+            directory = "~/" + str(path.relative_to(home))  # like the WORKTREES column
+        except ValueError:
+            directory = str(path)
+        directory += " (active)" if p["active"] else ""
+        directory += "" if p["registered"] else " (recent)"
+        project_items.append(
+            WipItem(
+                "project",
+                f"project:{p['path']}",
+                (path.name, directory),  # REPO / DIRECTORY
+                {
+                    "path": p["path"],
+                    "registered": p["registered"],
+                    "active": p["active"],
+                    "window": _session_window_for(p["path"], sessions, windows),
+                },
+            )
         )
-        for p in projects
-    ]
     # A trailing `+` row: Enter on it prompts for a directory and opens a session
     # there (see _wip_enter), so you can launch in a dir that isn't listed yet.
-    project_items.append(WipItem("newsession", "newsession:+", ("+",), {}))
+    project_items.append(WipItem("newsession", "newsession:+", ("+", ""), {}))
 
     return {"session": session_items, "worktree": worktree_items, "project": project_items}
 
@@ -5308,14 +5313,14 @@ def _color_worktree_row(it) -> tuple:
 
 
 def _color_project_row(it) -> tuple:
-    (cell,) = it.cols
     if it.kind == "newsession":  # the trailing `+` affordance
-        return (_fg(cell, _GREEN),)
-    code = _GREEN if "(active)" in cell else _GREY if "(recent)" in cell else _CYAN
-    return (_fg(cell, code),)
+        return (_fg(it.cols[0], _GREEN), it.cols[1])
+    p = it.payload
+    code = _GREEN if p.get("active") else _GREY if not p.get("registered") else _CYAN
+    return tuple(_fg(c, code) for c in it.cols)  # REPO + DIRECTORY, same color
 
 
-def _draw_table(title, title_code, headers, items, selected, colorize, show_header=True) -> None:
+def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
     """Draw one dashboard section: a bold colored title, then its color-coded,
     column-aligned table (or "(none)").
 
@@ -5323,16 +5328,13 @@ def _draw_table(title, title_code, headers, items, selected, colorize, show_head
     *visible* width, so they still line up. The selected row is rendered as a plain
     reverse-video bar (ANSI stripped, then reversed) — cleaner than tinting a row
     that already carries per-cell colors, and it sidesteps grey-on-grey.
-    `show_header=False` drops the column-name row — for a single-column section
-    (PROJECTS) whose lone header just repeats the title.
     """
     print(f"\x1b[1;{title_code}m{title}\x1b[0m")
     if not items:
         print("  (none)\n")
         return
     lines = _format_table(headers, [colorize(it) for it in items])
-    if show_header:
-        print(f"  \x1b[1m{lines[0]}\x1b[0m")
+    print(f"  \x1b[1m{lines[0]}\x1b[0m")
     for it, line in zip(items, lines[1:], strict=True):
         if it.key == selected:
             print(f"> \x1b[7m{_SGR_RE.sub('', line)}\x1b[0m")
@@ -5377,7 +5379,6 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
         sections["project"],
         selected,
         _color_project_row,
-        show_header=False,
     )
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")

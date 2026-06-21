@@ -1192,7 +1192,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
   config entry; recent-only keys are flagged `(recent)` and dropped when their dir
   no longer exists, registered keys always shown — each flagged active when a
-  session's cwd is under it). This registry is kept **separate from `projects.json`
+  session's cwd is under it). Rendered as a **REPO / DIRECTORY** table (the repo
+  basename + the `~`-relative path, the `(active)`/`(recent)` flags suffixed on
+  DIRECTORY) — the WORKTREES shape minus the extra columns. This registry is kept **separate from `projects.json`
   on purpose**: `projects.json` stays a deliberate, config-only ledger (`yolo
   config` is its only writer), so the dangling-key warning and `require-project-entry`
   keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under
@@ -1256,9 +1258,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   active/recent. `_format_table` measures **visible** width (`_visible_len` strips
   the SGR via `_SGR_RE`) so colored cells still align; the selected row is rendered
   as a plain reverse-video bar (ANSI stripped, then `\x1b[7m`) rather than tinted,
-  which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey. The
-  single-column PROJECTS section passes `show_header=False`, dropping its lone
-  `PROJECT` column header (it just repeated the title).
+  which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey.
 - **`browse [TOPIC]`** — open the host browser at a running session's forwarded
   port (`do_browse`): find the container by the same label query `shell` uses
   (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
