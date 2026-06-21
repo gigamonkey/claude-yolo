@@ -714,6 +714,36 @@ def test_diff_shows_branch_changes_three_dot(cy, run_cli, repo, capfd):
     assert "main.txt" not in out  # base-only changes are not (three-dot)
 
 
+def test_diff_stat_prints_stat_without_tmux(cy, run_cli, repo, capfd, monkeypatch):
+    # --stat wants tmux for the interactive picker; without it (a test/CLI run) it
+    # just prints `git diff --stat` and returns.
+    monkeypatch.delenv("TMUX", raising=False)
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "branch.txt").write_text("b\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "branch work")
+    capfd.readouterr()
+    run_cli(["diff", "topic", "--stat"], home=home, cwd=r)
+    out = capfd.readouterr().out
+    assert "branch.txt" in out and "1 file changed" in out  # the git --stat summary
+
+
+def test_diff_stat_empty_says_no_changes(cy, run_cli, repo, capfd):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)  # branched, no commits → no diff
+    capfd.readouterr()
+    run_cli(["diff", "topic", "--stat"], home=home, cwd=r)
+    assert "No changes" in capfd.readouterr().out
+
+
+def test_stat_only_applies_to_diff(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["list", "--stat"], home=home, cwd=r)
+
+
 # --- list -------------------------------------------------------------------
 
 

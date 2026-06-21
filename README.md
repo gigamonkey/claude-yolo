@@ -247,7 +247,10 @@ Verb details:
   three-dot diff that shows what the branch *adds* since it diverged from `--base`
   (default `HEAD`), the PR-style review diff (so a commit the base made on its own
   doesn't show up as a deletion). git pages it as usual. It's read-only — no
-  container, no locks — so it works while a session is running.
+  container, no locks — so it works while a session is running. With **`--stat`**
+  it instead opens an interactive `git diff --stat`: arrow/`j`/`k` to move,
+  Enter/Space to open the selected file's diff in a new tmux window, `q` to close
+  (this is what `yolo wip`'s `d` uses, so it needs tmux).
 
 - **`finish TOPIC`** stops a running container for you first — as `yolo stop`
   would — so a quiescent session can be closed and cleaned up in one step; an
@@ -423,7 +426,7 @@ the selected row:
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
-| `d`     | a worktree (or worktree session) | `git diff` its branch against its base, in a new tmux window |
+| `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path) |
 | `q`     | anything                         | quit the dashboard |
 

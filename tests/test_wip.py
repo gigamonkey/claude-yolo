@@ -631,7 +631,7 @@ def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
     frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
     ((repo, argv, name),) = spawned
     assert repo == "/repo"
-    assert argv == ["diff", "old", "--base", "HEAD"]
+    assert argv == ["diff", "old", "--base", "HEAD", "--stat"]
     assert name == "diff-old"
     assert frames[-1][1] == "diffing 'old'…"
 
@@ -640,12 +640,18 @@ def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
     # `d` also works on a worktree-backed session row (read-only, so any state).
     spawned = []
     monkeypatch.setattr(
-        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append((repo, argv, name))
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
     )
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}  # a worktree session
     run_loop(cy, monkeypatch, sections, ["d", "q"])
     ((repo, argv, name),) = spawned
-    assert repo == "/repo" and argv == ["diff", "topic", "--base", "HEAD"] and name == "diff-topic"
+    assert (
+        repo == "/repo"
+        and argv == ["diff", "topic", "--base", "HEAD", "--stat"]
+        and name == "diff-topic"
+    )
 
 
 def test_d_on_cwd_session_is_noop(cy, monkeypatch):
@@ -657,6 +663,46 @@ def test_d_on_cwd_session_is_noop(cy, monkeypatch):
     frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
     assert spawned == []
     assert "diff applies to worktrees" in frames[-1][1]
+
+
+# --- diff-stat picker -------------------------------------------------------
+
+DIFF_STAT = [" a.py | 1 +", " b.py | 2 ++", " c.py | 3 +++", " 3 files changed, 6 insertions(+)"]
+
+
+def test_diff_stat_loop_navigates_and_opens_selected_file(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_window", lambda cwd, cmd, name, sess: spawned.append((cwd, cmd, name))
+    )
+    monkeypatch.setattr(cy, "_draw_diff_stat", lambda *a: None)
+    files = ["a.py", "b.py", "c.py"]
+    term = FakeTerm(["down", "down", " ", "q"])  # to c.py, Space opens it, q quits
+    cy._diff_stat_loop(files, DIFF_STAT, "/wt", "BASESHA", "yolo", "topic", "HEAD", term)
+    ((cwd, cmd, name),) = spawned
+    assert cwd == "/wt"
+    assert cmd == ["git", "diff", "BASESHA...HEAD", "--", "c.py"]  # the selected file
+    assert name == "diff-c.py"
+
+
+def test_diff_stat_loop_enter_opens_and_q_quits_without_spawn(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_draw_diff_stat", lambda *a: None)
+    # Enter opens the first file; a bare quit opens nothing.
+    cy._diff_stat_loop(["a.py"], DIFF_STAT, "/wt", "S", "yolo", "t", "HEAD", FakeTerm(["\r", "q"]))
+    assert len(spawned) == 1 and spawned[0][1][-1] == "a.py"
+    spawned.clear()
+    cy._diff_stat_loop(["a.py"], DIFF_STAT, "/wt", "S", "yolo", "t", "HEAD", FakeTerm(["q"]))
+    assert spawned == []
+
+
+def test_draw_diff_stat_highlights_file_and_dims_summary(cy, capsys):
+    cy._draw_diff_stat("topic", "HEAD", DIFF_STAT, 3, 1)  # 3 files, b.py selected
+    out = capsys.readouterr().out
+    assert "\x1b[7m b.py" in out  # selected file line is a reverse-video bar
+    assert "\x1b[90m 3 files changed" in out  # the summary line is dim
+    assert " a.py" in out and " c.py" in out  # other files shown plainly
 
 
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):

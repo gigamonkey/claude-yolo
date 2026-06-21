@@ -1104,10 +1104,19 @@ gracefully outside one — there's just no repo slug to label/find by).
   branch). Shows what the branch *adds* since it diverged — the PR-style review
   diff, matching the `↑ahead` of `list`'s COMMITS. Requires a `TOPIC`. Stdio is
   inherited so git pages it; no mutation and no session-state concerns, so unlike
-  `rebase`/`finish` there's **no guard and no in-process core** — the dashboard's
-  `d` just spawns `yolo diff` in a window (diff output is paged, can't live in the
-  footer). A terminal verb, dispatched after the config re-parse (it needs the
-  config-resolved `base`), beside `rebase`.
+  `rebase`/`finish` there's **no guard and no in-process core**. A terminal verb,
+  dispatched after the config re-parse (it needs the config-resolved `base`),
+  beside `rebase`. With **`--stat`** it instead opens the **interactive diff-stat
+  picker** (`_diff_stat_picker`): `git diff --stat` (sized to the terminal),
+  navigable, where Enter/Space on a file opens *that file's* `git diff` in a new
+  tmux window — the file list is `--name-only` (exact paths) zipped by order with
+  the `--stat` display lines (same diff order, so a truncated stat path still maps
+  to the right file), the summary line non-selectable. The loop (`_diff_stat_loop`,
+  under `_run_picker`, drawn by `_draw_diff_stat`) spawns each per-file window via
+  `_spawn_window` (the generic tmux-window helper `_spawn_session_window` now wraps).
+  Needs a tty + tmux; without them `--stat` just prints the stat and returns. This
+  is what the dashboard's `d` spawns (paged/interactive output can't live in the
+  footer).
 - **`list`** — the repo's worktrees as a table (TOPIC/STATUS/COMMITS/
   DIRECTORY). The
   TOPIC cell is just the topic, since yolo names the worktree's branch the same;
@@ -1201,8 +1210,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `d` on a worktree row (or any worktree-backed
   session row, even a `working` one — diff is read-only) spawns `yolo diff
-  <topic> --base <base>` in a new window (`_wip_diff`; base from `_worktree_config`,
-  the diff is paged so it can't live in the footer), `a` registers a project (on a selected
+  <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
+  `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
+  file opens its diff in yet another window, `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
   row uses), `q` quits. `f`/`r`
@@ -1678,7 +1688,8 @@ overrides — driven by a stamped `.yolo-status` state file read through the
 container's own labels, including that a session under an alternate `--config-dir`
 is still read correctly), the `diff` verb (required-topic/missing-worktree
 refusals; the three-dot `base...HEAD` showing branch-only changes, not base's own,
-via a real repo with commits on both), and `list` (the
+via a real repo with commits on both; the `--stat` non-tmux fallback printing the
+stat, the empty "No changes", and `--stat`-only-on-diff gating), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, the COMMITS column value for a branch one commit ahead, and `--all`
 spanning two repos under one fake HOME, the REPO column,
@@ -1742,7 +1753,10 @@ there (cancel on empty, reject a non-dir), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), `d` on a worktree *and* a worktree-backed session row
-spawning `yolo diff <topic> --base` (a no-op on a plain cwd session), a raised `YoloError` landing in the
+spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
+diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
+`git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
+summary), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a

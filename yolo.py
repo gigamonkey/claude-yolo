@@ -2585,6 +2585,13 @@ PARSER.add_argument(
     '(e.g. "origin/main").',
 )
 PARSER.add_argument(
+    "--stat",
+    action="store_true",
+    help="For `diff`: show an interactive `git diff --stat` instead of the full "
+    "diff — navigate the changed files and press Enter/Space to open a file's diff "
+    "in a new tmux window (needs tmux). This is what `yolo wip`'s `d` key uses.",
+)
+PARSER.add_argument(
     "--finish-action",
     choices=FINISH_CHOICES,
     default="delete-if-merged",
@@ -3364,6 +3371,36 @@ def _focus_tmux_window(session: str, window_id: str) -> str:
     return "attached"  # unreachable on a successful exec; for the stubbed test seam
 
 
+def _spawn_window(cwd: pathlib.Path, command: list, window_name: str, session: str) -> str:
+    """Open a tmux window in `cwd` running `command` (held open on failure), focus it.
+
+    The generic core: spawns a `new-window -c <cwd>` running `command` (wrapped by
+    `_tmux_window_command` so a failure is readable), pins its name, and switches to
+    it. Used by `_spawn_session_window` (yolo invocations) and the diff-stat picker's
+    per-file `git diff` windows. Returns the new window id; raises `YoloError` if
+    tmux can't create it.
+    """
+    res = _tmux(
+        "new-window",
+        "-t",
+        f"={session}:",
+        "-c",
+        str(cwd),
+        "-n",
+        window_name,
+        "-P",
+        "-F",
+        "#{window_id}",
+        _tmux_window_command(command),
+    )
+    if res.returncode != 0:
+        raise YoloError(f"tmux new-window failed: {res.stderr.strip()}")
+    window_id = res.stdout.strip()
+    _pin_tmux_window_name(window_id)
+    _focus_tmux_window(session, window_id)
+    return window_id
+
+
 def _spawn_session_window(
     repo_dir: pathlib.Path, argv_tail: list, window_name: str, session: str
 ) -> str:
@@ -3375,29 +3412,9 @@ def _spawn_session_window(
     we spawn `yolo <argv_tail>` (via _self_invocation) with the window's working
     directory set to `repo_dir` (`new-window -c`) so the spawned yolo resolves its
     own config there. `--no-tmux` is part of `argv_tail` so the inner yolo execs
-    docker straight into this window instead of opening yet another one. Returns
-    the new window id; raises `YoloError` if tmux can't create it.
+    docker straight into this window instead of opening yet another one.
     """
-    cmd = _tmux_window_command([_self_invocation(), *argv_tail])
-    res = _tmux(
-        "new-window",
-        "-t",
-        f"={session}:",
-        "-c",
-        str(repo_dir),
-        "-n",
-        window_name,
-        "-P",
-        "-F",
-        "#{window_id}",
-        cmd,
-    )
-    if res.returncode != 0:
-        raise YoloError(f"tmux new-window failed: {res.stderr.strip()}")
-    window_id = res.stdout.strip()
-    _pin_tmux_window_name(window_id)
-    _focus_tmux_window(session, window_id)
-    return window_id
+    return _spawn_window(repo_dir, [_self_invocation(), *argv_tail], window_name, session)
 
 
 def _dispatch_launch(
@@ -4170,7 +4187,7 @@ def rebase_worktree(
     return "\n".join(msgs)
 
 
-def do_diff(topic: str, home: pathlib.Path, base: str) -> None:
+def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) -> None:
     """`diff` verb: `git diff base...HEAD` for a worktree's branch.
 
     A three-dot diff against `base` — resolved to a commit in the *main* checkout,
@@ -4179,8 +4196,12 @@ def do_diff(topic: str, home: pathlib.Path, base: str) -> None:
     PR-style review diff, matching the `↑ahead` of `list`'s COMMITS column. Stdio is
     inherited, so git pages it as usual; an empty diff is just no output. No
     mutation and no session-state concerns (diffing doesn't touch the worktree), so
-    unlike `rebase`/`finish` there's no guard or in-process core — the dashboard's
-    `d` just spawns `yolo diff` in a window.
+    unlike `rebase`/`finish` there's no guard or in-process core.
+
+    With `--stat` it instead opens the interactive diff-stat picker
+    (`_diff_stat_picker`): `git diff --stat`, navigable, where Enter/Space on a file
+    opens *that file's* diff in a new tmux window. This is what the `wip` dashboard's
+    `d` spawns.
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
@@ -4194,7 +4215,85 @@ def do_diff(topic: str, home: pathlib.Path, base: str) -> None:
     target = rev.stdout.strip()
     if rev.returncode != 0 or not target:
         raise YoloError(f"can't resolve base ref '{base}'.")
+    if stat:
+        _diff_stat_picker(worktree, target, base, topic)
+        return
     subprocess.run(["git", "-C", str(worktree), "diff", f"{target}...HEAD"])
+
+
+def _diff_stat_picker(worktree: pathlib.Path, target: str, base: str, topic: str) -> None:
+    """Interactive `git diff --stat`: navigate the changed files, Enter/Space opens a
+    file's full diff in a new tmux window, q/Esc quits (closing this window).
+
+    The file list comes from `--name-only` (exact paths) and the display from
+    `--stat` — both list files in the same diff order, so file line `i` maps to
+    `files[i]` even when `--stat` truncates the displayed path. Needs a tty + tmux
+    (it spawns sibling windows); without them it just prints the stat and returns.
+    """
+    files = _git_lines(worktree, "diff", "--name-only", f"{target}...HEAD")
+    if not files:
+        print(f"No changes in '{topic}' vs {base}.")
+        return
+    cols = shutil.get_terminal_size((80, 24)).columns
+    stat_lines = _git_lines(worktree, "diff", f"--stat={cols}", f"{target}...HEAD")
+    if not (sys.stdin.isatty() and os.environ.get("TMUX")):
+        print("\n".join(stat_lines))  # non-interactive fallback (no window to spawn into)
+        return
+    session = _tmux_session_name()
+    _run_picker(
+        lambda term: _diff_stat_loop(
+            files, stat_lines, worktree, target, session, topic, base, term
+        )
+    )
+
+
+def _git_lines(cwd: pathlib.Path, *args) -> list:
+    """`git -C cwd <args>` stdout split into lines (empty on failure)."""
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True
+    ).stdout.splitlines()
+
+
+def _draw_diff_stat(topic: str, base: str, stat_lines: list, nfiles: int, selected: int) -> None:
+    """One diff-stat frame: title, the stat lines (file lines `0..nfiles-1`
+    selectable, the trailing summary dim), and a key hint. The selected file line is
+    a reverse-video bar."""
+    print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
+    print(f"\x1b[1;36mdiff\x1b[0m \x1b[90m{topic} vs {base}\x1b[0m\n")
+    for i, line in enumerate(stat_lines):
+        if i >= nfiles:  # the "N files changed, …" summary
+            print(f"\x1b[90m{line}\x1b[0m")
+        elif i == selected:
+            print(f"\x1b[7m{line}\x1b[0m")
+        else:
+            print(line)
+    print("\n\x1b[90mj/k move · Enter/Space open file diff · q quit\x1b[0m")
+
+
+def _diff_stat_loop(files, stat_lines, worktree, target, session, topic, base, term) -> None:
+    """The diff-stat picker's event loop (terminal plumbing is `_run_picker`'s job).
+
+    Selection is an index into `files`; Enter/Space spawns `git diff target...HEAD --
+    <file>` in a new tmux window (paged), q/Esc returns (the picker window closes).
+    """
+    selected = 0
+    while True:
+        _draw_diff_stat(topic, base, stat_lines, len(files), selected)
+        key = term.wait_key(86400)  # block for a key; the stat is static, no refresh
+        if key in ("q", "\x1b"):
+            return
+        if key in ("up", "k"):
+            selected = max(0, selected - 1)
+        elif key in ("down", "j"):
+            selected = min(len(files) - 1, selected + 1)
+        elif key in ("\r", "\n", " "):
+            path = files[selected]
+            _spawn_window(
+                worktree,
+                ["git", "diff", f"{target}...HEAD", "--", path],
+                f"diff-{pathlib.PurePosixPath(path).name}",
+                session,
+            )
 
 
 _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -5503,16 +5602,20 @@ def _wip_diff(kind, p, home, session) -> str:
 
     Applies to a worktree row *or* a worktree-backed session row — and, since the
     diff is read-only (no mutation, no locks), even a `working` one, unlike `f`/`r`.
-    Diff output is large and paged, so it can't live in the footer — it shells out
-    like the launches, spawning `yolo diff <topic> --base <base>` (the base from
-    *this worktree's* own config, so it matches the COMMITS column and the
-    dashboard's rebase)."""
+    Diff output is large and interactive, so it can't live in the footer — it shells
+    out, spawning `yolo diff <topic> --base <base> --stat` (the base from *this
+    worktree's* own config, so it matches the COMMITS column and the dashboard's
+    rebase). That window shows the interactive diff-stat; Enter/Space on a file there
+    opens its diff in yet another window."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
         base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         _spawn_session_window(
-            p["main_root"], ["diff", p["topic"], "--base", base], f"diff-{p['topic']}", session
+            p["main_root"],
+            ["diff", p["topic"], "--base", base, "--stat"],
+            f"diff-{p['topic']}",
+            session,
         )
         return f"diffing '{p['topic']}'…"
     return "diff applies to worktrees and worktree sessions."
@@ -5877,6 +5980,8 @@ def _main():
         sys.exit("--_dashboard is internal to `wip`.")
     if parsed.watch and verb != "ps":
         sys.exit("--watch only applies to `ps`.")
+    if parsed.stat and verb != "diff":
+        sys.exit("--stat only applies to `diff`.")
     if parsed.all_repos and verb not in ("list", "secret"):
         sys.exit("--all only applies to `list` and `secret list`.")
     if parsed.project and verb != "secret":
@@ -5993,7 +6098,7 @@ def _main():
         do_rebase(topic, home, parsed.base, force=parsed.force)
         return
     if verb == "diff":
-        do_diff(topic, home, parsed.base)
+        do_diff(topic, home, parsed.base, stat=parsed.stat)
         return
     if verb == "shell":
         if topic:
