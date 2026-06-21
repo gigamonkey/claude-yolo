@@ -410,7 +410,7 @@ the selected row:
 | `Enter` | a running session                | switch to its tmux window |
 | `Enter` | a worktree                       | switch to its live session window if it's running, else resume it in a new window |
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
-| `Enter` | the `+` row                      | prompt for a directory (Tab-completes, `~`-aware) and start a session there |
+| `Enter` | the `+` row                      | prompt for a directory and start a session there — Tab completes the path (fills the common prefix, lists matches), `~` works like a shell |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
