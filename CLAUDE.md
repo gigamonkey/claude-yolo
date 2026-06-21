@@ -1114,9 +1114,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   to the right file), the summary line non-selectable. The loop (`_diff_stat_loop`,
   under `_run_picker`, drawn by `_draw_diff_stat`) spawns each per-file window via
   `_spawn_window` (the generic tmux-window helper `_spawn_session_window` now wraps)
-  with **`hold=True`** — `_tmux_window_command` then keeps the window open on *any*
-  exit, so a one-screen diff whose pager auto-quits (`less -F`) doesn't close the
-  window before it's read (the bug a small file like `_quarto.yml` exposed).
+  with **`env={"LESS": "R"}`** — that stops git's pager auto-quitting a one-screen
+  diff (git's default `LESS=FRX`; the `F` quits if it fits one screen), so the
+  window stays until `q` for short *and* long diffs alike, with no extra Enter (the
+  bug a small file like `_quarto.yml` exposed). `_tmux_window_command` prepends the
+  env assignment to the git command only and still holds a *failed* window open.
   Needs a tty + tmux; without them `--stat` just prints the stat and returns. This
   is what the dashboard's `d` spawns (paged/interactive output can't live in the
   footer).

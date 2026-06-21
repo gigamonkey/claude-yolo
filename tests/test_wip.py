@@ -683,7 +683,7 @@ def test_diff_stat_loop_navigates_and_opens_selected_file(cy, monkeypatch):
     assert cwd == "/wt"
     assert cmd == ["git", "diff", "BASESHA...HEAD", "--", "c.py"]  # the selected file
     assert name == "diff-c.py"
-    assert kw == {"hold": True}  # held open so a one-screen diff doesn't vanish
+    assert kw == {"env": {"LESS": "R"}}  # pager stays open until q (no auto-quit)
 
 
 def test_diff_stat_loop_enter_opens_and_q_quits_without_spawn(cy, monkeypatch):
@@ -706,13 +706,13 @@ def test_draw_diff_stat_highlights_file_and_dims_summary(cy, capsys):
     assert " a.py" in out and " c.py" in out  # other files shown plainly
 
 
-def test_tmux_window_command_hold_waits_on_any_exit(cy):
-    # `hold` keeps the window open regardless of exit code (so a one-screen per-file
-    # diff whose pager auto-quit stays readable); the default only waits on failure.
-    held = cy._tmux_window_command(["git", "diff"], hold=True)
-    assert "read -r _" in held and "-ne 0" not in held
-    normal = cy._tmux_window_command(["git", "diff"])
-    assert "read -r _" in normal and "-ne 0" in normal
+def test_tmux_window_command_env_prefixes_assignments(cy):
+    # `env` prepends `KEY=val` to the command (the diff windows pass LESS=R so the
+    # pager doesn't auto-quit a one-screen diff); the failure-hold is unchanged.
+    cmd = cy._tmux_window_command(["git", "diff", "A...B"], env={"LESS": "R"})
+    assert cmd.startswith("LESS=R git diff A...B;")
+    assert "-ne 0" in cmd  # still keeps a *failed* window open
+    assert "LESS=" not in cy._tmux_window_command(["git", "diff"])  # no env → no prefix
 
 
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):

@@ -3220,20 +3220,20 @@ def _pin_tmux_window_name(target: str) -> None:
     _tmux("set-window-option", "-t", target, "allow-rename", "off")
 
 
-def _tmux_window_command(run_cmd: list, *, hold: bool = False) -> str:
-    """The shell command a tmux window runs: run_cmd, held open after it exits.
+def _tmux_window_command(run_cmd: list, *, env: dict | None = None) -> str:
+    """The shell command a tmux window runs: run_cmd, held open on failure.
 
     tmux windows close when their command exits (remain-on-exit is off by
     default) — right for a clean `claude` exit, but it would eat the error when
     docker fails instantly (name conflict, daemon down): the window flashes and
-    is gone. The wrapper keeps a *failed* window alive until Enter. With `hold`, it
-    keeps the window open on *any* exit — for a per-file `git diff` window whose
-    pager auto-quit on a one-screen diff (`less -F`), which would otherwise close
-    the window before the diff could be read.
+    is gone. The wrapper keeps a *failed* window alive until Enter. `env` prepends
+    `KEY=val` shell assignments to `run_cmd` only (the diff windows pass `LESS=R`,
+    so git's pager doesn't auto-quit on a one-screen diff and `q` closes it — see
+    `_diff_stat_loop`).
     """
     cmd = shlex.join(str(a) for a in run_cmd)
-    if hold:
-        return f'{cmd}; printf "\\n[press Enter to close]\\n"; read -r _'
+    if env:
+        cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " " + cmd
     return (
         f"{cmd}; ec=$?; if [ $ec -ne 0 ]; then "
         'printf "\\n[exited %d -- press Enter to close]\\n" "$ec"; read -r _; fi'
@@ -3377,15 +3377,15 @@ def _focus_tmux_window(session: str, window_id: str) -> str:
 
 
 def _spawn_window(
-    cwd: pathlib.Path, command: list, window_name: str, session: str, *, hold: bool = False
+    cwd: pathlib.Path, command: list, window_name: str, session: str, *, env: dict | None = None
 ) -> str:
     """Open a tmux window in `cwd` running `command`, focus it.
 
     The generic core: spawns a `new-window -c <cwd>` running `command` (wrapped by
-    `_tmux_window_command`, so a failure — or, with `hold`, any exit — stays
-    readable), pins its name, and switches to it. Used by `_spawn_session_window`
-    (yolo invocations) and the diff-stat picker's per-file `git diff` windows
-    (`hold=True`, so a one-screen diff doesn't vanish with the auto-quitting pager).
+    `_tmux_window_command`, so a failure stays readable; `env` prepends shell env
+    assignments), pins its name, and switches to it. Used by `_spawn_session_window`
+    (yolo invocations) and the diff-stat picker's per-file `git diff` windows (which
+    pass `env={"LESS": "R"}` so the pager doesn't auto-quit a one-screen diff).
     Returns the new window id; raises `YoloError` if tmux can't create it.
     """
     res = _tmux(
@@ -3399,7 +3399,7 @@ def _spawn_window(
         "-P",
         "-F",
         "#{window_id}",
-        _tmux_window_command(command, hold=hold),
+        _tmux_window_command(command, env=env),
     )
     if res.returncode != 0:
         raise YoloError(f"tmux new-window failed: {res.stderr.strip()}")
@@ -4301,7 +4301,9 @@ def _diff_stat_loop(files, stat_lines, worktree, target, session, topic, base, t
                 ["git", "diff", f"{target}...HEAD", "--", path],
                 f"diff-{pathlib.PurePosixPath(path).name}",
                 session,
-                hold=True,  # keep the window even if a one-screen diff's pager auto-quits
+                # LESS=R stops git's pager auto-quitting a one-screen diff, so the
+                # window stays until `q` (no extra Enter, for short *and* long diffs).
+                env={"LESS": "R"},
             )
 
 
