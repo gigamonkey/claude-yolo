@@ -4654,54 +4654,41 @@ def _wait_key(fd: int, timeout: float) -> str | None:
     return _read_key(fd)
 
 
-def _complete_dir(text, state):
-    """A readline completer for directory paths: `~`-aware, directories only, each
-    candidate a full expanded path with a trailing `/`.
+def _complete_path(text):
+    """Tab-complete a directory path. Returns `(new_text, options)`.
 
-    Backs `_PickerTerm.prompt_path` (the `wip` dashboard's "open a session in a
-    directory" prompt). `~` is expanded before globbing, so `~/pr<Tab>` completes;
-    plain files are filtered out since the prompt wants a directory.
+    The completion engine behind `_PickerTerm.prompt_path` (the `wip` "open a
+    session in a directory" prompt) — hand-rolled rather than readline-based,
+    because the macOS Python uv ships links libedit, whose Tab completion does not
+    engage `input()` in the dashboard at all. `~`-aware (expands before globbing);
+    directories only. `new_text` extends `text` to the longest common prefix of the
+    matching directories (the full path of the sole match, when there's one);
+    `options` is the basename list to show when the result is still ambiguous (empty
+    otherwise). When nothing can be added, `text` is returned unchanged.
     """
-    expanded = os.path.expanduser(text)
+    base = os.path.expanduser(text)
     try:
-        matches = sorted(p + "/" for p in glob.glob(expanded + "*") if os.path.isdir(p))
+        matches = sorted(p + "/" for p in glob.glob(base + "*") if os.path.isdir(p))
     except OSError:
         matches = []
-    return matches[state] if state < len(matches) else None
-
-
-def _enable_dir_completion(readline) -> None:
-    """Point `readline` at `_complete_dir` and bind Tab to completion.
-
-    GNU readline and libedit use different bind syntaxes (`tab: complete` vs
-    `bind ^I rl_complete`), and the macOS Python uv ships links **libedit** — where
-    the GNU syntax is a silent no-op, so Tab self-inserts. The old
-    `"libedit" in readline.__doc__` sniff is False on those non-Apple libedit
-    builds, so we don't trust it. `readline.backend` (Python 3.13+) is the reliable
-    signal — bind the matching syntax when it's present; on older Pythons that lack
-    it, bind **both** (each backend ignores the other's line — verified a no-op on
-    GNU, and the documented incantation on libedit).
-    """
-    readline.set_completer(_complete_dir)
-    readline.set_completer_delims(" \t\n")  # the whole path is one token, not split on /
-    backend = getattr(readline, "backend", None)  # 3.13+: "readline" | "editline"
-    if backend == "editline":
-        readline.parse_and_bind("bind ^I rl_complete")  # libedit
-    elif backend == "readline":
-        readline.parse_and_bind("tab: complete")  # GNU readline
-    else:  # pre-3.13: no reliable backend signal, so cover both
-        readline.parse_and_bind("tab: complete")
-        readline.parse_and_bind("bind ^I rl_complete")
+    if not matches:
+        return text, []
+    if len(matches) == 1:
+        return matches[0], []
+    common = os.path.commonprefix(matches)
+    options = [os.path.basename(m.rstrip("/")) + "/" for m in matches]
+    return (common if len(common) > len(base) else text), options
 
 
 class _PickerTerm:
     """The terminal surface a picker loop draws on: key input + cooked prompts.
 
     Wraps the cbreak-mode stdin fd so the loop can read keys (`wait_key`), drop
-    briefly back to cooked mode for a line of input (`prompt_line`, used by the
-    `wip` dashboard's topic/path prompts), and ask a one-key yes/no (`confirm`).
-    A small object rather than loose functions so a test can inject a fake with
-    scripted inputs, exactly as the loops take an injectable key source.
+    briefly back to cooked mode for a line of input (`prompt_line`, the `wip`
+    dashboard's topic/port prompts), read a directory path with hand-rolled
+    Tab-completion (`prompt_path`), and ask a one-key yes/no (`confirm`). A small
+    object rather than loose functions so a test can inject a fake with scripted
+    inputs, exactly as the loops take an injectable key source.
     """
 
     def __init__(self, fd: int, saved):
@@ -4727,36 +4714,58 @@ class _PickerTerm:
             sys.stdout.write("\x1b[?25l")
 
     def prompt_path(self, prompt: str) -> str:
-        """Like `prompt_line` but with shell-style directory Tab-completion.
+        """Read a directory path with shell-style Tab-completion, in cbreak mode.
 
-        Installs `_complete_dir` as the readline completer for the duration, so Tab
-        completes `~`-aware directory paths. Restores the previous completer after.
-        Falls back to a plain cooked read if `readline` isn't available. The result
-        is returned as typed (the caller expands `~` — a path entered without Tab
-        won't have been expanded by completion).
+        Deliberately does *not* use readline/`input()`: the macOS Python uv ships
+        links libedit, whose Tab completion never engages here (Tab just self-inserts
+        a literal tab). Instead we read keys raw — the terminal is already in cbreak
+        mode for the picker — echo them ourselves, and complete directories via
+        `_complete_path`. Handles Backspace, Enter (done), and Esc/Ctrl-C (cancel →
+        ""). Cursor stays at end of line (no mid-line editing); redraws the whole
+        line each keystroke. Returns the entered path (stripped), or "" if cancelled.
         """
-        import termios
-        import tty
+        buf = ""
 
-        try:
-            import readline
-        except ImportError:
-            return self.prompt_line(prompt)
+        def redraw():
+            sys.stdout.write("\r\x1b[K" + prompt + buf)
+            sys.stdout.flush()
 
-        sys.stdout.write("\x1b[?25h")  # show the cursor for typing
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
-        old_completer = readline.get_completer()
-        old_delims = readline.get_completer_delims()
-        _enable_dir_completion(readline)
+        sys.stdout.write("\x1b[?25h")  # show the cursor while typing
+        redraw()
         try:
-            return input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
+            while True:
+                try:
+                    ch = os.read(self.fd, 1)
+                except OSError:
+                    continue
+                if ch in (b"\r", b"\n"):
+                    sys.stdout.write("\r\n")
+                    return buf.strip()
+                if ch == b"\x1b":  # Esc cancels
+                    sys.stdout.write("\r\n")
+                    return ""
+                if ch in (b"\x7f", b"\x08"):  # Backspace / Ctrl-H
+                    buf = buf[:-1]
+                    redraw()
+                    continue
+                if ch == b"\t":
+                    buf, options = _complete_path(buf)
+                    if options:
+                        sys.stdout.write("\r\n" + "  ".join(options) + "\r\n")
+                    redraw()
+                    continue
+                try:
+                    c = ch.decode()
+                except UnicodeDecodeError:
+                    continue
+                if c.isprintable():
+                    buf += c
+                    redraw()
+        except KeyboardInterrupt:  # Ctrl-C (ISIG stays on in cbreak) cancels too
+            sys.stdout.write("\r\n")
             return ""
         finally:
-            readline.set_completer(old_completer)
-            readline.set_completer_delims(old_delims)
-            tty.setcbreak(self.fd)
-            sys.stdout.write("\x1b[?25l")
+            sys.stdout.write("\x1b[?25l")  # re-hide the cursor for the dashboard
 
     def confirm(self, prompt: str) -> bool:
         """Draw a yes/no prompt and read a single key; only y/Y is yes."""

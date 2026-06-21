@@ -720,68 +720,28 @@ def test_worktree_config_none_is_defaults(cy):
     assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin")
 
 
-def _complete_all(cy, text):
-    out = []
-    i = 0
-    while (m := cy._complete_dir(text, i)) is not None:
-        out.append(m)
-        i += 1
-    return out
+def test_complete_path_single_match_fills_full_path(cy, tmp_path):
+    (tmp_path / "alpha").mkdir()
+    assert cy._complete_path(f"{tmp_path}/al") == (f"{tmp_path / 'alpha'}/", [])
 
 
-def test_complete_dir_offers_directories_only(cy, tmp_path):
+def test_complete_path_common_prefix_and_options(cy, tmp_path):
     (tmp_path / "alpha").mkdir()
     (tmp_path / "alps").mkdir()
-    (tmp_path / "afile").write_text("x")
-    got = _complete_all(cy, f"{tmp_path}/a")
-    assert got == [
-        f"{tmp_path / 'alpha'}/",
-        f"{tmp_path / 'alps'}/",
-    ]  # sorted, dirs only, trailing /
+    (tmp_path / "afile").write_text("x")  # a plain file is not offered
+    new, options = cy._complete_path(f"{tmp_path}/al")
+    assert new == f"{tmp_path}/alp"  # extended to the longest common prefix
+    assert options == ["alpha/", "alps/"]  # basenames of the dir candidates
 
 
-def test_complete_dir_expands_tilde(cy, tmp_path, monkeypatch):
+def test_complete_path_expands_tilde(cy, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "proj").mkdir()
-    assert cy._complete_dir("~/p", 0) == f"{tmp_path / 'proj'}/"  # ~ understood like a shell
+    assert cy._complete_path("~/p") == (f"{tmp_path / 'proj'}/", [])  # ~ like a shell
 
 
-def _fake_readline(backend="__unset__"):
-    class FakeReadline:
-        def __init__(self):
-            self.binds = []
-            self.completer = self.delims = None
-            if backend != "__unset__":
-                self.backend = backend  # mimic Python 3.13+'s readline.backend
-
-        def set_completer(self, fn):
-            self.completer = fn
-
-        def set_completer_delims(self, d):
-            self.delims = d
-
-        def parse_and_bind(self, s):
-            self.binds.append(s)
-
-    return FakeReadline()
-
-
-def test_enable_dir_completion_binds_per_backend(cy):
-    # libedit (uv's macOS Python) needs `bind ^I rl_complete`; GNU needs
-    # `tab: complete`. With readline.backend (3.13+) we bind exactly the right one.
-    edit = _fake_readline("editline")
-    cy._enable_dir_completion(edit)
-    assert edit.completer is cy._complete_dir
-    assert edit.binds == ["bind ^I rl_complete"]
-
-    gnu = _fake_readline("readline")
-    cy._enable_dir_completion(gnu)
-    assert gnu.binds == ["tab: complete"]
-
-    # pre-3.13 (no backend attr): bind both, since neither errors on the other
-    old = _fake_readline()  # no .backend
-    cy._enable_dir_completion(old)
-    assert "tab: complete" in old.binds and "bind ^I rl_complete" in old.binds
+def test_complete_path_no_match_is_unchanged(cy, tmp_path):
+    assert cy._complete_path(f"{tmp_path}/zzz") == (f"{tmp_path}/zzz", [])
 
 
 def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):

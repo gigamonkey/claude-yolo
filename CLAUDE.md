@@ -1180,9 +1180,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   fresh-session fallback when the dir has none (see `_has_resumable_session`), so
   Enter "just opens" either one either way. The PROJECTS section also ends with a
   synthetic **`+` row** (kind `newsession`); Enter on it prompts (via
-  `_PickerTerm.prompt_path` — readline with the `_complete_dir` completer, so Tab
-  completes `~`-aware directory paths) for a directory and `start`s a fresh session
-  there, for a dir that isn't a listed project yet. `n` on a project prompts for a topic and
+  `_PickerTerm.prompt_path` — a hand-rolled cbreak-mode line reader with `~`-aware
+  directory Tab-completion through `_complete_path`, deliberately *not* readline,
+  whose Tab never engages `input()` under libedit, the macOS Python uv ships) for a
+  directory and `start`s a fresh session there, for a dir that isn't a listed
+  project yet. `n` on a project prompts for a topic and
   starts a **new worktree** session
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
@@ -1728,8 +1730,9 @@ footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a
 freshly-edited global `~/.yolo.json` *and* from the worktree's own repo entry
-overriding global; `None` home → built-in defaults), and `_complete_dir`
-(directory-only, `~`-expanding Tab completion) + `_wip_items` appending the `+` row.
+overriding global; `None` home → built-in defaults), and `_complete_path`
+(single-match full-fill, multi-match common-prefix + basename options, `~`
+expansion, no-match unchanged) + `_wip_items` appending the `+` row.
 `test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
 assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
 concatenation, the `config` port edits) and the `browse` verb (the docker
