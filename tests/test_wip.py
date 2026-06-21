@@ -97,7 +97,6 @@ def project_item(cy, **over):
         {
             "path": over.pop("path", "/p"),
             "registered": over.pop("registered", True),
-            "active": over.pop("active", False),
             "window": over.pop("window", None),
         },
     )
@@ -908,6 +907,15 @@ def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
     monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
     projects = cy._wip_items(home)["project"]
     assert projects[-1].kind == "newsession" and projects[-1].cols == ("+", "")
+
+
+def test_color_project_row_blue_repo_grey_dir_uniform(cy):
+    # Every project row is colored the same — REPO blue, DIRECTORY grey (no
+    # active/recent distinction); registered vs recent look identical.
+    reg = cy._color_project_row(project_item(cy, cols=("r", "~/r"), registered=True))
+    rec = cy._color_project_row(project_item(cy, cols=("r", "~/r"), registered=False))
+    assert reg == rec
+    assert reg == (f"\x1b[{cy._BLUE}mr\x1b[0m", f"\x1b[{cy._GREY}m~/r\x1b[0m")
 
 
 def test_wip_items_project_cols_are_repo_and_dir(cy, repo, monkeypatch):

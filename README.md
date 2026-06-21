@@ -410,10 +410,9 @@ in three sections:
   **COMMITS** column shows how far each branch has diverged from its base as
   `↓behind ↑ahead`.
 - **Projects** — a REPO / DIRECTORY table of the projects registered in
-  `projects.json` *plus* any you've simply opened (yolo remembers those and flags
-  them `(recent)`), so a project shows up here without a `yolo config` step. The
-  section ends with a `+` row for opening a session in any other directory (see
-  `Enter` below).
+  `projects.json` *plus* any you've simply opened (yolo remembers those), so a
+  project shows up here without a `yolo config` step. The section ends with a `+`
+  row for opening a session in any other directory (see `Enter` below).
 
 Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
 the selected row:

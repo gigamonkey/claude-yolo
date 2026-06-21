@@ -5226,8 +5226,6 @@ def _wip_items(home: pathlib.Path) -> dict:
             directory = "~/" + str(path.relative_to(home))  # like the WORKTREES column
         except ValueError:
             directory = str(path)
-        directory += " (active)" if p["active"] else ""
-        directory += "" if p["registered"] else " (recent)"
         project_items.append(
             WipItem(
                 "project",
@@ -5235,8 +5233,7 @@ def _wip_items(home: pathlib.Path) -> dict:
                 (path.name, directory),  # REPO / DIRECTORY
                 {
                     "path": p["path"],
-                    "registered": p["registered"],
-                    "active": p["active"],
+                    "registered": p["registered"],  # `a` registers a recent (unregistered) one
                     "window": _session_window_for(p["path"], sessions, windows),
                 },
             )
@@ -5315,9 +5312,8 @@ def _color_worktree_row(it) -> tuple:
 def _color_project_row(it) -> tuple:
     if it.kind == "newsession":  # the trailing `+` affordance
         return (_fg(it.cols[0], _GREEN), it.cols[1])
-    p = it.payload
-    code = _GREEN if p.get("active") else _GREY if not p.get("registered") else _CYAN
-    return tuple(_fg(c, code) for c in it.cols)  # REPO + DIRECTORY, same color
+    repo, directory = it.cols  # all projects the same — REPO blue, DIRECTORY grey
+    return (_fg(repo, _BLUE), _fg(directory, _GREY))
 
 
 def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
