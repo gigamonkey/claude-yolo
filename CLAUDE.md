@@ -1191,7 +1191,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
-  otherwise it prompts for a path), `q` quits. `f`/`r`
+  otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
+  row uses), `q` quits. `f`/`r`
   apply to any worktree row and to *waiting* session rows (a `working` session is
   never offered them); the running-session guard lives in the
   `finish_worktree`/`rebase_worktree` cores, so a worktree row with a `working`

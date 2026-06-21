@@ -5486,8 +5486,9 @@ def _wip_new_worktree(p, session, term) -> str:
 
 
 def _wip_add_project(home, term) -> str:
-    """`a`: register a project. Prompts for a path; uses its git root if it has one."""
-    raw = term.prompt_line("Project path to add: ")
+    """`a`: register a project. Prompts for a path (Tab-completes dirs); uses its git
+    root if it has one."""
+    raw = term.prompt_path("Project path to add: ")
     if not raw:
         return "cancelled."
     proj = pathlib.Path(raw).expanduser()

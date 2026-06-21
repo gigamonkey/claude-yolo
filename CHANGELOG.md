@@ -9,7 +9,8 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   with a `+` row; `Enter` on it prompts for a directory — with shell-style Tab
   completion (fills the common prefix and lists matches) and `~` expansion — and
   starts a fresh session there, so you can launch in a directory that isn't a
-  registered or recently-opened project yet.
+  registered or recently-opened project yet. The `a` (register a project) prompt
+  Tab-completes the same way.
 
 ## v0.18.0 — 2026-06-20
 
