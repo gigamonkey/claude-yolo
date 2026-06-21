@@ -1651,6 +1651,40 @@ also match the `current_version` line in the bumpversion config itself; the
 uv.lock search is two-line (`name = "claude-yolo"\nversion = ...`) so it can't
 hit a same-versioned dependency.
 
+### Cutting a release
+
+The steps, in order:
+
+1. **Check the README and CHANGELOG are up to date.** Diff the commits since the
+   last tag (`git log --oneline v{last}..HEAD`) against the docs and fill any
+   gaps — a new flag/verb/key, changed defaults, renamed behavior. The README is
+   feature-level user docs; the CHANGELOG is the per-version record.
+
+2. **Consolidate the CHANGELOG `## Unreleased` section.** Each entry should
+   describe *what changed since the last release* from a user's point of view —
+   **not** the blow-by-blow of how we got there. Fold the intermediate commits
+   for one feature into a single entry (e.g. several "fix the diff picker"
+   commits become one "`yolo diff --stat` is an interactive picker" entry);
+   drop churn that cancels out (a thing added then reworked is just its final
+   shape).
+
+3. **Retitle the section to the new version** — `## vX.Y.Z — YYYY-MM-DD`
+   (today's date) — and commit that CHANGELOG edit on its own.
+
+4. **Run the bump command** — `uv run bump-my-version bump {patch,minor,major}`
+   (minor for new features, patch for fixes only). It updates `pyproject.toml` +
+   `uv.lock`, commits them, and tags `v{new_version}` (annotated). Requires a
+   clean tree, so commit the CHANGELOG/README first.
+
+5. **Push from the host** — the yolo container has no SSH agent, so `git push`
+   can't run here. Tell the user to run `git push origin main --follow-tags`.
+
+If a doc gap surfaces *after* the bump (the tag isn't pushed yet), commit the fix
+and move the annotated tag onto it (`git tag -f -a v{ver} -m "…"`, preserving the
+original message) so the release ships accurate docs — don't leave the fix
+dangling past the tag. Confirm it stayed annotated with `git cat-file -t v{ver}`
+(a stray `git tag -f` without `-a` silently downgrades it to lightweight).
+
 Tests load `yolo.py` via `importlib` **from its file path** (not a plain
 `import yolo`) so each test gets a **fresh module instance** — `main()` mutates
 the module-global `PARSER` through `set_defaults`, so isolation matters; loading
