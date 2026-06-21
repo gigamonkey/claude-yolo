@@ -715,7 +715,7 @@ def test_start_worktree_mounts_shared_git_and_names_session(
     assert f"{git}:{git}" in mounts  # shared .git mounted
     assert container_name(argv) == "repo-feat"
     cargs = claude_args(cy, argv)
-    assert cargs[cargs.index("--name") + 1] == "feat"  # session named
+    assert cargs[cargs.index("--name") + 1] == "repo:feat"  # session named <repo>:<topic>
 
 
 # --- custom Dockerfile (--dockerfile) + content-addressed tag ----------------

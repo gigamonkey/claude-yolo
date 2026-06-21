@@ -224,7 +224,9 @@ Verb details:
 
 - **`start TOPIC`** creates the worktree on a new branch `TOPIC`, branched off
   `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
-  the `base` config key), and launches a fresh session named `TOPIC`. It errors
+  the `base` config key), and launches a fresh session named `<repo>:<TOPIC>` (the
+  name shown above Claude's prompt and in `claude --resume`; the repo prefix keeps
+  it distinct from the same topic in another project). It errors
   if the topic already exists — use `resume`.
 
 - **`resume TOPIC`** continues that worktree's most recent session (`-r` for a

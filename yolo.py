@@ -6263,7 +6263,10 @@ def _main():
                 _merge_worktree_overlay(home, cwd, _explicit_config_flags(script_argv))
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
-        session_name = topic
+        # Name the Claude session `<repo>:<topic>` — distinguishing it both from a
+        # same-named topic in another project and from a cwd session (named just
+        # after its directory, no colon).
+        session_name = f"{main_root.name}:{topic}"
     else:
         slug = _repo_slug_or_none()
         container_base = cwd.name

@@ -74,10 +74,10 @@ def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo):
     created = list(wt.rglob("auth-fix"))
     assert created and created[0].is_dir()
     assert "auth-fix" in git(r, "branch", "--list", "auth-fix").stdout
-    # labelled and named
+    # labelled and named `<repo>:<topic>`
     assert worktree_label(argv) == "auth-fix"
     cmd = claude_command(cy, argv)
-    assert cmd[cmd.index("--name") + 1] == "auth-fix"
+    assert cmd[cmd.index("--name") + 1] == f"{r.name}:auth-fix"
 
 
 def test_start_errors_if_topic_exists(cy, run_cli, repo):
@@ -127,7 +127,7 @@ def test_resume_without_session_falls_back_to_fresh(cy, run_cli, repo, capsys):
     argv = run_cli(["resume", "topic"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
     assert "--continue" not in cmd
-    assert cmd[cmd.index("--name") + 1] == "topic"
+    assert cmd[cmd.index("--name") + 1] == f"{r.name}:topic"
     assert "No previous Claude session" in capsys.readouterr().err
 
 
@@ -136,7 +136,7 @@ def test_resume_new_starts_named_fresh_session(cy, run_cli, repo):
     run_cli(["start", "topic"], home=home, cwd=r)
     argv = run_cli(["resume", "topic", "--new"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
-    assert cmd[cmd.index("--name") + 1] == "topic"
+    assert cmd[cmd.index("--name") + 1] == f"{r.name}:topic"
     assert "--continue" not in cmd
 
 
