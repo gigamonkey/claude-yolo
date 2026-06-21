@@ -679,6 +679,41 @@ def test_rebase_honours_base(cy, run_cli, repo):
     assert not (wt / "second.txt").exists()
 
 
+# --- diff -------------------------------------------------------------------
+
+
+def test_diff_requires_topic(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["diff"], home=home, cwd=r)
+
+
+def test_diff_errors_without_worktree(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["diff", "ghost"], home=home, cwd=r)
+
+
+def test_diff_shows_branch_changes_three_dot(cy, run_cli, repo, capfd):
+    # `diff` is a three-dot `base...HEAD`: it shows what the branch *adds* since it
+    # diverged, not changes the base made on its own.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "branch.txt").write_text("b\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "branch work")
+    # advance the base (main) with its own file after the worktree branched
+    (r / "main.txt").write_text("m\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main work")
+    capfd.readouterr()  # clear
+    run_cli(["diff", "topic"], home=home, cwd=r)  # base defaults to HEAD (main's tip)
+    out = capfd.readouterr().out
+    assert "branch.txt" in out and "+b" in out  # the branch's change is shown
+    assert "main.txt" not in out  # base-only changes are not (three-dot)
+
+
 # --- list -------------------------------------------------------------------
 
 

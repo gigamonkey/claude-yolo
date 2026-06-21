@@ -2523,6 +2523,7 @@ PARSER.add_argument(
         "browse",
         "finish",
         "rebase",
+        "diff",
         "list",
         "ps",
         "wip",
@@ -2542,10 +2543,11 @@ PARSER.add_argument(
     "config). 'finish' removes a "
     "worktree and requires a TOPIC; 'rebase' rebases a worktree's branch onto "
     "--base (default HEAD), replaying it on top of commits landed on the base "
-    "since it branched (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
+    "since it branched (requires a TOPIC). 'diff' shows `git diff base...branch` "
+    "for a worktree (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
     "all running yolo containers across repos (see --watch); 'wip' opens a "
     "tmux dashboard for managing everything — running sessions, inactive "
-    "worktrees, and projects — with launch/stop/finish/rebase/browse actions; 'dir' prints a "
+    "worktrees, and projects — with launch/stop/finish/rebase/diff/browse actions; 'dir' prints a "
     "session's directory (a worktree's root with a TOPIC, else the current "
     "directory) for `cd $(yolo dir TOPIC)`; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
@@ -4168,6 +4170,33 @@ def rebase_worktree(
     return "\n".join(msgs)
 
 
+def do_diff(topic: str, home: pathlib.Path, base: str) -> None:
+    """`diff` verb: `git diff base...HEAD` for a worktree's branch.
+
+    A three-dot diff against `base` — resolved to a commit in the *main* checkout,
+    so a ref like HEAD means main's tip, not the worktree's own branch (same reason
+    as `rebase`/`list`) — so it shows what the branch *adds* since it diverged: the
+    PR-style review diff, matching the `↑ahead` of `list`'s COMMITS column. Stdio is
+    inherited, so git pages it as usual; an empty diff is just no output. No
+    mutation and no session-state concerns (diffing doesn't touch the worktree), so
+    unlike `rebase`/`finish` there's no guard or in-process core — the dashboard's
+    `d` just spawns `yolo diff` in a window.
+    """
+    _, main_root, slug = _repo_paths()
+    worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    if not worktree.is_dir():
+        raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+    rev = subprocess.run(
+        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
+        capture_output=True,
+        text=True,
+    )
+    target = rev.stdout.strip()
+    if rev.returncode != 0 or not target:
+        raise YoloError(f"can't resolve base ref '{base}'.")
+    subprocess.run(["git", "-C", str(worktree), "diff", f"{target}...HEAD"])
+
+
 _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -5204,7 +5233,7 @@ def _draw_table(title, title_code, headers, items, selected, colorize, show_head
 
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
-    "worktree": "Enter open · f finish · r rebase (idle)",
+    "worktree": "Enter open · d diff · f finish · r rebase (idle)",
     "project": "Enter open session · n new worktree · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
@@ -5361,6 +5390,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_finish(kind, p, home, term)
         if key == "r":
             return _wip_rebase(kind, p, home, term)
+        if key == "d" and kind == "worktree":
+            return _wip_diff(p, home, session)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
     except YoloError as e:
@@ -5465,6 +5496,22 @@ def _wip_rebase(kind, p, home, term) -> str:
             p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
         )
     return "rebase applies to worktrees and idle sessions."
+
+
+def _wip_diff(p, home, session) -> str:
+    """`d`: `git diff` a worktree's branch against its base, in a new tmux window.
+
+    Diff output is large and paged, so it can't live in the footer — it shells out
+    like the launches, spawning `yolo diff <topic> --base <base>` (the base from
+    *this worktree's* own config, so it matches the COMMITS column and the
+    dashboard's rebase)."""
+    if not p.get("main_root"):
+        return "couldn't resolve the worktree's main repo."
+    base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+    _spawn_session_window(
+        p["main_root"], ["diff", p["topic"], "--base", base], f"diff-{p['topic']}", session
+    )
+    return f"diffing '{p['topic']}'…"
 
 
 def _wip_new_worktree(p, session, term) -> str:
@@ -5789,6 +5836,8 @@ def _main():
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
     if verb == "rebase" and not topic:
         sys.exit("`rebase` needs a topic name, e.g. `yolo rebase my-topic`.")
+    if verb == "diff" and not topic:
+        sys.exit("`diff` needs a topic name, e.g. `yolo diff my-topic`.")
     if topic and verb not in (
         "start",
         "resume",
@@ -5797,6 +5846,7 @@ def _main():
         "browse",
         "finish",
         "rebase",
+        "diff",
         "dir",
         "config",
         "secret",
@@ -5937,6 +5987,9 @@ def _main():
         return
     if verb == "rebase":
         do_rebase(topic, home, parsed.base, force=parsed.force)
+        return
+    if verb == "diff":
+        do_diff(topic, home, parsed.base)
         return
     if verb == "shell":
         if topic:

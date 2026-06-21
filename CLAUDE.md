@@ -1098,6 +1098,16 @@ gracefully outside one — there's just no repo slug to label/find by).
   bypass, since `git rebase` needs a clean tree regardless (this is why `force`
   here gates *only* the running-container check, not the dirty check as it does in
   `finish`).
+- **`diff TOPIC`** (`do_diff`) — `git -C <worktree> diff <base>...HEAD`, a
+  **three-dot** diff against `base` (resolved to a commit in the main checkout
+  first, like `rebase`/`list`, so a `HEAD` base is main's tip not the worktree's
+  branch). Shows what the branch *adds* since it diverged — the PR-style review
+  diff, matching the `↑ahead` of `list`'s COMMITS. Requires a `TOPIC`. Stdio is
+  inherited so git pages it; no mutation and no session-state concerns, so unlike
+  `rebase`/`finish` there's **no guard and no in-process core** — the dashboard's
+  `d` just spawns `yolo diff` in a window (diff output is paged, can't live in the
+  footer). A terminal verb, dispatched after the config re-parse (it needs the
+  config-resolved `base`), beside `rebase`.
 - **`list`** — the repo's worktrees as a table (TOPIC/STATUS/COMMITS/
   DIRECTORY). The
   TOPIC cell is just the topic, since yolo names the worktree's branch the same;
@@ -1189,7 +1199,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
   forwarded port (prompting if >1), `s`
-  stops, `f` finishes, `r` rebases, `a` registers a project (on a selected
+  stops, `f` finishes, `r` rebases, `d` on a worktree row spawns `yolo diff
+  <topic> --base <base>` in a new window (`_wip_diff`; base from `_worktree_config`,
+  the diff is paged so it can't live in the footer), `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
   row uses), `q` quits. `f`/`r`
@@ -1663,7 +1675,9 @@ dirty-tree refusals; and the session-aware running-container handling — a
 `waiting` session rebases through, `working`/unknown refuse, and `--force`
 overrides — driven by a stamped `.yolo-status` state file read through the
 container's own labels, including that a session under an alternate `--config-dir`
-is still read correctly), and `list` (the
+is still read correctly), the `diff` verb (required-topic/missing-worktree
+refusals; the three-dot `base...HEAD` showing branch-only changes, not base's own,
+via a real repo with commits on both), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, the COMMITS column value for a branch one commit ahead, and `--all`
 spanning two repos under one fake HOME, the REPO column,
@@ -1726,7 +1740,8 @@ topic), Enter on the `+` row prompting a directory then spawning `start --no-tmu
 there (cancel on empty, reject a non-dir), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
-cores, which own the guard), a raised `YoloError` landing in the
+cores, which own the guard), `d` on a worktree spawning `yolo diff <topic> --base`
+(and a no-op on a session row), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a

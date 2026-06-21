@@ -212,6 +212,7 @@ yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
 yolo stop something                     # stop its running session (transcript kept)
 yolo rebase something                   # rebase its branch onto --base (e.g. main's new commits)
+yolo diff something                     # git diff its branch against --base (PR-style three-dot)
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
 yolo finish something --finish-action push    # ...or push it to a remote, keep it locally
@@ -241,6 +242,12 @@ Verb details:
   actively `working` (or can't be confirmed idle) it's refused unless you pass
   `--force`. A rebase that hits conflicts is left in-progress in the worktree for
   you to `git rebase --continue` or `git rebase --abort`.
+
+- **`diff TOPIC`** shows `git diff --base...branch` for the worktree — a
+  three-dot diff that shows what the branch *adds* since it diverged from `--base`
+  (default `HEAD`), the PR-style review diff (so a commit the base made on its own
+  doesn't show up as a deletion). git pages it as usual. It's read-only — no
+  container, no locks — so it works while a session is running.
 
 - **`finish TOPIC`** stops a running container for you first — as `yolo stop`
   would — so a quiescent session can be closed and cleaned up in one step; an
@@ -416,6 +423,7 @@ the selected row:
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
+| `d`     | a worktree                       | `git diff` its branch against its base, in a new tmux window |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path) |
 | `q`     | anything                         | quit the dashboard |
 

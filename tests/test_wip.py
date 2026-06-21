@@ -618,6 +618,33 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     assert frames[-1][1] == "rebased"
 
 
+def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
+    # `d` on a worktree row spawns `yolo diff <topic> --base <base>` in a new window;
+    # base comes from the worktree's own config (home=None → built-in HEAD here).
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
+    )
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
+    ((repo, argv, name),) = spawned
+    assert repo == "/repo"
+    assert argv == ["diff", "old", "--base", "HEAD"]
+    assert name == "diff-old"
+    assert frames[-1][1] == "diffing 'old'…"
+
+
+def test_d_on_session_is_noop(cy, monkeypatch):
+    # `d` is a worktree-section action; on a session row it does nothing.
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    run_loop(cy, monkeypatch, sections, ["d", "q"])
+    assert spawned == []
+
+
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):
     def boom(*a, **k):
         raise cy.YoloError("nope")

@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo diff TOPIC` shows a worktree branch's diff against its base.** A
+  three-dot `git diff base...branch` (PR-style — what the branch adds since it
+  diverged, the same `↑ahead` `list`'s COMMITS column counts), paged as usual.
+  It's read-only, so it works while a session is running. In `yolo wip`, `d` on a
+  worktree row opens the diff in a new tmux window.
+
 - **`yolo wip` can open a session in any directory.** The PROJECTS section ends
   with a `+` row; `Enter` on it prompts for a directory — with shell-style Tab
   completion (fills the common prefix and lists matches) and `~` expansion — and
