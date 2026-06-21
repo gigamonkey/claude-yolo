@@ -665,6 +665,66 @@ def test_d_on_cwd_session_is_noop(cy, monkeypatch):
     assert "diff applies to worktrees" in frames[-1][1]
 
 
+# --- c (config) -------------------------------------------------------------
+
+
+def _stub_config_run(cy, monkeypatch, *, returncode=0, stderr=""):
+    """Stub `yolo config` subprocess; return the list it records (cmd, cwd) into."""
+    calls = []
+    monkeypatch.setattr(cy, "_self_invocation", lambda: "yolo")
+    monkeypatch.setattr(
+        cy.subprocess,
+        "run",
+        lambda cmd, **k: (
+            calls.append((cmd, k.get("cwd")))
+            or types.SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+        ),
+    )
+    return calls
+
+
+def test_c_on_worktree_persists_via_yolo_config(cy, monkeypatch):
+    calls = _stub_config_run(cy, monkeypatch)
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /x --port 8000"])
+    ((cmd, cwd),) = calls
+    assert cmd == ["yolo", "config", "old", "--mount", "/x", "--port", "8000"]
+    assert cwd == "/repo"  # the worktree's main repo
+    assert "saved config" in frames[-1][1]
+
+
+def test_c_on_project_persists_via_yolo_config(cy, monkeypatch):
+    calls = _stub_config_run(cy, monkeypatch)
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--auth bedrock"])
+    ((cmd, cwd),) = calls
+    assert cmd == ["yolo", "config", "--auth", "bedrock"]  # no TOPIC → the project entry
+    assert cwd == "/work/proj"
+
+
+def test_c_cancel_on_empty(cy, monkeypatch):
+    calls = _stub_config_run(cy, monkeypatch)
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=[""])
+    assert calls == [] and frames[-1][1] == "cancelled."
+
+
+def test_c_failure_shows_error_in_footer(cy, monkeypatch):
+    _stub_config_run(cy, monkeypatch, returncode=2, stderr="not a directory: /nope")
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /nope"])
+    assert "not a directory: /nope" in frames[-1][1]
+
+
+def test_c_on_session_is_noop(cy, monkeypatch):
+    # `c` is a worktree/project action; a session row gets the explanatory message
+    # (and never even prompts → no subprocess).
+    calls = _stub_config_run(cy, monkeypatch)
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /x"])
+    assert calls == [] and "config applies to" in frames[-1][1]
+
+
 # --- diff-stat picker -------------------------------------------------------
 
 DIFF_STAT = [" a.py | 1 +", " b.py | 2 ++", " c.py | 3 +++", " 3 files changed, 6 insertions(+)"]

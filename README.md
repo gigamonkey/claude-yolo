@@ -422,6 +422,7 @@ the selected row:
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
 | `Enter` | the `+` row                      | prompt for a directory and start a session there — Tab completes the path (fills the common prefix, lists matches), `~` works like a shell |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
+| `c`     | a worktree or project            | prompt for a line of yolo flags (e.g. `--mount ~/refdocs --port 8000`) and save them to that worktree's/project's config; plain Enter then launches with them |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |

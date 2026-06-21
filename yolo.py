@@ -5343,8 +5343,8 @@ def _draw_table(title, title_code, headers, items, selected, colorize, show_head
 
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · d diff · f/r finish/rebase (idle)",
-    "worktree": "Enter open · d diff · f finish · r rebase (idle)",
-    "project": "Enter open session · n new worktree · a register",
+    "worktree": "Enter open · d diff · c config · f finish · r rebase (idle)",
+    "project": "Enter open session · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -5502,6 +5502,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_rebase(kind, p, home, term)
         if key == "d":
             return _wip_diff(kind, p, home, session)
+        if key == "c":
+            return _wip_config(kind, p, home, term)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
     except YoloError as e:
@@ -5630,6 +5632,37 @@ def _wip_diff(kind, p, home, session) -> str:
         )
         return f"diffing '{p['topic']}'…"
     return "diff applies to worktrees and worktree sessions."
+
+
+def _wip_config(kind, p, home, term) -> str:
+    """`c`: prompt for a line of yolo flags and persist them to this worktree's
+    overlay (or this project's entry) by running `yolo config [TOPIC] <flags>` as a
+    subprocess — reusing its parsing/validation/persistence. Plain Enter then
+    launches with the saved config (the dashboard re-resolves config live).
+    """
+    if kind == "worktree":
+        if not p.get("main_root"):
+            return "couldn't resolve the worktree's main repo."
+        cwd, args, label = p["main_root"], ["config", p["topic"]], p["topic"]
+    elif kind == "project":
+        cwd, args, label = p["path"], ["config"], pathlib.Path(p["path"]).name
+    else:
+        return "config applies to worktrees and projects."
+    raw = term.prompt_line(f"config flags for {label} (e.g. --mount ~/x --port 8000): ")
+    if not raw:
+        return "cancelled."
+    try:
+        flags = shlex.split(raw)
+    except ValueError as e:
+        return f"bad flags: {e}"
+    res = subprocess.run(
+        [_self_invocation(), *args, *flags], cwd=str(cwd), capture_output=True, text=True
+    )
+    if res.returncode != 0:
+        return (
+            res.stderr.strip() or res.stdout.strip()
+        ) or f"config failed (exit {res.returncode})."
+    return f"saved config for {label} — press Enter to launch with it."
 
 
 def _wip_new_worktree(p, session, term) -> str:

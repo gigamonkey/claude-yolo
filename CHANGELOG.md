@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` can set a worktree/project's config inline.** Press `c` on a
+  worktree or project row, type a line of yolo flags (e.g. `--mount ~/refdocs
+  --port 8000 --auth bedrock`), and they're saved to that worktree's overlay (or
+  the project's `projects.json` entry) — it just runs `yolo config [TOPIC] <flags>`
+  for you, so all the usual parsing and validation apply. Plain Enter then launches
+  with the saved config (and it persists for next time).
+
 - **`yolo diff TOPIC` shows a worktree branch's diff against its base.** A
   three-dot `git diff base...branch` (PR-style — what the branch adds since it
   diverged, the same `↑ahead` `list`'s COMMITS column counts), paged as usual.

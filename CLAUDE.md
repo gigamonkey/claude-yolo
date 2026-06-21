@@ -1217,7 +1217,12 @@ gracefully outside one — there's just no repo slug to label/find by).
   session row, even a `working` one — diff is read-only) spawns `yolo diff
   <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
   `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
-  file opens its diff in yet another window, `a` registers a project (on a selected
+  file opens its diff in yet another window, `c` on a worktree or project row
+  prompts for a line of yolo flags and persists them (running `yolo config [TOPIC]
+  <flags>` as a subprocess from the repo/project dir — reusing its
+  parsing/validation; result/error in the footer) to that worktree's overlay /
+  project entry, so plain Enter then launches with them (`_wip_config`), `a`
+  registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
   row uses), `q` quits. `f`/`r`
@@ -1761,7 +1766,9 @@ cores, which own the guard), `d` on a worktree *and* a worktree-backed session r
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
 `git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
-summary), a raised `YoloError` landing in the
+summary), `c` on a worktree/project running `yolo config [TOPIC] <flags>` from the
+right dir (cancel on empty, error in the footer, no-op + message on a session row),
+a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a
