@@ -636,13 +636,27 @@ def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
     assert frames[-1][1] == "diffing 'old'…"
 
 
-def test_d_on_session_is_noop(cy, monkeypatch):
-    # `d` is a worktree-section action; on a session row it does nothing.
+def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
+    # `d` also works on a worktree-backed session row (read-only, so any state).
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append((repo, argv, name))
+    )
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}  # a worktree session
+    run_loop(cy, monkeypatch, sections, ["d", "q"])
+    ((repo, argv, name),) = spawned
+    assert repo == "/repo" and argv == ["diff", "topic", "--base", "HEAD"] and name == "diff-topic"
+
+
+def test_d_on_cwd_session_is_noop(cy, monkeypatch):
+    # A plain cwd session (no topic / main repo) isn't a worktree, so `d` does nothing.
     spawned = []
     monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
-    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["d", "q"])
+    sess = session_item(cy, payload={"topic": "", "main_root": None})
+    sections = {"session": [sess], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
     assert spawned == []
+    assert "diff applies to worktrees" in frames[-1][1]
 
 
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):

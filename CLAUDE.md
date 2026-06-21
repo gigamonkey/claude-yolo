@@ -1199,7 +1199,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
   forwarded port (prompting if >1), `s`
-  stops, `f` finishes, `r` rebases, `d` on a worktree row spawns `yolo diff
+  stops, `f` finishes, `r` rebases, `d` on a worktree row (or any worktree-backed
+  session row, even a `working` one — diff is read-only) spawns `yolo diff
   <topic> --base <base>` in a new window (`_wip_diff`; base from `_worktree_config`,
   the diff is paged so it can't live in the footer), `a` registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
@@ -1740,8 +1741,8 @@ topic), Enter on the `+` row prompting a directory then spawning `start --no-tmu
 there (cancel on empty, reject a non-dir), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
-cores, which own the guard), `d` on a worktree spawning `yolo diff <topic> --base`
-(and a no-op on a session row), a raised `YoloError` landing in the
+cores, which own the guard), `d` on a worktree *and* a worktree-backed session row
+spawning `yolo diff <topic> --base` (a no-op on a plain cwd session), a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a

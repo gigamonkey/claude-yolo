@@ -5232,7 +5232,7 @@ def _draw_table(title, title_code, headers, items, selected, colorize, show_head
 
 
 _WIP_HINTS = {
-    "session": "Enter switch · b browse · s stop · f/r finish/rebase (idle)",
+    "session": "Enter switch · b browse · s stop · d diff · f/r finish/rebase (idle)",
     "worktree": "Enter open · d diff · f finish · r rebase (idle)",
     "project": "Enter open session · n new worktree · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
@@ -5390,8 +5390,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_finish(kind, p, home, term)
         if key == "r":
             return _wip_rebase(kind, p, home, term)
-        if key == "d" and kind == "worktree":
-            return _wip_diff(p, home, session)
+        if key == "d":
+            return _wip_diff(kind, p, home, session)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
     except YoloError as e:
@@ -5498,20 +5498,24 @@ def _wip_rebase(kind, p, home, term) -> str:
     return "rebase applies to worktrees and idle sessions."
 
 
-def _wip_diff(p, home, session) -> str:
+def _wip_diff(kind, p, home, session) -> str:
     """`d`: `git diff` a worktree's branch against its base, in a new tmux window.
 
+    Applies to a worktree row *or* a worktree-backed session row — and, since the
+    diff is read-only (no mutation, no locks), even a `working` one, unlike `f`/`r`.
     Diff output is large and paged, so it can't live in the footer — it shells out
     like the launches, spawning `yolo diff <topic> --base <base>` (the base from
     *this worktree's* own config, so it matches the COMMITS column and the
     dashboard's rebase)."""
-    if not p.get("main_root"):
-        return "couldn't resolve the worktree's main repo."
-    base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
-    _spawn_session_window(
-        p["main_root"], ["diff", p["topic"], "--base", base], f"diff-{p['topic']}", session
-    )
-    return f"diffing '{p['topic']}'…"
+    if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
+        if not p.get("main_root"):
+            return "couldn't resolve the worktree's main repo."
+        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+        _spawn_session_window(
+            p["main_root"], ["diff", p["topic"], "--base", base], f"diff-{p['topic']}", session
+        )
+        return f"diffing '{p['topic']}'…"
+    return "diff applies to worktrees and worktree sessions."
 
 
 def _wip_new_worktree(p, session, term) -> str:

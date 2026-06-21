@@ -423,7 +423,7 @@ the selected row:
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
-| `d`     | a worktree                       | `git diff` its branch against its base, in a new tmux window |
+| `d`     | a worktree (or worktree session) | `git diff` its branch against its base, in a new tmux window |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path) |
 | `q`     | anything                         | quit the dashboard |
 
