@@ -673,21 +673,22 @@ DIFF_STAT = [" a.py | 1 +", " b.py | 2 ++", " c.py | 3 +++", " 3 files changed, 
 def test_diff_stat_loop_navigates_and_opens_selected_file(cy, monkeypatch):
     spawned = []
     monkeypatch.setattr(
-        cy, "_spawn_window", lambda cwd, cmd, name, sess: spawned.append((cwd, cmd, name))
+        cy, "_spawn_window", lambda cwd, cmd, name, sess, **k: spawned.append((cwd, cmd, name, k))
     )
     monkeypatch.setattr(cy, "_draw_diff_stat", lambda *a: None)
     files = ["a.py", "b.py", "c.py"]
     term = FakeTerm(["down", "down", " ", "q"])  # to c.py, Space opens it, q quits
     cy._diff_stat_loop(files, DIFF_STAT, "/wt", "BASESHA", "yolo", "topic", "HEAD", term)
-    ((cwd, cmd, name),) = spawned
+    ((cwd, cmd, name, kw),) = spawned
     assert cwd == "/wt"
     assert cmd == ["git", "diff", "BASESHA...HEAD", "--", "c.py"]  # the selected file
     assert name == "diff-c.py"
+    assert kw == {"hold": True}  # held open so a one-screen diff doesn't vanish
 
 
 def test_diff_stat_loop_enter_opens_and_q_quits_without_spawn(cy, monkeypatch):
     spawned = []
-    monkeypatch.setattr(cy, "_spawn_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
     monkeypatch.setattr(cy, "_draw_diff_stat", lambda *a: None)
     # Enter opens the first file; a bare quit opens nothing.
     cy._diff_stat_loop(["a.py"], DIFF_STAT, "/wt", "S", "yolo", "t", "HEAD", FakeTerm(["\r", "q"]))
@@ -703,6 +704,15 @@ def test_draw_diff_stat_highlights_file_and_dims_summary(cy, capsys):
     assert "\x1b[7m b.py" in out  # selected file line is a reverse-video bar
     assert "\x1b[90m 3 files changed" in out  # the summary line is dim
     assert " a.py" in out and " c.py" in out  # other files shown plainly
+
+
+def test_tmux_window_command_hold_waits_on_any_exit(cy):
+    # `hold` keeps the window open regardless of exit code (so a one-screen per-file
+    # diff whose pager auto-quit stays readable); the default only waits on failure.
+    held = cy._tmux_window_command(["git", "diff"], hold=True)
+    assert "read -r _" in held and "-ne 0" not in held
+    normal = cy._tmux_window_command(["git", "diff"])
+    assert "read -r _" in normal and "-ne 0" in normal
 
 
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):

@@ -3220,15 +3220,20 @@ def _pin_tmux_window_name(target: str) -> None:
     _tmux("set-window-option", "-t", target, "allow-rename", "off")
 
 
-def _tmux_window_command(run_cmd: list) -> str:
-    """The shell command a tmux window runs: run_cmd, held open on failure.
+def _tmux_window_command(run_cmd: list, *, hold: bool = False) -> str:
+    """The shell command a tmux window runs: run_cmd, held open after it exits.
 
     tmux windows close when their command exits (remain-on-exit is off by
     default) — right for a clean `claude` exit, but it would eat the error when
     docker fails instantly (name conflict, daemon down): the window flashes and
-    is gone. The wrapper keeps a *failed* window alive until Enter.
+    is gone. The wrapper keeps a *failed* window alive until Enter. With `hold`, it
+    keeps the window open on *any* exit — for a per-file `git diff` window whose
+    pager auto-quit on a one-screen diff (`less -F`), which would otherwise close
+    the window before the diff could be read.
     """
     cmd = shlex.join(str(a) for a in run_cmd)
+    if hold:
+        return f'{cmd}; printf "\\n[press Enter to close]\\n"; read -r _'
     return (
         f"{cmd}; ec=$?; if [ $ec -ne 0 ]; then "
         'printf "\\n[exited %d -- press Enter to close]\\n" "$ec"; read -r _; fi'
@@ -3371,14 +3376,17 @@ def _focus_tmux_window(session: str, window_id: str) -> str:
     return "attached"  # unreachable on a successful exec; for the stubbed test seam
 
 
-def _spawn_window(cwd: pathlib.Path, command: list, window_name: str, session: str) -> str:
-    """Open a tmux window in `cwd` running `command` (held open on failure), focus it.
+def _spawn_window(
+    cwd: pathlib.Path, command: list, window_name: str, session: str, *, hold: bool = False
+) -> str:
+    """Open a tmux window in `cwd` running `command`, focus it.
 
     The generic core: spawns a `new-window -c <cwd>` running `command` (wrapped by
-    `_tmux_window_command` so a failure is readable), pins its name, and switches to
-    it. Used by `_spawn_session_window` (yolo invocations) and the diff-stat picker's
-    per-file `git diff` windows. Returns the new window id; raises `YoloError` if
-    tmux can't create it.
+    `_tmux_window_command`, so a failure — or, with `hold`, any exit — stays
+    readable), pins its name, and switches to it. Used by `_spawn_session_window`
+    (yolo invocations) and the diff-stat picker's per-file `git diff` windows
+    (`hold=True`, so a one-screen diff doesn't vanish with the auto-quitting pager).
+    Returns the new window id; raises `YoloError` if tmux can't create it.
     """
     res = _tmux(
         "new-window",
@@ -3391,7 +3399,7 @@ def _spawn_window(cwd: pathlib.Path, command: list, window_name: str, session: s
         "-P",
         "-F",
         "#{window_id}",
-        _tmux_window_command(command),
+        _tmux_window_command(command, hold=hold),
     )
     if res.returncode != 0:
         raise YoloError(f"tmux new-window failed: {res.stderr.strip()}")
@@ -4293,6 +4301,7 @@ def _diff_stat_loop(files, stat_lines, worktree, target, session, topic, base, t
                 ["git", "diff", f"{target}...HEAD", "--", path],
                 f"diff-{pathlib.PurePosixPath(path).name}",
                 session,
+                hold=True,  # keep the window even if a one-screen diff's pager auto-quits
             )
 
 

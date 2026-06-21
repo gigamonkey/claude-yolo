@@ -1113,7 +1113,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   the `--stat` display lines (same diff order, so a truncated stat path still maps
   to the right file), the summary line non-selectable. The loop (`_diff_stat_loop`,
   under `_run_picker`, drawn by `_draw_diff_stat`) spawns each per-file window via
-  `_spawn_window` (the generic tmux-window helper `_spawn_session_window` now wraps).
+  `_spawn_window` (the generic tmux-window helper `_spawn_session_window` now wraps)
+  with **`hold=True`** — `_tmux_window_command` then keeps the window open on *any*
+  exit, so a one-screen diff whose pager auto-quits (`less -F`) doesn't close the
+  window before it's read (the bug a small file like `_quarto.yml` exposed).
   Needs a tty + tmux; without them `--stat` just prints the stat and returns. This
   is what the dashboard's `d` spawns (paged/interactive output can't live in the
   footer).
