@@ -185,7 +185,9 @@ yolo shell                             # open a bash shell in this dir's contain
 yolo stop                              # stop the running session in this directory
 ```
 
-As a shorthand a bare `yolo` is the same as `yolo start`. `resume` continues the
+As a shorthand a bare `yolo` is the same as `yolo start`. A fresh cwd session is
+named after the directory (the name shown above Claude's prompt and in
+`claude --resume`), mirroring a worktree's `<repo>:<topic>`. `resume` continues the
 most recent session (`-r` picks a specific one, opening Claude's interactive
 picker when given no ID); if there's nothing to continue it just starts a fresh
 session. `shell` joins the **running** container for this
@@ -430,7 +432,7 @@ the selected row:
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
-| `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path) |
+| `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row) |
 | `q`     | anything                         | quit the dashboard |
 
 `f` and `r` won't interrupt an actively `working` session: applied to a worktree
