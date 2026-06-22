@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.20.0 — 2026-06-22
 
 - **`yolo wip`'s `c` is now an interactive config editor.** Instead of a single
   blind "type a line of flags" prompt, `c` opens a modal editor showing the
@@ -26,6 +26,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `working` while it was really waiting on you. yolo now also flips the state via a
   `PreToolUse`/`PostToolUse` hook matched to that tool. (Plan-mode approval still
   reads `working` — it fires no comparable hook.)
+
+- **The built-in Dockerfiles and container prompt now live in data files** beside
+  `yolo.py` (`Dockerfile.default`, `Dockerfile.custom`, `container-prompt.txt`)
+  instead of inline strings. No behavior change for `uv tool install` or a repo
+  symlink (the files ship in the wheel and sit beside the script); only a bare copy
+  of `yolo.py` alone — never a supported install — would now miss them.
 
 - **`--plugin-dir PATH` loads a local Claude Code plugin into every yolo session.**
   The clean way to give yolo sessions their own **skills** without those skills
