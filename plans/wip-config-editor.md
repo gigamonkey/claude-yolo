@@ -80,10 +80,16 @@ code and a second code path to validate.
 
 A **worktree** row edits its overlay (`worktrees.json[path]`), a **project** row
 its entry (`projects.json[key]`) — identical to today's `c`. The editor shows the
-stored entry as the **editable** set and the inherited global keys as **read-only
-context** (dimmed), so the user sees the full effective picture but edits only the
-layer this row controls. Editing the **global** `~/.yolo.json` is out of scope for
-v1 (it's not tied to a row); note a possible future `g`-to-edit-global toggle.
+stored entry as the **editable** set and the inherited lower-layer keys as
+**read-only context** (dimmed, labeled with their source), so the user sees the
+full effective picture but edits only the layer this row controls. **Decided:**
+the inherited pane is always shown. It's computed as `_effective_config(home,
+base_cwd)` minus the keys already in the editable entry, where `base_cwd` is the
+project path (project scope → inherited = global only) or the worktree's main repo
+(worktree scope → inherited = global + project entry). Adding an
+inherited-but-unset key via `a` overrides it in this layer. Editing the **global**
+`~/.yolo.json` is out of scope for v1 (it's not tied to a row); note a possible
+future `g`-to-edit-global toggle.
 
 ### D3 — Per-key input type, derived from `YOLO_KEYS[kind]`
 
@@ -98,7 +104,16 @@ v1 (it's not tied to a row); note a possible future `g`-to-edit-global toggle.
 
 A small `_CONFIG_INPUT` table maps each key → an input strategy, defaulting off
 `kind` so it stays in sync with `YOLO_KEYS`. The choice lists come straight from
-`AUTH_CHOICES`/`FINISH_CHOICES`.
+`AUTH_CHOICES`/`FINISH_CHOICES`. **Decided:** bool and choice keys use a minimal
+`j/k`+Enter vertical list picker (`_pick_one`) — `["true", "false"]` for a bool,
+the choice list for `auth`/`finish-action` — not free-text entry.
+
+**Flag construction note.** The bool keys are argparse `BooleanOptionalAction`, so
+they persist via `--<key>` (true) / `--no-<key>` (false), *not* `--<key> <value>`.
+The write helper emits `--ssh-agent` vs `--no-ssh-agent` for a bool, `--<key>
+<value>` for choice/str/path, and `--add-<stem>` / `--remove-<stem>` for a list
+element (the stem map: mounts→mount, ports→port, secrets→secret,
+plugin-dirs→plugin-dir, prompts→prompt).
 
 ### D4 — List keys drill into an element view
 
