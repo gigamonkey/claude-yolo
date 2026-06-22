@@ -1,0 +1,27 @@
+# Custom yolo Dockerfile — layers your own steps on top of yolo's built-in image.
+#
+# Use it with:
+#   yolo --dockerfile ./Dockerfile.yolo          # one run
+#   yolo config --dockerfile ./Dockerfile.yolo   # persist it for this project
+#
+# Because this file references YOLO_BASE, yolo builds its default image first and
+# passes the tag in as the YOLO_BASE build arg, so you inherit the `claude` user
+# (with passwordless sudo), the native Claude install, PATH, and the ENTRYPOINT.
+# Keep the two lines just below.
+
+ARG YOLO_BASE
+FROM ${YOLO_BASE}
+
+# The base leaves you as the `claude` user, which has passwordless sudo. Bake in
+# cross-cutting tools you want in every session here; project-specific or heavy
+# ones are better installed on demand inside the container. For example:
+#
+#   RUN sudo apt-get update && sudo apt-get install -y postgresql-client
+
+# --- your customizations go here ---
+
+
+# Keep this last. yolo passes no -u, so the image's final USER is the runtime
+# user, and it refuses to launch an image that doesn't run as `claude` (a root
+# image would write your bind-mounted files as root).
+USER claude

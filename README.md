@@ -11,11 +11,13 @@ you launch it from or the worktree directory plus explicitly configured other
 directories and a few specific directories Claude Code needs to work. Everything
 else stays on the other side of the container wall.
 
-The script is a self-contained, single-file Python script (its one runtime
+It's a small Python tool — `yolo.py` plus a couple of sibling data files (the
+built-in Dockerfiles and the container system prompt) — whose one runtime
 dependency, [`keyring`](https://pypi.org/project/keyring/), is provisioned by
-`uv` automatically). You can install it with `uv` (see below) or just run the
-file directly. It runs on **macOS and Linux**, and on **Windows under WSL2**
-(which presents as Linux); native Windows without WSL is out of scope.
+`uv` automatically. You install it with `uv` (see below); it also works
+symlinked onto your `PATH`. It runs on **macOS and Linux**, and on **Windows
+under WSL2** (which presents as Linux); native Windows without WSL is out of
+scope.
 
 ## What the container does and doesn't protect
 
@@ -859,10 +861,9 @@ directory — it's a plugin, not a source tree.
 
 Build the container image from your own Dockerfile instead of the built-in
 default — handy when a project needs heavier or project-specific tools baked in
-so Claude doesn't reinstall them in every ephemeral container. The default
-Dockerfile stays inline in `yolo.py` (so the script remains a single
-self-contained file); `--dockerfile` just points at different build
-instructions.
+so Claude doesn't reinstall them in every ephemeral container. The built-in
+default lives in `Dockerfile.default` (shipped alongside `yolo.py`);
+`--dockerfile` just points at different build instructions.
 
 **The recommended way: layer on yolo's default with `FROM ${YOLO_BASE}`.** The
 default image already sets up a lot of load-bearing detail — the `claude` user

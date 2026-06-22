@@ -104,114 +104,47 @@ AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 #   keep           = leave the branch alone.
 FINISH_CHOICES = ["delete-if-merged", "merge", "push", "keep"]
 
-# The built-in default Dockerfile. The host UID is passed in as the HOST_UID build ARG
-# (build_docker_image adds --build-arg HOST_UID=<os.getuid()>) so that files in the
-# bind-mounted working directory are owned by (and writable as) the in-container user.
-# The user is also put in group 0 so it can connect to the Docker engine's root-owned
-# ssh-auth.sock (see the useradd line and the ssh-auth.sock mount below). This is a plain
-# literal Dockerfile — no Python templating — so a --dockerfile override is the same kind
-# of thing: Dockerfile bytes built with the same HOST_UID build-arg.
-DEFAULT_DOCKERFILE = """\
-FROM ubuntu:26.04
+# The built-in Dockerfiles and the container system prompt live in data files
+# shipped beside yolo.py (see Dockerfile.default / Dockerfile.custom /
+# container-prompt.txt). _read_data_file resolves them relative to this module,
+# following a PATH symlink the same way _pyproject_version does, so they're found
+# whether yolo is installed as a wheel, editable, or symlinked onto PATH.
+_DATA_DIR = pathlib.Path(__file__).resolve().parent
 
-# Baked-in amenities used across most projects, so Claude doesn't re-install them in
-# each ephemeral container. fd-find installs its binary as `fdfind`; symlink it to `fd`.
-# Ubuntu's own `nodejs` package lags; install Node 24 from NodeSource instead (its setup
-# script adds a codename-independent `nodistro` apt repo and pulls in npm, so no separate
-# npm package).
-RUN apt-get update && apt-get install -y sudo jq git curl ripgrep fd-find build-essential vim && ln -s /usr/bin/fdfind /usr/local/bin/fd
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
-# uv + uvx for fast Python tooling, copied from the official image (no curl, pinnable)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-# HOST_UID (passed via --build-arg) matches the host user so bind-mounted working-dir
-# files are owned/writable. Group 0 (root) membership grants access to the Docker engine's
-# ssh-auth.sock, which is mounted srw-rw---- root:root — without it a non-root user gets
-# EACCES on connect(). This adds no real privilege: the claude user already has NOPASSWD
-# sudo, and the container is the sandbox.
-ARG HOST_UID=1000
-RUN useradd -m -s /bin/bash --uid ${HOST_UID} -G root claude
-RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
-RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod 700 /home/claude/.ssh
 
-# Secrets loader: sourced (not run) at session start to export each file in the
-# per-session /run/secrets bind mount as an env var (file name = env var name).
-# A no-op when nothing is mounted there (no secrets configured). Files are kept
-# for the session by default; a sibling `<name>.ephemeral` marker makes the
-# loader delete the value right after exporting it (the rw mount allows that).
-# `return 0` is valid because the script is always *sourced*, never executed.
-# Written with printf (not a heredoc) so it doesn't depend on BuildKit; the single
-# quotes keep the build shell from expanding $f / $(...).
-RUN mkdir -p /etc/yolo && printf '%s\\n' \
-  '[ -d /run/secrets ] || return 0' \
-  'for f in /run/secrets/*; do' \
-  '  case "$f" in *.ephemeral) continue ;; esac' \
-  '  [ -f "$f" ] || continue' \
-  '  export "$(basename "$f")=$(cat "$f")"' \
-  '  if [ -f "$f.ephemeral" ]; then rm -f "$f" "$f.ephemeral"; fi' \
-  'done' \
-  > /etc/yolo/load-secrets.sh
+def _read_data_file(name: str) -> str:
+    """Read a packaged data file that sits beside yolo.py.
 
-USER claude
-# Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
-# install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken
-# install and which self-update can't manage. The native binary is standalone (no node needed).
-RUN curl -fsSL https://claude.ai/install.sh | bash
-# Adopt a yolo-provided prompt when the container is launched with -e YOLO_PS1
-# (see _ps1_env_args): flags any bash as a yolo shell and shows where it is.
-# Appended last so it wins over the distro default PS1.
-RUN echo 'if [ -n "$YOLO_PS1" ]; then PS1="$YOLO_PS1"; fi' >> /home/claude/.bashrc
-# Source the secrets loader once per interactive shell tree, so `yolo shell` (fresh
-# or docker exec'd) gets the same exported secrets a claude launch does. Before the
-# --yolorc line below so an rc can use the exported values. The sentinel keeps
-# nested subshells from re-running it; claude launches source it via the launch
-# wrapper (claude isn't a shell, so .bashrc never runs for it).
-RUN echo 'if [ -z "$YOLO_SECRETS_SOURCED" ] && [ -f /etc/yolo/load-secrets.sh ]; then export YOLO_SECRETS_SOURCED=1; . /etc/yolo/load-secrets.sh; fi' >> /home/claude/.bashrc
-# Source the --yolorc file (mounted at $YOLO_RC) once per interactive shell tree,
-# so `yolo shell` gets the same per-session setup claude launches do. The sentinel
-# keeps nested subshells from re-running it. claude launches don't read .bashrc;
-# they source the rc via the launch wrapper (see launch_container).
-RUN echo 'if [ -n "$YOLO_RC" ] && [ -f "$YOLO_RC" ] && [ -z "$YOLO_RC_SOURCED" ]; then export YOLO_RC_SOURCED=1; . "$YOLO_RC"; fi' >> /home/claude/.bashrc
-ENV PATH=/home/claude/.local/bin:$PATH
-ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
-"""
+    Resolves __file__ (following a PATH symlink, like _pyproject_version) so the
+    editable and symlink installs find the repo copy, and the wheel install finds
+    the copy shipped next to yolo.py in site-packages. A missing file is a hard
+    error (the data is mandatory), surfaced clearly at import rather than at first
+    launch.
+    """
+    try:
+        return (_DATA_DIR / name).read_text()
+    except OSError as e:
+        sys.exit(f"yolo: missing packaged data file {name!r} beside yolo.py: {e}")
 
+
+# The built-in default Dockerfile. The host UID is passed in as the HOST_UID build
+# ARG (build_docker_image adds --build-arg HOST_UID=<os.getuid()>) so that files in
+# the bind-mounted working directory are owned by (and writable as) the in-container
+# user. The user is also put in group 0 so it can connect to the Docker engine's
+# root-owned ssh-auth.sock. A --dockerfile override is the same kind of thing:
+# Dockerfile bytes built with the same HOST_UID build-arg.
+DEFAULT_DOCKERFILE = _read_data_file("Dockerfile.default")
 
 # Printed by `yolo dockerfile --custom`: a ready-to-edit Dockerfile that *layers on*
 # the default rather than replacing it. Referencing YOLO_BASE is what triggers
 # _build_image to build the default first and pass its tag in (see _build_image and
 # the README), so this template inherits the claude user, sudo, the native Claude
-# install, PATH, and the ENTRYPOINT — the user only fills in the marked block. (The
-# GitHub HTTPS->SSH rewrite is applied at run time under --ssh-agent, not in the image,
-# so a custom image gets it too.)
-CUSTOM_DOCKERFILE = """\
-# Custom yolo Dockerfile — layers your own steps on top of yolo's built-in image.
-#
-# Use it with:
-#   yolo --dockerfile ./Dockerfile.yolo          # one run
-#   yolo config --dockerfile ./Dockerfile.yolo   # persist it for this project
-#
-# Because this file references YOLO_BASE, yolo builds its default image first and
-# passes the tag in as the YOLO_BASE build arg, so you inherit the `claude` user
-# (with passwordless sudo), the native Claude install, PATH, and the ENTRYPOINT.
-# Keep the two lines just below.
+# install, PATH, and the ENTRYPOINT — the user only fills in the marked block.
+CUSTOM_DOCKERFILE = _read_data_file("Dockerfile.custom")
 
-ARG YOLO_BASE
-FROM ${YOLO_BASE}
-
-# The base leaves you as the `claude` user, which has passwordless sudo. Bake in
-# cross-cutting tools you want in every session here; project-specific or heavy
-# ones are better installed on demand inside the container. For example:
-#
-#   RUN sudo apt-get update && sudo apt-get install -y postgresql-client
-
-# --- your customizations go here ---
-
-
-# Keep this last. yolo passes no -u, so the image's final USER is the runtime
-# user, and it refuses to launch an image that doesn't run as `claude` (a root
-# image would write your bind-mounted files as root).
-USER claude
-"""
+# The always-present base line of claude's --append-system-prompt (the conditional
+# ssh-agent / forwarded-ports lines stay in build_claude_args, being runtime-gated).
+CONTAINER_PROMPT = _read_data_file("container-prompt.txt").strip()
 
 
 def _image_tag(dockerfile_text: str, uid: int) -> str:
@@ -3166,7 +3099,7 @@ def build_claude_args(
     session --name.
     """
     extra_system_prompt = [
-        "You are running in an ephemeral Ubuntu container instead of MacOS host. Use sudo apt to install things you need.",
+        CONTAINER_PROMPT,
         *(
             [
                 "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."

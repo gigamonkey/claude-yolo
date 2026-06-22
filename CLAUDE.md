@@ -2,21 +2,27 @@
 
 ## What this is
 
-`yolo.py` is a single-file Python script that runs Claude Code inside an
+`yolo.py` is a Python script that runs Claude Code inside an
 ephemeral Docker container with `--dangerously-skip-permissions`. Containing the
 blast radius of "yolo mode" is the whole point: Claude can run unattended inside
 the container without touching the host beyond the bind-mounted working directory.
 
-The script is **a single file, runnable two ways** — standalone via its PEP 723
-header (`./yolo.py` self-runs under uv) or as an installed console script. Its one
-runtime dependency is **`keyring`** (the cross-platform credential store; see the
+The runtime is **`yolo.py` plus a few sibling data files** — `Dockerfile.default`,
+`Dockerfile.custom`, and `container-prompt.txt`, loaded by `_read_data_file`
+(which resolves them relative to `__file__`, following a PATH symlink the way
+`_pyproject_version` does). yolo is **runnable two ways** — standalone via its
+PEP 723 header (`./yolo.py` self-runs under uv) or as an installed console script
+(`uv tool install`, regular or `--editable`); a PATH symlink also works. Either
+way the data files sit beside `yolo.py` (shipped in the wheel via `only-include`,
+or in the source checkout), so `_read_data_file` finds them. Its one runtime
+dependency is **`keyring`** (the cross-platform credential store; see the
 auth/secrets sections), declared in *both* the PEP 723 `dependencies` block at the
 top of `yolo.py` and `pyproject.toml` — keep the two in sync. uv carries the dep in
-both run modes, so the single-file property is preserved. (The older "stdlib-only /
-zero runtime deps" goal was dropped when `keyring` was adopted for multiplatform
-support.) The repo *also* carries a small uv-managed dev setup (`pyproject.toml`,
-`tests/`) for linting and tests; that tooling is never needed to *run* the script,
-only to develop it (see **Development** below).
+both run modes. (The older "stdlib-only / zero runtime deps" goal was dropped when
+`keyring` was adopted for multiplatform support.) The repo *also* carries a small
+uv-managed dev setup (`pyproject.toml`, `tests/`) for linting and tests; that
+tooling is never needed to *run* the script, only to develop it (see
+**Development** below).
 
 **Host platforms:** macOS and Linux are fully supported; Windows is supported via
 WSL2 (which presents as Linux). Native Windows (no WSL) is out of scope. The
@@ -126,8 +132,10 @@ it from anywhere:
   builds the wheel and puts a `yolo` executable on PATH in its own isolated venv,
   resolving the `keyring` dep into that venv. `uv tool upgrade claude-yolo` updates
   it. The console-script wiring is `[project.scripts] yolo = "yolo:main"` in
-  `pyproject.toml`; the wheel ships only `yolo.py` (`[tool.hatch.build.targets.wheel]
-  only-include`).
+  `pyproject.toml`; the wheel ships `yolo.py` plus its data files (`Dockerfile.default`,
+  `Dockerfile.custom`, `container-prompt.txt`) via `[tool.hatch.build.targets.wheel]
+  only-include`, so they land beside `yolo.py` in site-packages where
+  `_read_data_file` finds them.
 - **Standalone**: `chmod +x yolo.py` and symlink it onto PATH
   (`ln -s "$PWD/yolo.py" ~/.local/bin/yolo`); the PEP 723 header makes it self-run,
   and a symlink keeps it tracking the repo with no build step.
@@ -147,8 +155,9 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
 
 ## How it works
 
-1. **Builds the image** (`build_docker_image`) from the inline
-   `DEFAULT_DOCKERFILE` (a plain literal Dockerfile, no templating) written to a
+1. **Builds the image** (`build_docker_image`) from the built-in
+   `DEFAULT_DOCKERFILE` (the `Dockerfile.default` data file, a plain Dockerfile
+   with no templating, loaded by `_read_data_file`) written to a
    temp dir — or, when `--dockerfile`/the `dockerfile` config key is set, from
    **that** file instead. Ubuntu 26.04 + nodejs/npm + a few
    baked-in amenities used across most projects (`ripgrep`, `fd-find` symlinked to
@@ -163,12 +172,11 @@ number in `yolo.py`. A stray copy with neither metadata nor pyproject reports
    `/usr/local/bin/claude`, which Claude Code's `/doctor` flags as a broken
    install and which self-update can't manage. The image **tag is
    content-addressed** — `claude-yolo:{hash8}` where `hash8` hashes the Dockerfile
-   text + host UID (`_image_tag`) — so the inline default and each custom
+   text + host UID (`_image_tag`) — so the built-in default and each custom
    Dockerfile get *distinct* images. This matters because yolo runs sessions in
    parallel: a single fixed tag would let two concurrent builds (default vs.
-   custom) race and one `docker run` pick up the other's image. The default
-   Dockerfile stays inline (not a shipped file) to preserve the single-file
-   property — `--dockerfile` is an *override*, not a relocation, though a custom
+   custom) race and one `docker run` pick up the other's image. `--dockerfile`
+   is an *override*, not a relocation, though a custom
    file is meant to *layer on* the default via `FROM ${YOLO_BASE}` rather than
    replace it wholesale (see the `--dockerfile` flag in the orthogonal-flags
    section). The **build
@@ -343,7 +351,7 @@ on top of whichever auth is chosen:
   debugging convenience. Gated where the old unconditional `print(" ".join(
   run_cmd))` was, in `launch_container` just before `_dispatch_launch`.
 - **`--dockerfile PATH`** (default unset; `dockerfile` in config) → build the
-  container image from this Dockerfile instead of the inline `DEFAULT_DOCKERFILE`.
+  container image from this Dockerfile instead of the built-in `DEFAULT_DOCKERFILE`.
   Override semantics (a single path, not a concat key); the path must exist and
   be a readable file (validated on the launch paths, like `--config-dir`, so a
   stale config path can't break `list`/`finish`/`config`). **Path resolution
@@ -1662,7 +1670,8 @@ request shouldn't silently become a fresh session).
 `keyring` (kept in sync with the PEP 723 `dependencies` block in `yolo.py`). Its
 `dev` dependency group carries the tooling — `ruff` and `pytest`. The project *is*
 packaged (hatchling build backend, `[project.scripts] yolo = "yolo:main"`, wheel
-ships only `yolo.py`) so it can `uv tool install`. `uv.lock` is committed; `.venv/`,
+ships `yolo.py` + its `Dockerfile.default`/`Dockerfile.custom`/`container-prompt.txt`
+data files) so it can `uv tool install`. `uv.lock` is committed; `.venv/`,
 `dist/`, and the tool caches are gitignored.
 
 ```bash
