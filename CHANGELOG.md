@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The WORKTREES `DIRECTORY` column drops the shared `~/.claude-yolo/worktrees/`
+  prefix**, showing just `<repo-slug>/<topic>` — the part that actually
+  distinguishes one worktree from another — in both `yolo list` and the `wip`
+  dashboard.
+
 - **A session that asks a question mid-turn now shows as `waiting`, not `working`.**
   The `ps`/`wip` STATE was driven only by turn-boundary hooks (`Stop` →
   waiting, `UserPromptSubmit` → working), so the `AskUserQuestion` tool — which

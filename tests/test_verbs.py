@@ -758,7 +758,10 @@ def test_list_shows_worktrees(cy, run_cli, repo, capsys):
     assert lines[0].split() == ["TOPIC", "STATUS", "COMMITS", "DIRECTORY"]
     body = "\n".join(lines[1:])
     assert "alpha" in body and "beta" in body
-    assert "~/.claude-yolo/worktrees" in body  # the worktree directory column
+    # DIRECTORY is <slug>/<topic> — the shared ~/.claude-yolo/worktrees/ prefix dropped
+    assert "~/.claude-yolo/worktrees" not in body
+    slug = cy._repo_paths()[2]
+    assert f"{slug}/alpha" in body and f"{slug}/beta" in body
 
 
 def test_list_no_branch_column_when_topic_matches(cy, run_cli, repo, capsys):

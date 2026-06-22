@@ -4578,10 +4578,9 @@ def _worktree_rows(
             ab = _branch_ahead_behind(branch, wt_base, repo)
             # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
             commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
-            try:
-                directory = "~/" + str(wt.relative_to(home))
-            except ValueError:
-                directory = str(wt)
+            # Drop the ~/.claude-yolo/worktrees/ prefix every row shares; wt is
+            # always under root by construction, so this leaves just <slug>/<topic>.
+            directory = str(wt.relative_to(root))
             # Fold the branch into TOPIC, surfaced only when it differs (the
             # off-the-happy-path case of a branch switched inside the container).
             label = topic if branch in (topic, "") else f"{topic} (branch: {branch})"
