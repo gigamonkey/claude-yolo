@@ -3129,34 +3129,34 @@ def build_claude_args(
     # user's own hooks back in via extra_hooks.
     settings: dict = {"sandbox": {"enabled": False}}
     if status_state_path:
-        # Session-activity hooks: Stop = "now waiting for input", UserPromptSubmit
-        # = "working again". Each writes "<state> <epoch>" to the status file `ps`
-        # reads. The absolute container path is baked in (not via an env var) so
-        # nothing depends on docker -e reaching the hook subprocess; the path has
-        # no shell-special chars but quote defensively.
+        # Session-activity hooks, each writing "<state> <epoch>" to the status file
+        # `ps`/`wip` read. Two turn-boundary events: Stop = "now waiting for input",
+        # UserPromptSubmit = "working again". Plus the AskUserQuestion tool, which
+        # blocks *mid-turn* for the user's answer without ending the turn — so Stop
+        # never fires and the session would otherwise still read "working" while it
+        # actually waits. Its PreToolUse marks waiting (the question is about to
+        # block) and PostToolUse marks working again (the answer arrived). Plan-mode
+        # approval (ExitPlanMode) is a known remaining gap — it fires no comparable
+        # hook. The absolute container path is baked in (not via an env var) so
+        # nothing depends on docker -e reaching the hook subprocess; the path has no
+        # shell-special chars but quote defensively.
         target = shlex.quote(status_state_path)
+
+        def _mark(state: str) -> dict:
+            return {"type": "command", "command": f"printf '{state} %s' \"$(date +%s)\" > {target}"}
+
         hooks: dict = {}
         for event, groups in (extra_hooks or {}).items():
             hooks.setdefault(event, []).extend(groups)
-        hooks.setdefault("Stop", []).append(
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"printf 'waiting %s' \"$(date +%s)\" > {target}",
-                    }
-                ]
-            }
+        hooks.setdefault("Stop", []).append({"hooks": [_mark("waiting")]})
+        hooks.setdefault("UserPromptSubmit", []).append({"hooks": [_mark("working")]})
+        # Matcher applies (unlike Stop/UserPromptSubmit, where it's ignored): only
+        # AskUserQuestion, the tool that waits on the user, flips the state.
+        hooks.setdefault("PreToolUse", []).append(
+            {"matcher": "AskUserQuestion", "hooks": [_mark("waiting")]}
         )
-        hooks.setdefault("UserPromptSubmit", []).append(
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"printf 'working %s' \"$(date +%s)\" > {target}",
-                    }
-                ]
-            }
+        hooks.setdefault("PostToolUse", []).append(
+            {"matcher": "AskUserQuestion", "hooks": [_mark("working")]}
         )
         settings["hooks"] = hooks
     args = [

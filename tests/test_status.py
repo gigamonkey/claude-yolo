@@ -53,6 +53,21 @@ def test_launch_injects_stop_and_userpromptsubmit_hooks(cy, run_cli, dirs):
     assert work_cmd == f"printf 'working %s' \"$(date +%s)\" > {target}"
 
 
+def test_launch_injects_askuserquestion_waiting_hooks(cy, run_cli, dirs):
+    # AskUserQuestion blocks mid-turn (Stop never fires), so its PreToolUse marks
+    # waiting and PostToolUse marks working again — both matched to that one tool.
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    hooks = settings_obj(cy, argv)["hooks"]
+    slug = cy._cwd_slug(work)
+    target = f"/home/claude/.claude/.yolo-status/{slug}.state"
+
+    pre, post = hooks["PreToolUse"][0], hooks["PostToolUse"][0]
+    assert pre["matcher"] == "AskUserQuestion" and post["matcher"] == "AskUserQuestion"
+    assert pre["hooks"][0]["command"] == f"printf 'waiting %s' \"$(date +%s)\" > {target}"
+    assert post["hooks"][0]["command"] == f"printf 'working %s' \"$(date +%s)\" > {target}"
+
+
 def test_launch_stamps_config_dir_label_default(cy, run_cli, dirs, flag_values):
     home, work = dirs
     argv = run_cli([], home=home, cwd=work)

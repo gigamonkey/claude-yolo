@@ -1194,8 +1194,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   2s cadence), condensed by `_condense_ports` to `host->container` pairs
   (address/proto noise and the IPv6 twin dropped). STATE is read from each
   session's `<config-dir>/.yolo-status/<cwd-slug>.state` file
-  (`_read_session_state`): `working <age>` (since the last `UserPromptSubmit`),
-  `waiting <age>` (since the `Stop` hook fired), or `-` (no file / older
+  (`_read_session_state`): `working <age>` (since the last `UserPromptSubmit` or
+  `AskUserQuestion` answer), `waiting <age>` (since the `Stop` hook fired or an
+  `AskUserQuestion` began blocking), or `-` (no file / older
   container). Both render via `_humanize_secs`. The config dir comes from the
   `yolo.config-dir` label (falls back to `~/.claude`); no extra docker calls.
   `--watch` redraws every `PS_WATCH_INTERVAL` (2s). It's an ordinary verb usable
@@ -1382,17 +1383,27 @@ Implementation shape:
   `--settings` overlay (which already disables the sandbox) also injects a
   `Stop` hook (writes `waiting <epoch>` to `/home/claude/.claude/.yolo-status/
   <cwd-slug>.state`) and a `UserPromptSubmit` hook (writes `working <epoch>`).
-  The absolute container path is baked into the hook command (no reliance on a
-  `docker run -e` var reaching the hook subprocess). `--settings` *replaces* the
-  whole `hooks` key (only `permissions` merges across scopes), so
+  Those two are *turn-boundary* events; a third case is **mid-turn waiting**: the
+  `AskUserQuestion` tool blocks for the user's answer *without ending the turn*,
+  so `Stop` never fires and the session would otherwise still read `working` while
+  it actually waits. So a **`PreToolUse` hook matched to `AskUserQuestion`** writes
+  `waiting` (the question is about to block) and a **`PostToolUse`** match writes
+  `working` (the answer arrived). The matcher is honored for these two events
+  (unlike `Stop`/`UserPromptSubmit`, where it's ignored), so only that one tool
+  flips the state. (Plan-mode approval / `ExitPlanMode` is a known remaining gap —
+  it fires no comparable hook, so a session sitting on a plan still reads
+  `working`.) The absolute container path is baked into the hook command (no
+  reliance on a `docker run -e` var reaching the hook subprocess). `--settings`
+  *replaces* the whole `hooks` key (only `permissions` merges across scopes), so
   `_read_settings_hooks(config_dir, home)` reads the mounted
   `settings.json`/`settings.local.json` hooks and `build_claude_args`
   concatenates yolo's groups onto them (preserving the user's; enterprise-managed
   settings aren't covered). `ps` reads the state file (see below); the schema is
   the matcher-group-wrapped `{"hooks":{"Stop":[{"hooks":[{"type":"command",...}]}]}}`
-  (matcher omitted — ignored for these events). The status file lives under the
-  config dir because that's the only host-writable bind mount reachable from
-  inside the container (`~/.claude-yolo` is deliberately never mounted).
+  (matcher omitted for `Stop`/`UserPromptSubmit` — ignored for those events — and
+  set to `AskUserQuestion` for the `Pre`/`PostToolUse` pair). The status file lives
+  under the config dir because that's the only host-writable bind mount reachable
+  from inside the container (`~/.claude-yolo` is deliberately never mounted).
 - **Containers are found by docker label, not name.** Every launch is stamped
   `--label yolo.repo=<repo-slug>`, `--label yolo.cwd=<cwd>`,
   `--label yolo.config-dir=<host config dir>` (so the cross-repo `ps` can locate
@@ -1868,7 +1879,8 @@ terminal verbs, layer concatenation), and the `config` verb (persist, validate,
 replace-conflict guard, and the verb gating).
 `test_status.py` covers the session-activity feature: the injected
 `Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
-status path), the `yolo.config-dir` label, the stale-status-file reset (and that
+status path) plus the `AskUserQuestion`-matched `Pre`/`PostToolUse` waiting/working
+pair (mid-turn waiting), the `yolo.config-dir` label, the stale-status-file reset (and that
 `shell` does neither), the user-hook merge (`_read_settings_hooks` +
 concatenation), and the `_humanize_secs`/`_read_session_state` rendering; the
 `ps` STATE column itself is exercised in `test_tmux.py`.

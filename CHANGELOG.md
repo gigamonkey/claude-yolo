@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **A session that asks a question mid-turn now shows as `waiting`, not `working`.**
+  The `ps`/`wip` STATE was driven only by turn-boundary hooks (`Stop` →
+  waiting, `UserPromptSubmit` → working), so the `AskUserQuestion` tool — which
+  blocks for your answer *without* ending the turn — left the session reading
+  `working` while it was really waiting on you. yolo now also flips the state via a
+  `PreToolUse`/`PostToolUse` hook matched to that tool. (Plan-mode approval still
+  reads `working` — it fires no comparable hook.)
+
 - **`--plugin-dir PATH` loads a local Claude Code plugin into every yolo session.**
   The clean way to give yolo sessions their own **skills** without those skills
   leaking into your host Claude sessions: Claude Code discovers skills only at
