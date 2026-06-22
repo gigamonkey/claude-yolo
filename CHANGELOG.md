@@ -5,6 +5,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip`'s `c` is now an interactive config editor.** Instead of a single
+  blind "type a line of flags" prompt, `c` opens a modal editor showing the
+  selected worktree's/project's current config — plus the inherited lower layers,
+  read-only — where `Enter` edits a key (bool and choice values via a `j/k` picker;
+  directory paths Tab-complete), `a` adds a not-yet-set key, `x` removes one, and
+  `e` is still the raw-flags escape hatch. Every change runs through `yolo config`,
+  so all its validation and persistence are reused unchanged; plain Enter on the
+  row then launches with the saved config.
+
 - **The WORKTREES `DIRECTORY` column drops the shared `~/.claude-yolo/worktrees/`
   prefix**, showing just `<repo-slug>/<topic>` — the part that actually
   distinguishes one worktree from another — in both `yolo list` and the `wip`

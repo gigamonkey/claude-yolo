@@ -5679,35 +5679,287 @@ def _wip_diff(kind, p, home, session) -> str:
     return "diff applies to worktrees and worktree sessions."
 
 
-def _wip_config(kind, p, home, term) -> str:
-    """`c`: prompt for a line of yolo flags and persist them to this worktree's
-    overlay (or this project's entry) by running `yolo config [TOPIC] <flags>` as a
-    subprocess — reusing its parsing/validation/persistence. Plain Enter then
-    launches with the saved config (the dashboard re-resolves config live).
+# Per-list-key element-flag stem: `--add-<stem>` / `--remove-<stem>`. mounts and
+# plugin-dirs take a Tab-completed directory; the rest a plain spec line.
+_LIST_FLAG = {
+    "mounts": "mount",
+    "ports": "port",
+    "secrets": "secret",
+    "plugin-dirs": "plugin-dir",
+    "prompts": "prompt",
+}
+
+
+class _ConfigScope:
+    """The config layer a wip row edits: where to read it, where writes go.
+
+    `read()` returns the raw stored entry (the editable layer), re-read each time so
+    the editor reflects the last write. `inherited()` returns the lower-layer keys
+    (global, plus the project entry for a worktree) not set in the editable layer,
+    for the read-only context pane. Writes run `yolo config <config_args> <flags>`
+    from `cwd`, reusing all of `yolo config`'s validation and persistence.
     """
+
+    def __init__(self, home, label, store, config_args, cwd, entry_key, base_cwd):
+        self.home = home
+        self.label = label
+        self.store = store
+        self.config_args = config_args
+        self.cwd = cwd
+        self._entry_key = entry_key
+        self._base_cwd = base_cwd
+
+    def read(self) -> dict:
+        if self.store == "worktrees.json":
+            data = _read_worktrees_file(_worktrees_file(self.home))
+        else:
+            data = _read_projects_file(self.home / ".claude-yolo" / "projects.json")
+        return data.get(self._entry_key, {})
+
+    def inherited(self) -> list:
+        """[(key, value, sources)] from lower layers, minus the editable keys."""
+        editable = {k.replace("_", "-") for k in self.read()}
+        items, _ = _effective_config(self.home, self._base_cwd)
+        return [(k, v, s) for (k, v, s) in items if k not in editable]
+
+
+def _config_scope(kind, payload, home):
+    """Resolve a wip row to its _ConfigScope, or None if it has no editable layer."""
     if kind == "worktree":
-        if not p.get("main_root"):
-            return "couldn't resolve the worktree's main repo."
-        cwd, args, label = p["main_root"], ["config", p["topic"]], p["topic"]
-    elif kind == "project":
-        cwd, args, label = p["path"], ["config"], pathlib.Path(p["path"]).name
-    else:
-        return "config applies to worktrees and projects."
-    raw = term.prompt_line(f"config flags for {label} (e.g. --mount ~/x --port 8000): ")
-    if not raw:
-        return "cancelled."
-    try:
-        flags = shlex.split(raw)
-    except ValueError as e:
-        return f"bad flags: {e}"
+        main_root = payload.get("main_root")
+        if not main_root:
+            return None
+        return _ConfigScope(
+            home,
+            label=f"worktree {payload['topic']}",
+            store="worktrees.json",
+            config_args=["config", payload["topic"]],
+            cwd=str(main_root),
+            entry_key=_worktree_overlay_key(pathlib.Path(payload["worktree"])),
+            base_cwd=pathlib.Path(main_root),
+        )
+    if kind == "project":
+        path = pathlib.Path(payload["path"])
+        return _ConfigScope(
+            home,
+            label=path.name,
+            store="projects.json",
+            config_args=["config"],
+            cwd=str(path),
+            entry_key=str(path),
+            base_cwd=path,
+        )
+    return None
+
+
+def _config_value_display(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v)
+    return str(v)
+
+
+def _config_apply(scope, flags) -> tuple:
+    """Run `yolo config <args> <flags>` for `scope`; return (ok, message)."""
     res = subprocess.run(
-        [_self_invocation(), *args, *flags], cwd=str(cwd), capture_output=True, text=True
+        [_self_invocation(), *scope.config_args, *flags],
+        cwd=scope.cwd,
+        capture_output=True,
+        text=True,
     )
     if res.returncode != 0:
-        return (
-            res.stderr.strip() or res.stdout.strip()
-        ) or f"config failed (exit {res.returncode})."
-    return f"saved config for {label} — press Enter to launch with it."
+        return False, (
+            res.stderr.strip() or res.stdout.strip() or f"config failed (exit {res.returncode})."
+        )
+    return True, f"saved: {' '.join(flags)}"
+
+
+def _pick_one(term, title, options):
+    """A minimal j/k+Enter vertical picker over a short option list; None on cancel."""
+    if not options:
+        return None
+    sel = 0
+    while True:
+        print("\x1b[H\x1b[2J", end="")
+        print(f"\x1b[1;36m{title}\x1b[0m\n")
+        for i, opt in enumerate(options):
+            print(f"\x1b[7m› {opt}\x1b[0m" if i == sel else f"  {opt}")
+        print("\n\x1b[90mj/k move · Enter select · q cancel\x1b[0m")
+        sys.stdout.flush()
+        key = term.wait_key(86400)
+        if key in ("q", "\x1b"):
+            return None
+        if key in ("up", "k"):
+            sel = max(0, sel - 1)
+        elif key in ("down", "j"):
+            sel = min(len(options) - 1, sel + 1)
+        elif key in ("\r", "\n", " "):
+            return options[sel]
+
+
+def _prompt_config_value(term, key):
+    """Prompt for a scalar key's value by its YOLO_KEYS kind; None on cancel."""
+    _, kind = YOLO_KEYS[key.replace("-", "_")]
+    if kind == "bool":
+        return _pick_one(term, f"{key}:", ["true", "false"])
+    if kind == "auth":
+        return _pick_one(term, f"{key}:", AUTH_CHOICES)
+    if kind == "finish":
+        return _pick_one(term, f"{key}:", FINISH_CHOICES)
+    if kind == "path":
+        return term.prompt_path(f"{key} = ") or None
+    return term.prompt_line(f"{key} = ") or None
+
+
+def _config_value_flags(key, value) -> list:
+    """The `yolo config` flags that set scalar `key` to `value`.
+
+    Bool keys are BooleanOptionalAction, so they persist via `--<key>` / `--no-<key>`
+    rather than `--<key> <value>`.
+    """
+    dashed = key.replace("_", "-")
+    _, kind = YOLO_KEYS[key.replace("-", "_")]
+    if kind == "bool":
+        return [f"--{dashed}"] if value == "true" else [f"--no-{dashed}"]
+    return [f"--{dashed}", value]
+
+
+def _prompt_list_element(term, key):
+    """Prompt for one element of a list-valued key; None on cancel.
+
+    mounts/plugin-dirs take a Tab-completed directory (mounts then a ro/rw pick);
+    ports/secrets/prompts a plain spec line.
+    """
+    if key in ("mounts", "plugin-dirs"):
+        path = term.prompt_path(f"{key} path: ")
+        if not path:
+            return None
+        if key == "mounts":
+            mode = _pick_one(term, "mount mode:", ["ro", "rw"])
+            return f"{path}:{mode}" if mode else None
+        return path
+    hint = {"ports": "[HOST:]CONTAINER", "secrets": "NAME[:TARGET]"}.get(key, "text")
+    return term.prompt_line(f"{key} ({hint}): ") or None
+
+
+def _config_list_loop(scope, key, term) -> str:
+    """Add/remove elements of a list-valued config key; returns a footer message."""
+    stem = _LIST_FLAG[key]
+    sel, msg = 0, ""
+    while True:
+        elems = scope.read().get(key, [])
+        if isinstance(elems, str):
+            elems = [elems]
+        sel = min(sel, len(elems) - 1) if elems else 0
+        print("\x1b[H\x1b[2J", end="")
+        print(f"\x1b[1;36mconfig\x1b[0m \x1b[90m{scope.label} · {key}\x1b[0m\n")
+        if not elems:
+            print("\x1b[90m(none)\x1b[0m")
+        for i, e in enumerate(elems):
+            print(f"\x1b[7m› {e}\x1b[0m" if i == sel else f"  {e}")
+        print("\n\x1b[90ma add · x remove · q done\x1b[0m")
+        print(f"\x1b[1;33m{msg}\x1b[0m" if msg else "")
+        sys.stdout.flush()
+        msg = ""
+        k = term.wait_key(86400)
+        if k in ("q", "\x1b"):
+            return f"edited {key} for {scope.label}."
+        if k in ("up", "k") and elems:
+            sel = max(0, sel - 1)
+        elif k in ("down", "j") and elems:
+            sel = min(len(elems) - 1, sel + 1)
+        elif k == "a":
+            spec = _prompt_list_element(term, key)
+            if spec:
+                msg = _config_apply(scope, [f"--add-{stem}", spec])[1]
+        elif k == "x" and elems:
+            msg = _config_apply(scope, [f"--remove-{stem}", elems[sel]])[1]
+
+
+def _draw_config_editor(scope, entry, keys, inherited, sel, msg) -> None:
+    """One config-editor frame: the editable keys (selectable), the inherited pane
+    (dimmed, read-only), and a key hint."""
+    print("\x1b[H\x1b[2J", end="")
+    print(f"\x1b[1;36mconfig\x1b[0m \x1b[90m{scope.label} ({scope.store})\x1b[0m\n")
+    width = max((len(k) for k in keys + [i[0] for i in inherited]), default=0)
+    if not keys:
+        print("\x1b[90m(nothing set in this layer)\x1b[0m")
+    for i, k in enumerate(keys):
+        line = f"{k:<{width}}  {_config_value_display(entry[k])}"
+        print(f"\x1b[7m› {line}\x1b[0m" if i == sel else f"  {line}")
+    if inherited:
+        print("\n\x1b[90minherited (read-only):\x1b[0m")
+        for k, v, sources in inherited:
+            print(
+                f"\x1b[90m  {k:<{width}}  {_config_value_display(v)}  [{', '.join(sources)}]\x1b[0m"
+            )
+    print("\n\x1b[90mEnter edit · a add key · x remove · e raw flags · q done\x1b[0m")
+    print(f"\x1b[1;33m{msg}\x1b[0m" if msg else "")
+
+
+def _config_editor_loop(scope, term) -> str:
+    """`c`: an interactive editor of one config layer (a worktree overlay or project
+    entry). Shows the current values + the inherited lower layers (read-only), and
+    edits/adds/removes keys — each change run through `yolo config`, reusing its
+    validation and persistence. Returns a footer for the dashboard; plain Enter then
+    launches with the saved config (the dashboard re-resolves config live).
+    """
+    sel, msg = 0, ""
+    while True:
+        stored = scope.read()
+        entry = {k.replace("_", "-"): v for k, v in stored.items()}
+        keys = list(entry)
+        inherited = scope.inherited()
+        sel = min(sel, len(keys) - 1) if keys else 0
+        _draw_config_editor(scope, entry, keys, inherited, sel, msg)
+        msg = ""
+        k = term.wait_key(86400)
+        if k in ("q", "\x1b"):
+            return f"edited config for {scope.label} — press Enter to launch with it."
+        if k in ("up", "k") and keys:
+            sel = max(0, sel - 1)
+        elif k in ("down", "j") and keys:
+            sel = min(len(keys) - 1, sel + 1)
+        elif k in ("\r", "\n") and keys:
+            msg = _config_edit_key(scope, keys[sel], term)
+        elif k == "a":
+            available = [
+                kk.replace("_", "-") for kk in YOLO_KEYS if kk.replace("_", "-") not in entry
+            ]
+            chosen = _pick_one(term, "add key:", available)
+            if chosen:
+                msg = _config_edit_key(scope, chosen, term)
+        elif k == "x" and keys:
+            if term.confirm(f"unset {keys[sel]}?"):
+                msg = _config_apply(scope, ["--unset", keys[sel]])[1]
+        elif k == "e":
+            raw = term.prompt_line("raw config flags: ")
+            if raw:
+                try:
+                    msg = _config_apply(scope, shlex.split(raw))[1]
+                except ValueError as e:
+                    msg = f"bad flags: {e}"
+
+
+def _config_edit_key(scope, key, term) -> str:
+    """Edit one key: list keys open the element view, scalars re-prompt a value."""
+    if key.replace("-", "_") not in YOLO_KEYS:
+        return f"unknown key {key!r} — 'x' to remove or 'e' for raw flags."
+    if key in _LIST_FLAG:
+        return _config_list_loop(scope, key, term)
+    value = _prompt_config_value(term, key)
+    if value is None:
+        return "cancelled."
+    return _config_apply(scope, _config_value_flags(key, value))[1]
+
+
+def _wip_config(kind, p, home, term) -> str:
+    """`c`: open the interactive config editor for the selected worktree/project."""
+    scope = _config_scope(kind, p, home)
+    if scope is None:
+        return "config applies to worktrees and projects."
+    return _config_editor_loop(scope, term)
 
 
 def _wip_new_worktree(p, session, term) -> str:

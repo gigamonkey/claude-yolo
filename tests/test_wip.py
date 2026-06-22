@@ -682,46 +682,118 @@ def _stub_config_run(cy, monkeypatch, *, returncode=0, stderr=""):
     return calls
 
 
-def test_c_on_worktree_persists_via_yolo_config(cy, monkeypatch):
+# --- the config editor (`c`) ------------------------------------------------
+
+# The editor reads/writes real config files under `home`, so these drive
+# `_wip_config`/the editor sub-loops directly with a real tmp home (the run_loop
+# fixture uses home=None for the per-worktree defaults the dashboard needs). Writes
+# still go through the `yolo config` subprocess, stubbed by _stub_config_run.
+
+WT_PAYLOAD = {"worktree": "/wt/old", "main_root": "/repo", "slug": "repo", "topic": "old"}
+
+
+def _seed_worktree_entry(home, entry, key="/wt/old"):
+    d = home / ".claude-yolo"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "worktrees.json").write_text(json.dumps({key: entry}))
+
+
+def test_c_on_session_is_noop(cy, monkeypatch, tmp_path):
+    # `c` is a worktree/project action; a session row gets the explanatory message.
     calls = _stub_config_run(cy, monkeypatch)
-    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /x --port 8000"])
+    msg = cy._wip_config("session", session_item(cy).payload, tmp_path, FakeTerm([]))
+    assert calls == [] and "config applies to" in msg
+
+
+def test_c_raw_flags_escape_hatch_worktree(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    term = FakeTerm(["e", "q"], lines=["--mount /x --port 8000"])
+    msg = cy._wip_config("worktree", WT_PAYLOAD, tmp_path, term)
     ((cmd, cwd),) = calls
     assert cmd == ["yolo", "config", "old", "--mount", "/x", "--port", "8000"]
     assert cwd == "/repo"  # the worktree's main repo
-    assert "saved config" in frames[-1][1]
+    assert "edited config for worktree old" in msg
 
 
-def test_c_on_project_persists_via_yolo_config(cy, monkeypatch):
+def test_c_raw_flags_project_scope(cy, monkeypatch, tmp_path):
     calls = _stub_config_run(cy, monkeypatch)
-    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
-    run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--auth bedrock"])
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    term = FakeTerm(["e", "q"], lines=["--auth bedrock"])
+    cy._wip_config("project", {"path": str(proj)}, tmp_path, term)
     ((cmd, cwd),) = calls
     assert cmd == ["yolo", "config", "--auth", "bedrock"]  # no TOPIC → the project entry
-    assert cwd == "/work/proj"
+    assert cwd == str(proj)
 
 
-def test_c_cancel_on_empty(cy, monkeypatch):
+def test_c_edit_scalar_unsets_via_picker(cy, monkeypatch, tmp_path):
+    # An existing scalar key: 'x' on it unsets (after a confirm).
     calls = _stub_config_run(cy, monkeypatch)
-    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=[""])
-    assert calls == [] and frames[-1][1] == "cancelled."
+    _seed_worktree_entry(tmp_path, {"auth": "bedrock"})
+    term = FakeTerm(["x", "q"], confirms=[True])
+    cy._wip_config("worktree", WT_PAYLOAD, tmp_path, term)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--unset", "auth"]
 
 
-def test_c_failure_shows_error_in_footer(cy, monkeypatch):
+def test_c_add_mount_element_with_mode(cy, monkeypatch, tmp_path):
+    # The list-element view: add a mount — Tab-completed path, then a ro/rw pick.
+    calls = _stub_config_run(cy, monkeypatch)
+    scope = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    # a → prompt_path (/data) → _pick_one mode (Enter picks "ro") → back, q to exit
+    term = FakeTerm(["a", "\r", "q"], lines=["/data"])
+    cy._config_list_loop(scope, "mounts", term)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--add-mount", "/data:ro"]
+
+
+def test_c_remove_list_element(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    _seed_worktree_entry(tmp_path, {"mounts": ["/x:ro", "/y:rw"]})
+    scope = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    cy._config_list_loop(scope, "mounts", FakeTerm(["x", "q"]))  # x removes the selected (first)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--remove-mount", "/x:ro"]
+
+
+def test_c_failure_surfaces_in_editor(cy, monkeypatch, tmp_path, capsys):
     _stub_config_run(cy, monkeypatch, returncode=2, stderr="not a directory: /nope")
-    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /nope"])
-    assert "not a directory: /nope" in frames[-1][1]
+    term = FakeTerm(["e", "q"], lines=["--mount /nope"])
+    cy._wip_config("worktree", WT_PAYLOAD, tmp_path, term)
+    assert "not a directory: /nope" in capsys.readouterr().out  # shown in the editor frame
 
 
-def test_c_on_session_is_noop(cy, monkeypatch):
-    # `c` is a worktree/project action; a session row gets the explanatory message
-    # (and never even prompts → no subprocess).
-    calls = _stub_config_run(cy, monkeypatch)
-    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["c", "q"], lines=["--mount /x"])
-    assert calls == [] and "config applies to" in frames[-1][1]
+def test_c_shows_current_values_and_inherited(cy, monkeypatch, tmp_path, capsys):
+    _seed_worktree_entry(tmp_path, {"auth": "bedrock", "mounts": ["/x:ro"]})
+    (tmp_path / ".yolo.json").write_text(json.dumps({"base": "main"}))  # a lower layer
+    cy._wip_config("worktree", WT_PAYLOAD, tmp_path, FakeTerm(["q"]))
+    out = capsys.readouterr().out
+    assert "auth" in out and "bedrock" in out  # editable: the overlay's own keys
+    assert "mounts" in out and "/x:ro" in out
+    assert "inherited" in out and "base" in out and "main" in out  # read-only lower layer
+
+
+# --- config-editor units ----------------------------------------------------
+
+
+def test_config_value_flags_bool_and_scalar(cy):
+    assert cy._config_value_flags("ssh-agent", "true") == ["--ssh-agent"]
+    assert cy._config_value_flags("ssh-agent", "false") == ["--no-ssh-agent"]
+    assert cy._config_value_flags("auth", "bedrock") == ["--auth", "bedrock"]
+
+
+def test_prompt_config_value_routes_by_kind(cy):
+    # bool/choice go through the j/k+Enter picker; path/str through the line prompts
+    assert cy._prompt_config_value(FakeTerm(["\r"]), "ssh-agent") == "true"  # first option
+    assert cy._prompt_config_value(FakeTerm(["j", "\r"]), "auth") == "oauth-token"  # 2nd of AUTH
+    assert cy._prompt_config_value(FakeTerm([], lines=["/df"]), "dockerfile") == "/df"
+    assert cy._prompt_config_value(FakeTerm([], lines=["x86"]), "aws-profile") == "x86"
+
+
+def test_pick_one_navigates_and_cancels(cy):
+    assert cy._pick_one(FakeTerm(["j", "\r"]), "t", ["a", "b", "c"]) == "b"
+    assert cy._pick_one(FakeTerm(["q"]), "t", ["a", "b"]) is None
+    assert cy._pick_one(FakeTerm([]), "t", []) is None  # empty options → None
 
 
 # --- diff-stat picker -------------------------------------------------------

@@ -1263,10 +1263,20 @@ gracefully outside one — there's just no repo slug to label/find by).
   <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
   `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
   file opens its diff in yet another window, `c` on a worktree or project row
-  prompts for a line of yolo flags and persists them (running `yolo config [TOPIC]
-  <flags>` as a subprocess from the repo/project dir — reusing its
-  parsing/validation; result/error in the footer) to that worktree's overlay /
-  project entry, so plain Enter then launches with them (`_wip_config`), `a`
+  opens an **interactive config editor** (`_config_editor_loop`) for that worktree's
+  overlay / project entry — a modal sub-screen (the `_diff_stat_loop` pattern) that
+  shows the layer's current keys/values **plus the inherited lower layers**
+  (read-only, dimmed, source-labeled — `_effective_config` minus the editable
+  keys), where `Enter` edits the selected key (bools/choices via the j/k
+  `_pick_one` picker, paths via the Tab-completing `prompt_path`, list keys drill
+  into an add/remove element view `_config_list_loop` — mounts/plugin-dirs
+  Tab-complete the dir), `a` picks a not-yet-set key to add, `x` unsets one, and
+  `e` is a raw-flags escape hatch. Every write composes a `yolo config [TOPIC]
+  <flags>` subprocess (`_config_apply`, from the repo/project dir, reusing all of
+  `yolo config`'s validation/persistence; bool keys emit `--key`/`--no-key`, list
+  keys `--add-<stem>`/`--remove-<stem>`), so plain Enter then launches with the
+  saved config (`_wip_config` is the launcher; reads are in-process via
+  `_ConfigScope`). `a`
   registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
@@ -1855,8 +1865,13 @@ cores, which own the guard), `d` on a worktree *and* a worktree-backed session r
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
 `git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
-summary), `c` on a worktree/project running `yolo config [TOPIC] <flags>` from the
-right dir (cancel on empty, error in the footer, no-op + message on a session row),
+summary), `c` opening the config editor (`_config_editor_loop` / `_config_scope`: the
+raw-flags `e` hatch composing `yolo config [TOPIC] <flags>` from the right dir for
+worktree and project scope, `x`+confirm unsetting a scalar, the `_config_list_loop`
+add-mount path+ro/rw-pick and remove-element flows, the error surfacing in the
+editor frame, the current-values + inherited-pane display, and the units
+`_config_value_flags` (bool `--key`/`--no-key`), `_prompt_config_value` kind
+routing, and `_pick_one` navigation/cancel; a session row is the no-op message),
 a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
 (focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
