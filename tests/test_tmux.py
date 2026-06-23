@@ -182,8 +182,10 @@ def test_tmux_new_session_enables_terminal_title(cy, run_cli, tmux, dirs):
     opts = tmux.named("set-option")
     # bare session target, NOT `=yolo` — set-option rejects the `=` exact-match prefix
     assert ["set-option", "-t", "yolo", "set-titles", "on"] in opts
-    # `#S · #W` (session · window) — no redundant literal "yolo" prefix
-    assert ["set-option", "-t", "yolo", "set-titles-string", "#S · #W"] in opts
+    # the title format branches by window kind (dashboard / shell / session)
+    title = next(c[4] for c in opts if c[3] == "set-titles-string")
+    assert cy.TMUX_DASHBOARD_WINDOW in title  # dashboard → "<session> wip"
+    assert "shell:" in title and "session:" in title
 
 
 def test_tmux_personal_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
@@ -204,7 +206,8 @@ def test_tmux_existing_yolo_session_reasserts_title(cy, run_cli, tmux, dirs):
     run_cli(["--tmux"], home=home, cwd=work)
     opts = tmux.named("set-option")
     assert ["set-option", "-t", "yolo", "set-titles", "on"] in opts
-    assert ["set-option", "-t", "yolo", "set-titles-string", "#S · #W"] in opts
+    title = next(c[4] for c in opts if c[3] == "set-titles-string")
+    assert cy.TMUX_DASHBOARD_WINDOW in title and "shell:" in title and "session:" in title
 
 
 def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):

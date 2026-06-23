@@ -16,7 +16,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   on **every** `yolo wip`/tmux launch into a session yolo owns, not just when it
   first creates the session. So a long-lived `yolo` tmux session (which persists
   across detach) heals itself on the next launch instead of needing a
-  `tmux kill-server`. A personal
+  `tmux kill-server`. The title is now also labeled by window kind — `yolo wip` on
+  the dashboard, `yolo · session: <name>` on a session window, `yolo · shell:
+  <name>` on a `yolo shell` window. A personal
   session aimed at via `--tmux-session` is still left untouched.
 
 - **`yolo wip` gains `N` and `R` keys for sessions.** `Enter` still

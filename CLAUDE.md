@@ -1525,12 +1525,17 @@ Details that matter:
   (`_pin_tmux_window_name`); without it tmux would relabel the window with the
   foreground process name (node/python/bash) once it runs, turning the bottom
   bar's window list into a row of identical generic names.
-- **The terminal title tracks the focused yolo window** (`set-titles on` +
-  `set-titles-string "#S · #W"`, set by `_set_tmux_title_options`), so the OS
-  window/tab title follows the focused session+window as you switch (incl. from the
-  dashboard); `#S` is the session name (`yolo` by default), `#W` the container/topic
-  name. tmux's `set-titles` is off by default, so otherwise the title just keeps
-  whatever it was before attaching. The options are (re-)asserted on **every**
+- **The terminal title tracks the focused yolo window, labeled by kind**
+  (`set-titles on` + a conditional `set-titles-string`, set by
+  `_set_tmux_title_options`), so the OS window/tab title follows the focused window
+  as you switch (incl. from the dashboard). The format branches on the window name
+  `#W`: the `yolo-wip` dashboard → `#S wip`, a `<name>-shell` window → `#S · shell:
+  <name>` (the `-shell` stripped via `#{s/-shell$//:#{window_name}}` — the substitute
+  needs the full `#{window_name}`, not the `#W` alias, which expands empty inside
+  it), else (a claude session) → `#S · session: #W`; `#S` is the session name
+  (`yolo` by default, so e.g. `yolo · session: claude-yolo`). tmux's `set-titles` is
+  off by default, so otherwise the title just keeps whatever it was before
+  attaching. The options are (re-)asserted on **every**
   launch that touches a session yolo owns — `_ensure_tmux_session` sets them when it
   creates the session *and* re-sets them when the session already exists **but has
   the `yolo-wip` dashboard window** (the marker of a yolo session), so a long-lived
@@ -1857,9 +1862,9 @@ window command quoting, inside-vs-outside `$TMUX` focusing, the
 already-attached-client no-mirror guard, window reuse (including that a reused
 running container **skips the image build** and warns, while the no-window
 fall-through still builds), the config keys, the
-terminal-title options (`#S · #W`, set on a created session, re-asserted on an
-existing yolo session that has the dashboard window, left off a personal session
-that lacks it), and the pinned
+terminal-title options (the per-window-kind `set-titles-string`, the bare-`yolo`
+session target, set on a created session, re-asserted on an existing yolo session
+that has the dashboard window, left off a personal session that lacks it), and the pinned
 window names), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection

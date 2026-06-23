@@ -3348,21 +3348,33 @@ def _ensure_tmux_session(session: str) -> None:
 
 
 def _set_tmux_title_options(session: str) -> None:
-    """Make the OS terminal title track the focused yolo window (`#S · #W`).
+    """Make the OS terminal title track the focused yolo window, labeled by kind.
 
     tmux's set-titles is off by default, so without this the title stays whatever it
-    was before attaching. `#S` is the session name (`yolo` by default), `#W` the
-    window name (the container/topic) — so a Ghostty/iTerm window title follows
-    whichever yolo window is focused, including when you switch from the dashboard.
+    was before attaching. The title is a tmux format re-rendered for the focused
+    window on every switch, branching on the window name (`#W`) yolo assigns:
 
-    The session target is the bare name, NOT `=session`: tmux's `=` exact-match
-    prefix is accepted by query commands (has-session, list-windows) but **not** by
-    `set-option`'s session target — `set-option -t =yolo` fails "no such session",
-    so the `=` form silently no-ops'd these and the title never got set. (Window
-    targets like `set-window-option -t =session:window` *do* accept `=`.)
+    - the `yolo-wip` dashboard window     -> `<session> wip`
+    - a `<name>-shell` window (`yolo shell`) -> `<session> · shell: <name>`
+    - anything else (a claude session)    -> `<session> · session: <name>`
+
+    `#S` is the tmux session name (`yolo` by default, so the default reads e.g.
+    `yolo · session: claude-yolo`). Two tmux-format gotchas baked in here: the
+    `s///` substitute that strips the `-shell` suffix needs the full
+    `#{window_name}`, not the `#W` alias (the alias expands to empty inside it); and
+    the session *target* is the bare name, not `=session` — `set-option` rejects the
+    `=` exact-match prefix that query commands accept (it silently no-op'd before,
+    so the title never got set).
     """
+    # Built by concatenation (not an f-string) to dodge brace-escaping; the only
+    # interpolated value is the dashboard window name.
+    title = (
+        "#{?#{==:#W," + TMUX_DASHBOARD_WINDOW + "},#S wip,"
+        "#{?#{m:*-shell,#W},#S · shell: #{s/-shell$//:#{window_name}},"
+        "#S · session: #W}}"
+    )
     _tmux("set-option", "-t", session, "set-titles", "on")
-    _tmux("set-option", "-t", session, "set-titles-string", "#S · #W")
+    _tmux("set-option", "-t", session, "set-titles-string", title)
 
 
 def _launch_in_tmux(
