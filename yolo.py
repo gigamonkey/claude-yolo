@@ -3330,19 +3330,33 @@ def _ensure_tmux_session(session: str) -> None:
     superseded the old `ps --watch` dashboard, of which it's a superset.)
     """
     if _tmux("has-session", "-t", f"={session}").returncode == 0:
+        # Re-assert the title options on a session we already own (it has our
+        # dashboard window), so one that's been alive since before this — or before
+        # the title feature existed — heals itself rather than needing a kill-server.
+        # The options are session-scoped and idempotent. A *personal* session aimed
+        # at via --tmux-session has no yolo-wip window, so its title config is left
+        # untouched.
+        if _find_tmux_window(session, TMUX_DASHBOARD_WINDOW):
+            _set_tmux_title_options(session)
         return
     dashboard = _tmux_window_command([_self_invocation(), "wip", "--_dashboard"])
     res = _tmux("new-session", "-d", "-s", session, "-n", TMUX_DASHBOARD_WINDOW, dashboard)
     if res.returncode != 0:
         sys.exit(f"tmux new-session failed: {res.stderr.strip()}")
-    # Make the OS terminal title reflect the focused yolo window: tmux's set-titles
-    # is off by default, so the title would otherwise stay whatever it was before
-    # attaching (#W is the window name = the container/topic). Scoped to the session
-    # we just created — a pre-existing session (incl. a personal one aimed at via
-    # --tmux-session) is never reconfigured, since we return above when it exists.
-    _tmux("set-option", "-t", f"={session}", "set-titles", "on")
-    _tmux("set-option", "-t", f"={session}", "set-titles-string", "yolo · #S · #W")
+    _set_tmux_title_options(session)
     _pin_tmux_window_name(f"={session}:{TMUX_DASHBOARD_WINDOW}")
+
+
+def _set_tmux_title_options(session: str) -> None:
+    """Make the OS terminal title track the focused yolo window (`#S · #W`).
+
+    tmux's set-titles is off by default, so without this the title stays whatever it
+    was before attaching. `#S` is the session name (`yolo` by default), `#W` the
+    window name (the container/topic) — so a Ghostty/iTerm window title follows
+    whichever yolo window is focused, including when you switch from the dashboard.
+    """
+    _tmux("set-option", "-t", f"={session}", "set-titles", "on")
+    _tmux("set-option", "-t", f"={session}", "set-titles-string", "#S · #W")
 
 
 def _launch_in_tmux(

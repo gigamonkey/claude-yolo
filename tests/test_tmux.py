@@ -181,15 +181,29 @@ def test_tmux_new_session_enables_terminal_title(cy, run_cli, tmux, dirs):
     run_cli(["--tmux"], home=home, cwd=work)
     opts = tmux.named("set-option")
     assert ["set-option", "-t", "=yolo", "set-titles", "on"] in opts
-    assert any(c[3] == "set-titles-string" and "#W" in c[4] for c in opts)
+    # `#S · #W` (session · window) — no redundant literal "yolo" prefix
+    assert ["set-option", "-t", "=yolo", "set-titles-string", "#S · #W"] in opts
 
 
-def test_tmux_existing_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
-    # a pre-existing session (e.g. a personal one via --tmux-session) is left alone
+def test_tmux_personal_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
+    # A pre-existing session with no yolo dashboard window (a personal one aimed at
+    # via --tmux-session) is left alone — its title config isn't touched.
     home, work = dirs
-    tmux.has_session = True
+    tmux.has_session = True  # exists, but tmux.windows is empty → no yolo-wip window
     run_cli(["--tmux"], home=home, cwd=work)
     assert tmux.named("set-option") == []
+
+
+def test_tmux_existing_yolo_session_reasserts_title(cy, run_cli, tmux, dirs):
+    # A session we own (it has the yolo-wip dashboard window) re-gets the title
+    # options on launch, so a long-lived session heals itself without a kill-server.
+    home, work = dirs
+    tmux.has_session = True
+    tmux.windows = [("@0", cy.TMUX_DASHBOARD_WINDOW)]
+    run_cli(["--tmux"], home=home, cwd=work)
+    opts = tmux.named("set-option")
+    assert ["set-option", "-t", "=yolo", "set-titles", "on"] in opts
+    assert ["set-option", "-t", "=yolo", "set-titles-string", "#S · #W"] in opts
 
 
 def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):

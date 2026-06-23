@@ -1525,14 +1525,18 @@ Details that matter:
   (`_pin_tmux_window_name`); without it tmux would relabel the window with the
   foreground process name (node/python/bash) once it runs, turning the bottom
   bar's window list into a row of identical generic names.
-- **The terminal title is turned on for yolo-created sessions** (`set-titles on`
-  + `set-titles-string "yolo · #S · #W"`), so the OS window/tab title reflects
-  the focused session+window (`#W` = the container name). tmux's `set-titles` is
-  off by default, so otherwise the title just keeps whatever it was before
-  attaching. These options are set **only when yolo creates the session**
-  (`_ensure_tmux_session` returns early when it already exists), so a
-  pre-existing session — including a personal one targeted via
-  `--tmux-session` — is never reconfigured.
+- **The terminal title tracks the focused yolo window** (`set-titles on` +
+  `set-titles-string "#S · #W"`, set by `_set_tmux_title_options`), so the OS
+  window/tab title follows the focused session+window as you switch (incl. from the
+  dashboard); `#S` is the session name (`yolo` by default), `#W` the container/topic
+  name. tmux's `set-titles` is off by default, so otherwise the title just keeps
+  whatever it was before attaching. The options are (re-)asserted on **every**
+  launch that touches a session yolo owns — `_ensure_tmux_session` sets them when it
+  creates the session *and* re-sets them when the session already exists **but has
+  the `yolo-wip` dashboard window** (the marker of a yolo session), so a long-lived
+  session created before this feature heals itself without a `kill-server`. A
+  *personal* session targeted via `--tmux-session` has no dashboard window, so its
+  title config is never touched.
 - The window command is `shlex.join(run_cmd)` (the argv contains `--settings`
   JSON and the OAuth token — quoting is load-bearing) wrapped by
   `_tmux_window_command`: on **nonzero** exit it prints the code and waits for
@@ -1853,7 +1857,9 @@ window command quoting, inside-vs-outside `$TMUX` focusing, the
 already-attached-client no-mirror guard, window reuse (including that a reused
 running container **skips the image build** and warns, while the no-window
 fall-through still builds), the config keys, the
-terminal-title options set only on a yolo-created session, and the pinned
+terminal-title options (`#S · #W`, set on a created session, re-asserted on an
+existing yolo session that has the dashboard window, left off a personal session
+that lacks it), and the pinned
 window names), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection

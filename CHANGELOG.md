@@ -5,6 +5,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The tmux terminal title now tracks the focused window reliably.** The
+  `set-titles-string` dropped its redundant literal `yolo` prefix (it's now
+  `#S · #W` — session · window — so e.g. `yolo · claude-yolo` instead of `yolo ·
+  yolo · claude-yolo`), and the title options are now re-asserted on **every** `yolo
+  wip`/tmux launch into a session yolo owns, not just when it first creates the
+  session. So a long-lived `yolo` tmux session (which persists across detach) heals
+  itself on the next launch instead of needing a `tmux kill-server`. A personal
+  session aimed at via `--tmux-session` is still left untouched.
+
 - **`yolo wip` gains `N` and `R` keys for sessions.** `Enter` still
   switches-or-resumes-the-latest; the two new keys cover what it couldn't: `N`
   starts a **fresh** session on the selected worktree or project (`resume TOPIC
