@@ -12,7 +12,8 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `YOLO_SESSION=1` marks a yolo session — and, when no SSH agent is forwarded (the
   default), that it's working locally only with no GitHub access (so it won't
   attempt pushes/fetches that can't work); when `--ssh-agent` is on, a line says
-  push/fetch do work.
+  push/fetch do work. When ports are forwarded, the existing prompt line also now
+  notes the user reaches the server via `yolo browse` or `b` in the `wip` dashboard.
 
 ## v0.20.0 — 2026-06-22
 

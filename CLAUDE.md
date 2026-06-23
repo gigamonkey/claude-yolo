@@ -294,7 +294,7 @@ on top of whichever auth is chosen:
   config order) — what `browse`/`ps` read, describing the *actual* container —
   and adds a system-prompt line telling Claude servers must bind **0.0.0.0**
   (loopback-bound servers are unreachable through docker's forward) and that
-  the user opens them with `yolo browse`. Like mounts, mappings are fixed at
+  the user opens them with `yolo browse` (or `b` in the `wip` dashboard). Like mounts, mappings are fixed at
   `docker run` time and resolved only on launch paths.
 - **`--secret NAME[:TARGET]`** (repeatable; `secrets` in config) → inject a
   keychain-stored secret (set with `yolo secret set`) into the session. A

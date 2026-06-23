@@ -3114,9 +3114,10 @@ def build_claude_args(
         *(
             [
                 f"Container port(s) {', '.join(str(p) for p in forwarded_ports)} are "
-                "forwarded to the host. A server must listen on 0.0.0.0 (not "
-                "127.0.0.1) to be reachable from the host browser; the user opens "
-                "it with `yolo browse`."
+                "forwarded to the host: a web server you run on such a port is reachable "
+                "from the host, where the user opens it with `yolo browse` (or `b` in the "
+                "`yolo wip` dashboard). The server must listen on 0.0.0.0, not 127.0.0.1, "
+                "or docker's forward can't reach it."
             ]
             if forwarded_ports
             else []
