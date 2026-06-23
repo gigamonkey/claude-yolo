@@ -66,9 +66,10 @@ def seed_session(cy, home, session_dir):
 # --- start ------------------------------------------------------------------
 
 
-def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo):
+def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo, flag_values):
     r, home = repo
     argv = run_cli(["start", "auth-fix"], home=home, cwd=r)
+    assert "YOLO_SESSION=worktree" in flag_values(argv, "-e")  # value names the kind
     # worktree + branch created
     wt = home / ".claude-yolo" / "worktrees"
     created = list(wt.rglob("auth-fix"))

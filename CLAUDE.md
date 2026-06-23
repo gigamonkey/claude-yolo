@@ -1677,13 +1677,18 @@ request shouldn't silently become a fresh session).
   Mounting `~/.gitconfig` instead would drag in macOS-only bits (osxkeychain
   credential helper, GPG signing) that break commits in the Linux container. Note
   these env vars override any repo-local identity set *inside* the container.
-- **`YOLO_SESSION=1` is exported into every container** (in `launch_container`'s
+- **`YOLO_SESSION` is exported into every container** (in `launch_container`'s
   shared arg list, so it covers claude sessions and `yolo shell` alike; a `docker
   exec`-ed shell inherits it too). It's a deterministic marker that code running
   inside — Claude, hooks, scripts — is in a yolo container, where the
   worktree/branch is already the unit of isolation, so committing on the current
-  branch is fine. Distinct from `YOLO_PS1` (a *presentation* var the `.bashrc`
-  adopts for the prompt); `YOLO_SESSION` is the semantic "am I in yolo?" flag.
+  branch is fine. Its **presence** is the "am I in yolo?" test (`[ -n
+  "$YOLO_SESSION" ]`); its **value names the session kind** — `worktree` for a
+  worktree session, `cwd` for a current-directory one (`'worktree' if
+  worktree_name else 'cwd'`) — so a script can branch on which it is. (It used to
+  be the literal `1`; presence-based checks are unaffected, an exact `= 1` check
+  would need updating.) Distinct from `YOLO_PS1` (a *presentation* var the
+  `.bashrc` adopts for the prompt); `YOLO_SESSION` is the semantic flag.
 - The container name is the cwd basename (or `{main_repo_name}-{TOPIC}` for a
   worktree), then suffixed with `-{config-dir-basename}` when
   `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`.

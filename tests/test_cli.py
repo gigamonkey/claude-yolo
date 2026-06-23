@@ -416,7 +416,7 @@ def test_builtin_prompt_describes_yolo_env(cy):
     # base prompt: the ephemeral container + the YOLO_SESSION marker
     off = cy.build_claude_args([], ssh_agent=False)
     text = off[off.index("--append-system-prompt") + 1]
-    assert "YOLO_SESSION=1" in text
+    assert "YOLO_SESSION" in text
     assert "working locally" in text and "GitHub" in text  # no agent → local only
     # with the agent forwarded, the affirmative line replaces the local-only one
     on = cy.build_claude_args([], ssh_agent=True)
@@ -563,7 +563,8 @@ def test_docker_passthrough_after_double_dash(cy, run_cli, dirs):
 def test_every_launch_sets_yolo_session_marker(cy, run_cli, flag_values, dirs):
     home, work = dirs
     argv = run_cli([], home=home, cwd=work)
-    assert "YOLO_SESSION=1" in flag_values(argv, "-e")
+    # presence marks a yolo session; the value names the kind (cwd vs worktree)
+    assert "YOLO_SESSION=cwd" in flag_values(argv, "-e")  # a plain run is cwd mode
 
 
 # --- PS1 (yolo shell prompt) ------------------------------------------------

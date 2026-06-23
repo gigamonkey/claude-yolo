@@ -3632,9 +3632,11 @@ def launch_container(
         cwd.name,
         # A deterministic marker that this is a yolo container, so anything inside
         # (Claude, scripts, hooks) can tell — e.g. to commit freely on the current
-        # branch, since the worktree/branch is already the unit of isolation.
+        # branch, since the worktree/branch is already the unit of isolation. Its
+        # *presence* means "in yolo"; its value names the session kind (`worktree`
+        # for a worktree session, `cwd` for a current-directory one).
         "-e",
-        "YOLO_SESSION=1",
+        f"YOLO_SESSION={'worktree' if worktree_name else 'cwd'}",
         # A yolo-flagged bash prompt for `yolo shell` (fresh or exec'd into this container)
         *_ps1_env_args(cwd, worktree_name),
         # Forward the host git identity so commits made in the container are attributed correctly

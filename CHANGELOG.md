@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`YOLO_SESSION` now names the session kind** — its value is `worktree` or `cwd`
+  (it used to be the literal `1`). Its *presence* still marks "inside a yolo
+  session", so `[ -n "$YOLO_SESSION" ]` checks are unaffected; the value just lets
+  a script/hook tell a worktree session from a current-directory one. An exact
+  `[ "$YOLO_SESSION" = 1 ]` check (uncommon) would need updating.
+
 - **The built-in system prompt tells Claude more about the yolo environment.**
   It now notes that the container is ephemeral (the bind-mounted working dir and
   any writable mounts persist; the rest is discarded), that `sudo` and package
