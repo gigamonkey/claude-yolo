@@ -412,6 +412,18 @@ def test_append_prompt_concatenates_builtin_entry_and_cli(cy, run_cli, dirs):
     assert "FROM_CLI" in joined
 
 
+def test_builtin_prompt_describes_yolo_env(cy):
+    # base prompt: the ephemeral container + the YOLO_SESSION marker
+    off = cy.build_claude_args([], ssh_agent=False)
+    text = off[off.index("--append-system-prompt") + 1]
+    assert "YOLO_SESSION=1" in text
+    assert "working locally" in text and "GitHub" in text  # no agent → local only
+    # with the agent forwarded, the affirmative line replaces the local-only one
+    on = cy.build_claude_args([], ssh_agent=True)
+    on_text = on[on.index("--append-system-prompt") + 1]
+    assert "forwarded" in on_text and "working locally" not in on_text
+
+
 # --- extra mounts (--mount / `mounts`) ----------------------------------------
 
 

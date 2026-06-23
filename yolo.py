@@ -3102,10 +3102,14 @@ def build_claude_args(
         CONTAINER_PROMPT,
         *(
             [
-                "The SSH agent is not forwarded into this container. You do not have SSH access and cannot git push."
+                "No SSH agent or git credentials are forwarded, so you're working locally only: "
+                "you can commit, but can't push, fetch, or otherwise reach GitHub (private clones/pulls "
+                "won't work; public HTTPS clones do). Don't attempt git operations that need the network."
             ]
             if not ssh_agent
-            else []
+            else [
+                "The host SSH agent is forwarded, so git push/fetch and GitHub access over SSH work."
+            ]
         ),
         *(
             [

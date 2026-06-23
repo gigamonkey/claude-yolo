@@ -3,6 +3,16 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The built-in system prompt tells Claude more about the yolo environment.** It
+  now notes that the container is ephemeral (only the bind-mounted working dir
+  persists), that `sudo` and package installs are available, and that
+  `YOLO_SESSION=1` marks a yolo session — and, when no SSH agent is forwarded (the
+  default), that it's working locally only with no GitHub access (so it won't
+  attempt pushes/fetches that can't work); when `--ssh-agent` is on, a line says
+  push/fetch do work.
+
 ## v0.20.0 — 2026-06-22
 
 - **`yolo wip`'s `c` is now an interactive config editor.** Instead of a single
