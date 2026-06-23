@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.21.0 — 2026-06-23
 
 - **`YOLO_SESSION` now names the session kind** — its value is `worktree` or `cwd`
   (it used to be the literal `1`). Its *presence* still marks "inside a yolo
@@ -14,7 +14,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 - **The built-in system prompt tells Claude more about the yolo environment.**
   It now notes that the container is ephemeral (the bind-mounted working dir and
   any writable mounts persist; the rest is discarded), that `sudo` and package
-  installs are available, and that `YOLO_SESSION=1` marks a yolo session — and,
+  installs are available, and that `YOLO_SESSION` marks a yolo session — and,
   when no SSH agent is forwarded (the default), that it's working locally only
   with no GitHub access (so it won't attempt pushes/fetches that can't work);
   when `--ssh-agent` is on, a line says push/fetch do work. When ports are
