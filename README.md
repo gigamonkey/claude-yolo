@@ -427,6 +427,8 @@ the selected row:
 | `Enter` | a worktree                       | switch to its live session window if it's running, else resume it in a new window |
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
 | `Enter` | the `+` row                      | prompt for a directory and start a session there — Tab completes the path (fills the common prefix, lists matches), `~` works like a shell |
+| `N`     | a worktree or project            | start a **fresh** session here (not a resume of the latest) — `start` for a project, `resume TOPIC --new` for a worktree; refuses if one is already running (Enter switches to it) |
+| `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |

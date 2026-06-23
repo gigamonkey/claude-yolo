@@ -463,6 +463,70 @@ def test_enter_active_project_focuses_window(cy, monkeypatch):
     assert spawned == []
 
 
+def test_N_new_session_on_worktree_and_project(cy, monkeypatch):
+    # `N` starts a *fresh* session: `resume TOPIC --new` for a worktree, `start` for
+    # a project (vs Enter, which resumes the most recent).
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
+    )
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy)],
+        "project": [project_item(cy, path="/work/proj")],
+    }
+    # N on the worktree (first row), then move down to the project and N again
+    run_loop(cy, monkeypatch, sections, ["N", "j", "N", "q"])
+    assert spawned == [
+        ("/repo", ["resume", "old", "--new", "--no-tmux"], "repo-old"),
+        ("/work/proj", ["start", "--no-tmux"], "proj"),
+    ]
+
+
+def test_R_resume_pick_on_worktree_and_project(cy, monkeypatch):
+    # `R` opens claude's session picker (`resume -r`) so you can pick an older session.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append((repo, argv))
+    )
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy)],
+        "project": [project_item(cy, path="/work/proj")],
+    }
+    run_loop(cy, monkeypatch, sections, ["R", "j", "R", "q"])
+    assert spawned == [
+        ("/repo", ["resume", "old", "-r", "--no-tmux"]),
+        ("/work/proj", ["resume", "-r", "--no-tmux"]),
+    ]
+
+
+def test_N_R_refuse_when_session_running(cy, monkeypatch):
+    # A row with a live window: N/R refuse (one session per dir) and never spawn.
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_focus_tmux_window", lambda *a: None)
+    sections = {
+        "session": [],
+        "worktree": [worktree_item(cy, payload={"running": True, "window": "@8"})],
+        "project": [],
+    }
+    frames = run_loop(cy, monkeypatch, sections, ["N", "R", "q"])
+    assert spawned == []
+    assert "already running" in frames[-1][1]
+
+
+def test_N_on_session_row_is_noop(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_focus_tmux_window", lambda *a: None)
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["N", "q"])
+    assert spawned == [] and "applies to worktrees and projects" in frames[-1][1]
+
+
 def test_n_on_project_prompts_topic_and_starts_worktree(cy, monkeypatch):
     spawned = []
     monkeypatch.setattr(

@@ -5412,8 +5412,8 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 _WIP_HINTS = {
     "session": "Enter switch · b browse · s stop · d diff · f/r finish/rebase (idle)",
-    "worktree": "Enter open · d diff · c config · f finish · r rebase (idle)",
-    "project": "Enter open session · n new worktree · c config · a register",
+    "worktree": "Enter open · N new · R resume-pick · d diff · c config · f finish · r rebase (idle)",
+    "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -5574,6 +5574,10 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_config(kind, p, home, term)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, session, term)
+        if key == "N":
+            return _wip_new_session(kind, p, session)
+        if key == "R":
+            return _wip_resume_pick(kind, p, session)
     except YoloError as e:
         return str(e)
     return ""
@@ -5623,6 +5627,64 @@ def _wip_enter(item, session, term) -> str:
         _spawn_session_window(path, ["start", "--no-tmux"], path.name, session)
         return f"starting a session in {path.name}…"
     return ""
+
+
+def _wip_spawn_target(kind, p):
+    """(cwd, window_name, label) for spawning a session on a worktree/project row.
+
+    Mirrors the repo/name logic Enter uses, so a spawned window matches Enter's.
+    Returns None for kinds that aren't launchable this way (session / the `+` row).
+    """
+    if kind == "worktree":
+        repo = p["main_root"] or p["worktree"]
+        name = f"{pathlib.Path(repo).name}-{p['topic']}" if p["main_root"] else p["topic"]
+        return repo, name, p["topic"]
+    if kind == "project":
+        path = p["path"]
+        return path, pathlib.Path(path).name, pathlib.Path(path).name
+    return None
+
+
+def _wip_new_session(kind, p, session) -> str:
+    """`N`: start a *fresh* session here (vs Enter, which resumes the latest).
+
+    A project gets a plain `start` in its dir; a worktree gets `resume TOPIC --new`
+    (a new named session on the existing worktree). Only one session runs per
+    dir/worktree (the already-running guard), so this refuses when one is live —
+    Enter switches to it instead.
+    """
+    target = _wip_spawn_target(kind, p)
+    if target is None:
+        return "new session applies to worktrees and projects."
+    cwd, window_name, label = target
+    if p.get("window"):
+        return f"a session is already running in {label} — Enter switches to it; stop it first."
+    argv_tail = (
+        ["resume", p["topic"], "--new", "--no-tmux"]
+        if kind == "worktree"
+        else ["start", "--no-tmux"]
+    )
+    _spawn_session_window(cwd, argv_tail, window_name, session)
+    return f"starting a new session in {label}…"
+
+
+def _wip_resume_pick(kind, p, session) -> str:
+    """`R`: open Claude's interactive session picker (`resume -r`) in a new window,
+    so you can resume a session other than the most recent. Refuses on a running
+    row, like `N` (you can't resume into the live container)."""
+    target = _wip_spawn_target(kind, p)
+    if target is None:
+        return "resume picker applies to worktrees and projects."
+    cwd, window_name, label = target
+    if p.get("window"):
+        return f"a session is already running in {label} — Enter switches to it; stop it first."
+    argv_tail = (
+        ["resume", p["topic"], "-r", "--no-tmux"]
+        if kind == "worktree"
+        else ["resume", "-r", "--no-tmux"]
+    )
+    _spawn_session_window(cwd, argv_tail, window_name, session)
+    return f"opening the session picker for {label}…"
 
 
 def _wip_browse(p, term) -> str:

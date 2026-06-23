@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **`yolo wip` gains `N` and `R` keys for sessions.** `Enter` still
+  switches-or-resumes-the-latest; the two new keys cover what it couldn't: `N`
+  starts a **fresh** session on the selected worktree or project (`resume TOPIC
+  --new` for a worktree, `start` for a project) rather than resuming the most
+  recent, and `R` opens Claude's interactive **session picker** (`resume -r`) in a
+  new window so you can resume a session *other* than the latest. Both refuse on a
+  row whose session is already running (one session per dir/worktree — `Enter`
+  switches to it).
+
 ## v0.21.0 — 2026-06-23
 
 - **`YOLO_SESSION` now names the session kind** — its value is `worktree` or `cwd`

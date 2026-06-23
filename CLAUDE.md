@@ -1253,8 +1253,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   directory Tab-completion through `_complete_path`, deliberately *not* readline,
   whose Tab never engages `input()` under libedit, the macOS Python uv ships) for a
   directory and `start`s a fresh session there, for a dir that isn't a listed
-  project yet. `n` on a project prompts for a topic and
-  starts a **new worktree** session
+  project yet. **`N`** on a worktree or project starts a *fresh* session
+  (`_wip_new_session`: `start` for a project, `resume TOPIC --new` for a worktree)
+  rather than Enter's resume-the-latest, and **`R`** opens claude's session picker
+  (`_wip_resume_pick`: `resume -r` / `resume TOPIC -r`) in a new window to resume a
+  non-most-recent session — both refuse on a row with a live `window` (one session
+  per dir/worktree; Enter switches instead) and otherwise shell out via
+  `_wip_spawn_target`'s repo/name (same as Enter). `n` on a project prompts for a
+  topic and starts a **new worktree** session
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
   forwarded port (prompting if >1), `s`
@@ -1867,7 +1873,9 @@ selection flow, plus `_session_window_for` exact-path/subdir/no-window
 resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with `_wip_items`/
 `_draw_wip` and the action cores stubbed (navigation across sections, refresh
 preserving selection by key, Enter→switch/resume-worktree/resume-project/focus-
-active-project-or-worktree, `n` on a
+active-project-or-worktree, `N` new-session on a worktree/project spawning
+`resume TOPIC --new`/`start` (and refusing on a live `window` + the session-row
+no-op), `R` resume-pick spawning `resume TOPIC -r`/`resume -r`, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
 there (cancel on empty, reject a non-dir), `b` browse incl. the
