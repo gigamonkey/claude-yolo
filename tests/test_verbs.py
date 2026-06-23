@@ -78,6 +78,8 @@ def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo):
     assert worktree_label(argv) == "auth-fix"
     cmd = claude_command(cy, argv)
     assert cmd[cmd.index("--name") + 1] == f"{r.name}:auth-fix"
+    # a worktree is an isolated copy, so the cwd-mode live-checkout caution is absent
+    assert "live checkout" not in cmd[cmd.index("--append-system-prompt") + 1]
 
 
 def test_start_errors_if_topic_exists(cy, run_cli, repo):

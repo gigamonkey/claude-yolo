@@ -1388,7 +1388,14 @@ Implementation shape:
   `<config-dir>/.yolo-status/` and **deletes the stale `<cwd-slug>.state` file**
   so a fresh session doesn't briefly show a prior one's wait time.
   `build_claude_args` builds the `claude` command (settings, built-in
-  prompt, `--add-dir` per extra mount, `--continue`/`--resume`, `--name`).
+  prompt, `--add-dir` per extra mount, `--continue`/`--resume`, `--name`). The
+  built-in prompt's conditional lines depend on the launch: an SSH-agent line
+  (local-only vs. push/fetch work), a forwarded-ports line (bind 0.0.0.0; reach it
+  via `yolo browse`/`b`), and — when `cwd_mode` (a cwd session, `worktree_name is
+  None`, passed by `main` to each call) — a caution that the working dir is the
+  user's live host checkout, so destructive in-place changes to artifacts like
+  `.venv` (that host tools/servers may depend on) should be avoided; a worktree is
+  an isolated copy, so the line is omitted there.
 - **Session-activity hooks** (`build_claude_args` + `_read_session_state`). The
   `--settings` overlay (which already disables the sandbox) also injects a
   `Stop` hook (writes `waiting <epoch>` to `/home/claude/.claude/.yolo-status/

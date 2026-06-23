@@ -13,7 +13,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   with no GitHub access (so it won't attempt pushes/fetches that can't work);
   when `--ssh-agent` is on, a line says push/fetch do work. When ports are
   forwarded, the existing prompt line also now notes the user reaches the server
-  via `yolo browse` or `b` in the `wip` dashboard.
+  via `yolo browse` or `b` in the `wip` dashboard. And in cwd mode (a
+  current-directory session, not an isolated worktree) it warns that the working
+  directory is the user's live host checkout — so Claude avoids destructive
+  in-place changes to artifacts like `.venv`/`node_modules` that host tools or a
+  running server may depend on (e.g. use a throwaway venv for tests).
 
 ## v0.20.0 — 2026-06-22
 

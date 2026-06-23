@@ -424,6 +424,17 @@ def test_builtin_prompt_describes_yolo_env(cy):
     assert "forwarded" in on_text and "working locally" not in on_text
 
 
+def test_cwd_mode_warns_about_the_live_checkout(cy, run_cli, dirs):
+    # A plain cwd launch (no worktree): the prompt cautions about the shared checkout.
+    home, work = dirs
+    cargs = claude_args(cy, run_cli([], home=home, cwd=work))
+    prompt = cargs[cargs.index("--append-system-prompt") + 1]
+    assert "live checkout" in prompt and ".venv" in prompt
+    # off by default — a worktree launch passes cwd_mode=False (see test_verbs)
+    off = cy.build_claude_args([])
+    assert "live checkout" not in off[off.index("--append-system-prompt") + 1]
+
+
 # --- extra mounts (--mount / `mounts`) ----------------------------------------
 
 

@@ -3082,6 +3082,7 @@ def build_claude_args(
     add_dirs=(),
     plugin_dirs=(),
     forwarded_ports=(),
+    cwd_mode: bool = False,
     status_state_path: str | None = None,
     extra_hooks: dict | None = None,
 ) -> list[str]:
@@ -3095,8 +3096,11 @@ def build_claude_args(
     forwarded container ports get a prompt line telling Claude servers must bind
     0.0.0.0 — the single most common reason a forwarded port "doesn't work" is a
     dev server defaulting to loopback inside the container, where docker's
-    forward can't reach it. Optionally adds --continue / --resume [ID] and a
-    session --name.
+    forward can't reach it. In `cwd_mode` (a current-directory session, not an
+    isolated worktree) a line cautions that the working dir is the user's live
+    host checkout — don't make destructive in-place changes to artifacts like
+    `.venv` that host tools may depend on. Optionally adds --continue / --resume
+    [ID] and a session --name.
     """
     extra_system_prompt = [
         CONTAINER_PROMPT,
@@ -3110,6 +3114,18 @@ def build_claude_args(
             else [
                 "The host SSH agent is forwarded, so git push/fetch and GitHub access over SSH work."
             ]
+        ),
+        *(
+            [
+                "This working directory is the user's live checkout on the host, mounted in "
+                "place — not an isolated copy. Host tools or a running server may depend on "
+                "files here, including ones not committed to git, so avoid destructive in-place "
+                "changes to build artifacts like `.venv` or `node_modules` (e.g. to run tests, "
+                "make a throwaway venv rather than wiping the project's); leave such files as "
+                "you found them."
+            ]
+            if cwd_mode
+            else []
         ),
         *(
             [
@@ -6633,6 +6649,7 @@ def _main():
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
+            cwd_mode=worktree_name is None,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
         )
@@ -6650,6 +6667,7 @@ def _main():
                 add_dirs=mount_dirs,
                 plugin_dirs=plugin_dirs,
                 forwarded_ports=container_ports,
+                cwd_mode=worktree_name is None,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
             )
@@ -6665,6 +6683,7 @@ def _main():
                 add_dirs=mount_dirs,
                 plugin_dirs=plugin_dirs,
                 forwarded_ports=container_ports,
+                cwd_mode=worktree_name is None,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
             )
@@ -6677,6 +6696,7 @@ def _main():
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
+            cwd_mode=worktree_name is None,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
         )
