@@ -180,9 +180,10 @@ def test_tmux_new_session_enables_terminal_title(cy, run_cli, tmux, dirs):
     home, work = dirs
     run_cli(["--tmux"], home=home, cwd=work)
     opts = tmux.named("set-option")
-    assert ["set-option", "-t", "=yolo", "set-titles", "on"] in opts
+    # bare session target, NOT `=yolo` — set-option rejects the `=` exact-match prefix
+    assert ["set-option", "-t", "yolo", "set-titles", "on"] in opts
     # `#S · #W` (session · window) — no redundant literal "yolo" prefix
-    assert ["set-option", "-t", "=yolo", "set-titles-string", "#S · #W"] in opts
+    assert ["set-option", "-t", "yolo", "set-titles-string", "#S · #W"] in opts
 
 
 def test_tmux_personal_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
@@ -202,8 +203,8 @@ def test_tmux_existing_yolo_session_reasserts_title(cy, run_cli, tmux, dirs):
     tmux.windows = [("@0", cy.TMUX_DASHBOARD_WINDOW)]
     run_cli(["--tmux"], home=home, cwd=work)
     opts = tmux.named("set-option")
-    assert ["set-option", "-t", "=yolo", "set-titles", "on"] in opts
-    assert ["set-option", "-t", "=yolo", "set-titles-string", "#S · #W"] in opts
+    assert ["set-option", "-t", "yolo", "set-titles", "on"] in opts
+    assert ["set-option", "-t", "yolo", "set-titles-string", "#S · #W"] in opts
 
 
 def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):

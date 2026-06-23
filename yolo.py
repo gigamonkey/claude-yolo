@@ -3354,9 +3354,15 @@ def _set_tmux_title_options(session: str) -> None:
     was before attaching. `#S` is the session name (`yolo` by default), `#W` the
     window name (the container/topic) — so a Ghostty/iTerm window title follows
     whichever yolo window is focused, including when you switch from the dashboard.
+
+    The session target is the bare name, NOT `=session`: tmux's `=` exact-match
+    prefix is accepted by query commands (has-session, list-windows) but **not** by
+    `set-option`'s session target — `set-option -t =yolo` fails "no such session",
+    so the `=` form silently no-ops'd these and the title never got set. (Window
+    targets like `set-window-option -t =session:window` *do* accept `=`.)
     """
-    _tmux("set-option", "-t", f"={session}", "set-titles", "on")
-    _tmux("set-option", "-t", f"={session}", "set-titles-string", "#S · #W")
+    _tmux("set-option", "-t", session, "set-titles", "on")
+    _tmux("set-option", "-t", session, "set-titles-string", "#S · #W")
 
 
 def _launch_in_tmux(

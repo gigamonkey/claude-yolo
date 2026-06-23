@@ -5,13 +5,18 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **The tmux terminal title now tracks the focused window reliably.** The
-  `set-titles-string` dropped its redundant literal `yolo` prefix (it's now
-  `#S · #W` — session · window — so e.g. `yolo · claude-yolo` instead of `yolo ·
-  yolo · claude-yolo`), and the title options are now re-asserted on **every** `yolo
-  wip`/tmux launch into a session yolo owns, not just when it first creates the
-  session. So a long-lived `yolo` tmux session (which persists across detach) heals
-  itself on the next launch instead of needing a `tmux kill-server`. A personal
+- **The tmux terminal title now actually tracks the focused window.** It never
+  really worked before: yolo set the title options with `set-option -t =yolo …`,
+  but tmux's `=` exact-match target prefix — fine for `has-session`/`list-windows`
+  — is rejected by `set-option` ("no such session: =yolo"), so the calls silently
+  no-op'd and `set-titles` was never enabled. Fixed by using the bare session
+  target. While here, the `set-titles-string` dropped its redundant literal `yolo`
+  prefix (it's now `#S · #W` — session · window — so e.g. `yolo · claude-yolo`
+  instead of `yolo · yolo · claude-yolo`), and the title options are now re-asserted
+  on **every** `yolo wip`/tmux launch into a session yolo owns, not just when it
+  first creates the session. So a long-lived `yolo` tmux session (which persists
+  across detach) heals itself on the next launch instead of needing a
+  `tmux kill-server`. A personal
   session aimed at via `--tmux-session` is still left untouched.
 
 - **`yolo wip` gains `N` and `R` keys for sessions.** `Enter` still
