@@ -920,6 +920,22 @@ def test_list_all_spans_repos(cy, run_cli, repo, tmp_path, capsys):
     assert "repo" in body and "other-repo" in body
 
 
+def test_list_all_recovers_repo_name_for_orphaned_worktree(cy, run_cli, repo, tmp_path, capsys):
+    # A worktree whose main repo was moved/deleted is orphaned (git can't resolve
+    # it), so the REPO name is recovered from the worktree's .git pointer rather
+    # than shown as the slugified path.
+    r, home = repo
+    other = _make_repo(tmp_path, "other-repo")
+    run_cli(["start", "beta"], home=home, cwd=other)
+    other.rename(tmp_path / "other-repo-moved")  # orphan beta's worktree
+    capsys.readouterr()
+    run_cli(["list", "--all"], home=home, cwd=r)
+    lines = capsys.readouterr().out.splitlines()
+    beta = next(cols for line in lines[1:] if (cols := line.split())[1:2] == ["beta"])
+    assert beta[0] == "other-repo"  # the recovered repo name, not the slugified path
+    assert beta[0].count("-") == 1  # i.e. not a long `-tmp-...-other-repo` slug
+
+
 def test_list_all_empty(cy, run_cli, repo, capsys):
     r, home = repo
     capsys.readouterr()

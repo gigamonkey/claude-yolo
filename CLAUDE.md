@@ -1184,7 +1184,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   to a plain `list`, like `ps` is for running containers. Under `--all` the
   `merged` check is run in each worktree's *own* main repo (resolved via
   `_worktree_main_repo`: the shared `.git`'s parent), since the branch and a
-  `HEAD` base only resolve there, not in the dir `list` was invoked from.
+  `HEAD` base only resolve there, not in the dir `list` was invoked from. The REPO
+  cell is that repo's basename; when the main repo has been moved/deleted (git
+  can't resolve it), the name is recovered from the worktree's `.git` pointer
+  (`_worktree_repo_name`) so an orphaned worktree shows the repo name, not the slug.
 - **`ps`** — every **running** yolo container, across **all** repos (the
   cross-repo counterpart to `list`), as a table
   (NAME/TOPIC/PORTS/CREATED/STATE) read from the `yolo.*` labels

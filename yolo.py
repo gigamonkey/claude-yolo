@@ -4558,6 +4558,27 @@ def _worktree_main_repo(wt: pathlib.Path) -> pathlib.Path | None:
     return pathlib.Path(out.stdout.strip()).parent
 
 
+def _worktree_repo_name(wt: pathlib.Path) -> str | None:
+    """The main repo's basename, read from a linked worktree's `.git` pointer file.
+
+    A linked worktree's `.git` is a file `gitdir: <main>/.git/worktrees/<name>`, so
+    the repo root is three levels up from the recorded gitdir. Unlike
+    `_worktree_main_repo` (which runs git and so fails once the main repo is
+    moved/deleted), the pointer still records the original path — so `list --all`
+    can show a real repo name for an orphaned worktree instead of the slug.
+    """
+    try:
+        text = (wt / ".git").read_text()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None  # a normal repo (`.git` dir), not a linked worktree
+    gitdir = pathlib.Path(text[len("gitdir:") :].strip())
+    if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+        return gitdir.parent.parent.parent.name
+    return None
+
+
 # One worktree's row for `list` / the `wip` dashboard. `running` is a bool;
 # `main_root` is the worktree's own main checkout (None in the single-repo `list`
 # case, where it's the cwd); `worktree`/`slug`/`topic` are what the finish/rebase
@@ -4641,7 +4662,10 @@ def _worktree_rows(
             label = topic if branch in (topic, "") else f"{topic} (branch: {branch})"
             rows.append(
                 WorktreeRow(
-                    repo_name=repo.name if repo else slug,
+                    # repo.name when git resolves the live main repo; else recover
+                    # it from the worktree's .git pointer (an orphaned worktree
+                    # whose repo moved/was deleted), falling back to the slug.
+                    repo_name=repo.name if repo else (_worktree_repo_name(wt) or slug),
                     topic=topic,
                     topic_label=label,
                     status=status,
