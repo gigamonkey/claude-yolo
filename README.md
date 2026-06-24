@@ -270,7 +270,9 @@ Verb details:
   `dirty` (uncommitted changes), or — when idle and clean — `merged`/`unmerged`
   depending on whether the branch is already contained in the base branch (`git
   branch --merged` semantics, so `merged` means it's ready to `finish`; a
-  squash-merge reads as `unmerged`). COMMITS shows how far the branch has diverged
+  squash-merge reads as `unmerged`), or `orphaned` when git can't resolve the
+  worktree's main repo at all (it was moved or deleted — `list` then prints a hint
+  to run `git worktree repair`). COMMITS shows how far the branch has diverged
   from its base as `↓behind ↑ahead`. The branch name is folded into TOPIC and shown
   only when it differs from the topic — e.g. if someone switched branches inside
   the container.

@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.22.0 — 2026-06-24
 
 - **`yolo list`/`wip` flag orphaned worktrees.** When a worktree's main repo has
   been moved or deleted, git can no longer resolve it. Such a worktree now shows
