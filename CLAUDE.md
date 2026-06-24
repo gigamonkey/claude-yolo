@@ -1172,7 +1172,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
-  the `base` config key/`--base`). **COMMITS** is the branch's `↓behind ↑ahead`
+  the `base` config key/`--base`) — or **`orphaned`** when git can't resolve the
+  worktree's main repo at all (it was moved/deleted, so `git -C <wt> rev-parse`
+  fails; `_worktree_rows` detects the nonzero rc and skips the merged/COMMITS
+  computation, COMMITS shows `-`, and the REPO name is still recovered from the
+  `.git` pointer). `do_list` prints a one-line footer when any are orphaned,
+  pointing at `git worktree repair`; in `wip` the `orphaned` status is red (beats
+  `running` in `_color_status`). **COMMITS** is the branch's `↓behind ↑ahead`
   counts vs `base` (GitHub's order — behind first), from `_branch_ahead_behind`'s
   `git rev-list --left-right --count base...branch`, carried on the `WorktreeRow`
   and shown by both `list` and the `wip` dashboard. So a fast-forward-merged or never-diverged branch reads
@@ -1832,7 +1838,9 @@ stat, the empty "No changes", and `--stat`-only-on-diff gating), and `list` (the
 TOPIC-only columns with the `topic (branch: X)` fold-in only when the branch
 diverges, the COMMITS column value for a branch one commit ahead, and `--all`
 spanning two repos under one fake HOME, the REPO column,
-the per-repo `merged` judgement run from a different repo, the empty case, and
+the per-repo `merged` judgement run from a different repo, an orphaned worktree
+(main repo moved → STATUS `orphaned`, `-` commits, repo name recovered from the
+`.git` pointer, the `git worktree repair` footer hint), the empty case, and
 the verb gating), the non-tmux already-running `resume` refusal, the
 `resume`-with-no-session fallback to a fresh session (worktree mode names it
 `<repo>:<topic>`, cwd mode after the directory; a seeded `projects/<slug>/*.jsonl`

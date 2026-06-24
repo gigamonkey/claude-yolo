@@ -5,12 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **`yolo list --all` shows the repo name for orphaned worktrees**, not a
-  slugified path. When a worktree's main repo has been moved or deleted, git can no
-  longer resolve it, so the REPO column used to fall back to the
-  slugified-path directory name; it now recovers the repo's basename from the
-  worktree's own `.git` pointer (which still records the original path). Same fix
-  applies to the `wip` dashboard's WORKTREES section.
+- **`yolo list`/`wip` flag orphaned worktrees.** When a worktree's main repo has
+  been moved or deleted, git can no longer resolve it. Such a worktree now shows
+  STATUS `orphaned` (instead of a misleading `unmerged`) with no commit counts, and
+  `list` prints a one-line footer pointing at `git worktree repair`. The REPO
+  column also recovers the real repo basename from the worktree's own `.git`
+  pointer (which still records the original path) instead of showing a slugified
+  path — so you can tell which repo to repair. Applies to `list --all` and the
+  `wip` dashboard's WORKTREES section (where `orphaned` is colored red).
 
 - **The tmux terminal title now actually tracks the focused window.** It never
   really worked before: yolo set the title options with `set-option -t =yolo …`,

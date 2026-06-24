@@ -4624,36 +4624,48 @@ def _worktree_rows(
         slug = slug_dir.name
         for wt in sorted(p for p in slug_dir.iterdir() if p.is_dir()):
             topic = wt.name
-            branch = subprocess.run(
+            head = subprocess.run(
                 ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 text=True,
-            ).stdout.strip()
-            dirty = bool(
-                subprocess.run(
-                    ["git", "-C", str(wt), "status", "--porcelain"],
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
             )
-            # Under --all, resolve the branch in its own repo (the current dir
-            # isn't it); also names the REPO column.
-            repo = _worktree_main_repo(wt) if all_repos else None
-            wt_base = base_resolver(repo, wt) if base_resolver else base
+            branch = head.stdout.strip()
             running = (
                 wt in running_paths
                 if running_paths is not None
                 else bool(running_container_for(slug, topic))
             )
-            flags = (["running"] if running else []) + (["dirty"] if dirty else [])
-            # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
-            # when it's actually a candidate to `finish`.
-            if not flags:
-                flags.append("merged" if _branch_merged(branch, wt_base, repo) else "unmerged")
-            status = ", ".join(flags)
-            ab = _branch_ahead_behind(branch, wt_base, repo)
-            # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
-            commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
+            if head.returncode != 0:
+                # Orphaned: git can't resolve the worktree's main repo — it was
+                # moved or deleted, so the .git pointer is dangling and HEAD/status/
+                # merged can't be computed. Flag it (a misleading `unmerged` is
+                # worse), with no commit counts; the REPO name is still recovered
+                # from the pointer below so you know which repo to `git worktree
+                # repair` from.
+                repo = None
+                status = ", ".join((["running"] if running else []) + ["orphaned"])
+                commits = "-"
+            else:
+                dirty = bool(
+                    subprocess.run(
+                        ["git", "-C", str(wt), "status", "--porcelain"],
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                )
+                # Under --all, resolve the branch in its own repo (the current dir
+                # isn't it); also names the REPO column.
+                repo = _worktree_main_repo(wt) if all_repos else None
+                wt_base = base_resolver(repo, wt) if base_resolver else base
+                flags = (["running"] if running else []) + (["dirty"] if dirty else [])
+                # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
+                # when it's actually a candidate to `finish`.
+                if not flags:
+                    flags.append("merged" if _branch_merged(branch, wt_base, repo) else "unmerged")
+                status = ", ".join(flags)
+                ab = _branch_ahead_behind(branch, wt_base, repo)
+                # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
+                commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
             # Drop the ~/.claude-yolo/worktrees/ prefix every row shares; wt is
             # always under root by construction, so this leaves just <slug>/<topic>.
             directory = str(wt.relative_to(root))
@@ -4710,6 +4722,15 @@ def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
         _print_table(
             ("TOPIC", "STATUS", "COMMITS", "DIRECTORY"),
             [(r.topic_label, r.status, r.commits, r.directory) for r in rows],
+        )
+
+    n = sum(1 for r in rows if "orphaned" in r.status)
+    if n:
+        s = "s" if n > 1 else ""
+        print(
+            f"\n{n} orphaned worktree{s}: the main repo moved or was deleted. Recover with "
+            "`git worktree repair` from the repo (then `yolo finish`), or remove the dir.",
+            file=sys.stderr,
         )
 
 
@@ -5399,10 +5420,10 @@ def _color_session_row(it) -> tuple:
 
 
 def _color_status(status: str) -> str:
-    """Color a worktree STATUS: dirty red, running green, unmerged yellow, else grey."""
+    """Color a worktree STATUS: orphaned/dirty red, running green, unmerged yellow, else grey."""
     code = (
         _RED
-        if "dirty" in status
+        if "orphaned" in status or "dirty" in status  # orphaned first: beats `running`
         else _GREEN
         if "running" in status
         else _YELLOW

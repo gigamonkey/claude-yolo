@@ -293,6 +293,12 @@ def test_draw_wip_renders_commits_column(cy, capsys):
     assert f"\x1b[{cy._GREEN}m↑1" in out  # nonzero ahead in green
 
 
+def test_color_status_orphaned_is_red_even_when_running(cy):
+    assert cy._color_status("orphaned") == f"\x1b[{cy._RED}morphaned\x1b[0m"
+    # orphaned beats running (a running, orphaned worktree is still a problem)
+    assert f"\x1b[{cy._RED}m" in cy._color_status("running, orphaned")
+
+
 def test_wip_projects_flags_active(cy, tmp_path):
     home = tmp_path / "home"
     (home / ".claude-yolo").mkdir(parents=True)

@@ -920,20 +920,26 @@ def test_list_all_spans_repos(cy, run_cli, repo, tmp_path, capsys):
     assert "repo" in body and "other-repo" in body
 
 
-def test_list_all_recovers_repo_name_for_orphaned_worktree(cy, run_cli, repo, tmp_path, capsys):
+def test_list_all_orphaned_worktree(cy, run_cli, repo, tmp_path, capsys):
     # A worktree whose main repo was moved/deleted is orphaned (git can't resolve
-    # it), so the REPO name is recovered from the worktree's .git pointer rather
-    # than shown as the slugified path.
+    # it): STATUS reads `orphaned`, COMMITS `-`, and the REPO name is recovered from
+    # the worktree's .git pointer (not the slugified path). A footer hint points at
+    # `git worktree repair`.
     r, home = repo
     other = _make_repo(tmp_path, "other-repo")
     run_cli(["start", "beta"], home=home, cwd=other)
     other.rename(tmp_path / "other-repo-moved")  # orphan beta's worktree
     capsys.readouterr()
     run_cli(["list", "--all"], home=home, cwd=r)
-    lines = capsys.readouterr().out.splitlines()
-    beta = next(cols for line in lines[1:] if (cols := line.split())[1:2] == ["beta"])
-    assert beta[0] == "other-repo"  # the recovered repo name, not the slugified path
-    assert beta[0].count("-") == 1  # i.e. not a long `-tmp-...-other-repo` slug
+    out = capsys.readouterr()
+    # cols: REPO TOPIC STATUS COMMITS DIRECTORY
+    beta = next(
+        cols for line in out.out.splitlines()[1:] if (cols := line.split())[1:2] == ["beta"]
+    )
+    assert beta[0] == "other-repo"  # recovered repo name, not the long slug
+    assert beta[0].count("-") == 1
+    assert beta[2] == "orphaned" and beta[3] == "-"  # STATUS / COMMITS
+    assert "orphaned" in out.err and "git worktree repair" in out.err  # footer hint
 
 
 def test_list_all_empty(cy, run_cli, repo, capsys):
