@@ -39,6 +39,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py --no-claude-json         # don't mount the host ~/.claude.json
 ./yolo.py --ssh-agent              # forward the host ssh-agent (off by default)
 ./yolo.py --submodules             # populate git submodules before launch (off by default)
+./yolo.py --no-redirect-build-dirs # don't redirect .venv/target/__pycache__ off the bind mount (cwd, on by default)
 ./yolo.py --mount ~/refdocs        # also mount ~/refdocs (read-only) at its host path
 ./yolo.py --mount ~/other:rw       # extra mount, writable
 ./yolo.py --yolorc ./setup.sh      # source this file inside the container at startup
@@ -267,6 +268,28 @@ on top of whichever auth is chosen:
   repos have none. Note neither `git merge` nor `git worktree add` checks out
   submodule contents, so without this you'd populate them by hand inside the
   container.
+- **`--redirect-build-dirs` / `--no-redirect-build-dirs`** (default **on**;
+  `redirect-build-dirs` in config; **cwd sessions only**) → export env vars that
+  point per-OS / build dirs at fixed container-local paths **off the bind mount**,
+  so the container never clobbers the host's copies on the live checkout. The set
+  (`_BUILD_DIR_REDIRECTS`, hardcoded): `UV_PROJECT_ENVIRONMENT=/home/claude/.yolo-env/uv`
+  (uv's `./.venv`), `CARGO_TARGET_DIR=…/cargo-target` (Rust `target/`),
+  `PYTHONPYCACHEPREFIX=…/pycache` (`__pycache__`). Without this, the first
+  container `uv run`/`cargo`/python rebuilds a macOS-built `./.venv` for Linux,
+  corrupting the host's copy and killing any host dev server that re-execs
+  `./.venv/bin/python`. An **env var** is the right lever because *every*
+  in-container shell inherits the container's process env — claude, the launch
+  wrapper, `yolo shell`, and crucially the agent's **Bash tool** subshells, which
+  source a rotating `~/.claude/shell-snapshots/*.sh` rather than `~/.bashrc` (so
+  editing rc files wouldn't reach them). Paths are **fixed, not per-project**: each
+  session is its own container and `/home/claude` is container-local (discarded at
+  exit), so nothing collides. **On by default** unlike the other bool keys
+  (`ssh-agent`/`submodules` default off) because it *removes* host risk rather than
+  adding exposure; **cwd-only** because a worktree is an isolated copy (gated on
+  `worktree_name is None`, like the cwd live-checkout prompt). Applied as plain
+  `docker -e` args in `launch_container`, so it composes with every auth mode and
+  needs no mount. (`node_modules` has no env equivalent and is **not** redirected —
+  see `plans/yolo-clobber-hardening.md` for the deferred volume-shadow approach.)
 - **`--mount PATH[:ro|:rw]`** (repeatable; `mounts` in config) → bind-mount extra
   host **files or directories** (reference dirs, or a single secret like a token
   file) at their **identical host paths**, like the cwd. **Read-only by default**;
@@ -875,7 +898,7 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `bedrock-model`, `claude-json`,
-`ssh-agent`, `submodules`, `base`, `finish-action` (one of
+`ssh-agent`, `submodules`, `redirect-build-dirs`, `base`, `finish-action` (one of
 `delete-if-merged`/`merge`/`push`/`keep` — validated against `FINISH_CHOICES` in
 `_parse_yolo_dict`, same as `auth`), `finish-remote`,
 `prompts` (string or list of strings; the pre-0.7 name
@@ -1800,10 +1823,15 @@ freshly-loaded module's original). `test_config.py` covers config parsing/mergin
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 the `finish-action`/`finish-remote` keys (parse, the `FINISH_CHOICES` validation,
-and `config`-verb persist), the `submodules` bool key (parse), and the `config`
+and `config`-verb persist), the `submodules` bool key (parse), the
+`redirect-build-dirs` bool key (parse, non-bool rejection, `config`-verb persist of
+the opt-out), and the `config`
 verb; `test_cli.py` covers verb
 dispatch and arg
 assembly across the credential/config axes, extra mounts, the guardrails, the
+build-dir redirect (`UV_PROJECT_ENVIRONMENT`/`CARGO_TARGET_DIR`/`PYTHONPYCACHEPREFIX`
+present by default in a cwd launch, absent under `--no-redirect-build-dirs`; the
+worktree-skips-it case is in `test_verbs.py`), the
 `--dockerfile` override (content-addressed tag, the `HOST_UID` build-arg, the
 missing-path error, the relative-vs-absolute path resolution against the session
 cwd, and that the build context contains only the Dockerfile), the

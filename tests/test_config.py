@@ -68,6 +68,17 @@ def test_parse_submodules_key(cy, tmp_path):
     assert cy._parse_yolo_file(p) == {"submodules": True}
 
 
+def test_parse_redirect_build_dirs_key(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"redirect-build-dirs": False})
+    assert cy._parse_yolo_file(p) == {"redirect_build_dirs": False}
+
+
+def test_parse_redirect_build_dirs_rejects_non_bool(cy, tmp_path):
+    p = write(tmp_path / ".yolo.json", {"redirect-build-dirs": "yes"})
+    with pytest.raises(SystemExit):
+        cy._parse_yolo_file(p)
+
+
 def test_parse_expands_user_in_path_keys(cy, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", "/home/someone")
     p = write(tmp_path / ".yolo.json", {"config-dir": "~/cfg"})
@@ -391,6 +402,13 @@ def test_config_verb_persists_bools_lists_and_mounts(cy, run_cli, dirs, tmp_path
             "mounts": [f"{ref}:rw"],
         }
     }
+
+
+def test_config_verb_persists_redirect_build_dirs_opt_out(cy, run_cli, dirs):
+    # default is on, so the meaningful thing to persist is the opt-out
+    home, work = dirs
+    run_cli(["config", "--no-redirect-build-dirs"], home=home, cwd=work)
+    assert read_projects(home) == {str(work): {"redirect-build-dirs": False}}
 
 
 def test_config_verb_updates_existing_entry_per_key(cy, run_cli, dirs):

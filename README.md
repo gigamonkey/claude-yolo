@@ -720,6 +720,25 @@ Claude in the system prompt that it can't `git push` — so it will generally le
 you know when something needs pushing from your host. (See also [Why forward the
 SSH agent](#why-forward-the-ssh-agent)).
 
+### `redirect-build-dirs` (`--redirect-build-dirs` / `--no-redirect-build-dirs`, default on)
+
+In a **cwd session** the container mounts your live host checkout in place, so a
+per-OS build directory on it is a hazard: your `./.venv` was built for macOS, and
+the moment a container command runs `uv run` (or `cargo`, or anything that touches
+`target/`/`__pycache__`) the tool rebuilds that directory **for Linux** — corrupting
+the copy your host tools use, and killing any running host dev server whose process
+re-execs `./.venv/bin/python`. **On by default**, `yolo` heads this off by pointing
+those directories at fixed container-local paths under `/home/claude/.yolo-env/`
+(`UV_PROJECT_ENVIRONMENT`, `CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`), so the
+container builds its own and never touches the host's. It works by setting
+**container env vars**, which every shell inside inherits — including Claude's Bash
+tool, which sources a snapshot file rather than `~/.bashrc`, so nothing else
+reliably reaches it. It applies only to cwd sessions (a worktree is an isolated
+copy, so there's no host copy to protect); turn it off with
+`--no-redirect-build-dirs` (or `redirect-build-dirs: false` in config) if a tool
+genuinely needs the in-tree `.venv`. Note `node_modules` has no equivalent env
+knob and is not redirected.
+
 ### `mounts` (`--mount PATH[:ro|:rw]`, repeatable)
 
 Extra host directories — reference docs, a sibling repo — bind-mounted into the

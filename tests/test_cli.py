@@ -113,6 +113,29 @@ def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
     assert "GIT_CONFIG_VALUE_0=https://github.com/" in envs
 
 
+# --- build-dir redirection --------------------------------------------------
+
+
+def test_redirect_build_dirs_on_by_default_in_cwd(cy, run_cli, flag_values, dirs):
+    # A cwd session is the user's live host checkout, so build/per-OS dirs are
+    # redirected off the bind mount by default, to fixed container-local paths.
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    envs = flag_values(argv, "-e")
+    assert "UV_PROJECT_ENVIRONMENT=/home/claude/.yolo-env/uv" in envs
+    assert "CARGO_TARGET_DIR=/home/claude/.yolo-env/cargo-target" in envs
+    assert "PYTHONPYCACHEPREFIX=/home/claude/.yolo-env/pycache" in envs
+
+
+def test_no_redirect_build_dirs_opts_out(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli(["--no-redirect-build-dirs"], home=home, cwd=work)
+    envs = flag_values(argv, "-e")
+    assert not any(e.startswith("UV_PROJECT_ENVIRONMENT=") for e in envs)
+    assert not any(e.startswith("CARGO_TARGET_DIR=") for e in envs)
+    assert not any(e.startswith("PYTHONPYCACHEPREFIX=") for e in envs)
+
+
 def test_no_claude_json_drops_that_mount(cy, run_cli, flag_values, dirs):
     home, work = dirs
     argv = run_cli(["--no-claude-json"], home=home, cwd=work)

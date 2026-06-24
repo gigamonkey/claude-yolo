@@ -81,6 +81,8 @@ def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo, flag
     assert cmd[cmd.index("--name") + 1] == f"{r.name}:auth-fix"
     # a worktree is an isolated copy, so the cwd-mode live-checkout caution is absent
     assert "live checkout" not in cmd[cmd.index("--append-system-prompt") + 1]
+    # ...and the build-dir redirect is cwd-only, so a worktree launch skips it
+    assert not any(e.startswith("UV_PROJECT_ENVIRONMENT=") for e in flag_values(argv, "-e"))
 
 
 def test_start_errors_if_topic_exists(cy, run_cli, repo):

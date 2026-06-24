@@ -3,6 +3,23 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **In a cwd session, per-OS/build dirs are redirected off the bind mount.** A cwd
+  session mounts the user's live host checkout in place, so a macOS-built `./.venv`
+  (or Rust `target/`, `__pycache__`) on it is a landmine: the first container
+  `uv run`/`cargo`/python rebuilds it for Linux, corrupting the host's copy and
+  killing any host dev server that re-execs `./.venv/bin/python`. yolo now exports
+  `UV_PROJECT_ENVIRONMENT`, `CARGO_TARGET_DIR`, and `PYTHONPYCACHEPREFIX` pointing
+  at fixed container-local paths under `/home/claude/.yolo-env/`, so the container
+  builds its own and never touches the host's. Because it's a container env var,
+  *every* in-container shell inherits it — including the agent's Bash tool, which
+  sources a rotating shell snapshot rather than `~/.bashrc`. On by default
+  (it removes host risk); cwd-only (a worktree is an isolated copy); opt out with
+  `--no-redirect-build-dirs` or `redirect-build-dirs: false` in config. The cwd
+  system prompt also gained sharper anti-clobber guidance (never `git add -A`/
+  `commit -a`; test on copies; keep migrations additive; run servers detached).
+
 ## v0.22.0 — 2026-06-24
 
 - **`yolo list`/`wip` flag orphaned worktrees.** When a worktree's main repo has

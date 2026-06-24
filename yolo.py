@@ -146,6 +146,19 @@ CUSTOM_DOCKERFILE = _read_data_file("Dockerfile.custom")
 # ssh-agent / forwarded-ports lines stay in build_claude_args, being runtime-gated).
 CONTAINER_PROMPT = _read_data_file("container-prompt.txt").strip()
 
+# (env var -> container path) redirects applied in a cwd session (opt-out via
+# --no-redirect-build-dirs). Each points a per-OS / build dir at a fixed
+# container-local path *off* the bind mount, so a container running `uv`/`cargo`/
+# python never rebuilds (and thereby corrupts) the host's macOS-built copy on the
+# live checkout. Fixed paths, no per-project keying: each session is its own
+# container and /home/claude is container-local, discarded at exit, so there's
+# nothing to collide with. See plans/yolo-clobber-hardening.md.
+_BUILD_DIR_REDIRECTS = (
+    ("UV_PROJECT_ENVIRONMENT", "/home/claude/.yolo-env/uv"),  # uv's ./.venv
+    ("CARGO_TARGET_DIR", "/home/claude/.yolo-env/cargo-target"),  # Rust target/
+    ("PYTHONPYCACHEPREFIX", "/home/claude/.yolo-env/pycache"),  # __pycache__ trees
+)
+
 
 def _image_tag(dockerfile_text: str, uid: int) -> str:
     """Content-addressed image tag for a Dockerfile + host UID.
@@ -1474,6 +1487,7 @@ YOLO_KEYS = {
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
     "submodules": ("submodules", "bool"),
+    "redirect_build_dirs": ("redirect_build_dirs", "bool"),
     "base": ("base", "str"),
     "finish_action": ("finish_action", "finish"),
     "finish_remote": ("finish_remote", "str"),
@@ -2848,6 +2862,18 @@ PARSER.add_argument(
     "config). No-op when the dir has no .gitmodules.",
 )
 PARSER.add_argument(
+    "--redirect-build-dirs",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    dest="redirect_build_dirs",
+    help="In a cwd session, redirect per-OS/build dirs (.venv via "
+    "UV_PROJECT_ENVIRONMENT, target/ via CARGO_TARGET_DIR, __pycache__ via "
+    "PYTHONPYCACHEPREFIX) to container-local paths off the bind mount, so the "
+    "container can't clobber the host's copies (default: on). Turn off with "
+    "--no-redirect-build-dirs (or `redirect-build-dirs: false` in config). "
+    "No effect in worktree sessions (an isolated copy).",
+)
+PARSER.add_argument(
     "--rebuild-image",
     action="store_true",
     default=False,
@@ -3122,7 +3148,16 @@ def build_claude_args(
                 "files here, including ones not committed to git, so avoid destructive in-place "
                 "changes to build artifacts like `.venv` or `node_modules` (e.g. to run tests, "
                 "make a throwaway venv rather than wiping the project's); leave such files as "
-                "you found them."
+                "you found them.",
+                "The working tree is the user's live, often-uncommitted data. Never "
+                "`git add -A`/`git add .`/`git commit -a`; stage explicit paths only, and "
+                "don't commit files you didn't author without asking.",
+                "Don't mutate live state to test: work on a copy (e.g. copy a DB to /tmp, or "
+                "use a test client against a copy) rather than firing mutating requests at a "
+                "running server or editing the live DB/corpus; keep schema migrations additive "
+                "and idempotent; never delete a file out from under a running process.",
+                "Run any server detached (e.g. `setsid … &`), never in the foreground (it "
+                "stomps the TTY); put temp files in /tmp or the scratchpad, not the project dir.",
             ]
             if cwd_mode
             else []
@@ -3674,6 +3709,20 @@ def launch_container(
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
     ]
+
+    # Redirect per-OS / build dirs off the bind mount (cwd sessions only, opt-out).
+    # In a cwd session the working dir is the user's live host checkout, so a
+    # macOS-built ./.venv (or Rust target/, __pycache__) on it is a landmine: the
+    # first container `uv run`/`cargo`/python rebuilds it for Linux, corrupting the
+    # host's copy and killing any host dev server that re-execs ./.venv/bin/python.
+    # An env var is the right lever because *every* in-container shell inherits the
+    # container's process env — claude, the launch wrapper, `yolo shell`, and
+    # crucially the agent's Bash tool subshells, which source a rotating shell
+    # snapshot rather than ~/.bashrc (so editing rc files wouldn't reach them).
+    # A worktree is an isolated copy, so it's skipped to keep those launches simple.
+    if worktree_name is None and parsed.redirect_build_dirs:
+        for var, path in _BUILD_DIR_REDIRECTS:
+            args += ["-e", f"{var}={path}"]
 
     # Extra reference mounts (--mount / `mounts` config): bind-mounted at their
     # identical host paths, like the cwd, so paths match host<->container.
