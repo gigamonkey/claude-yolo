@@ -1607,7 +1607,13 @@ Details that matter:
   container *name*, not row index, so a refresh can't silently move the
   highlight to a different session. Enter maps name → window via
   `_all_tmux_windows()` (all sessions, so it works from a personal tmux
-  session too; cross-session adds `switch-client`) and the picker keeps
+  session too; cross-session adds `switch-client`). Window names aren't unique —
+  a session that exits non-cleanly leaves its window open (the
+  `_tmux_window_command` failure hold), so re-launching the same topic later opens
+  a second same-named window — so `_all_tmux_windows` keys by name but, on a
+  collision, prefers the window whose pane runs the container
+  (`pane_current_command` == `docker`, the live session) over a stale shell;
+  without this Enter would land on the dead same-named window. The picker keeps
   running — selection IS `select-window`; the dashboard persists. Containers
   without a window (started outside tmux mode) render with a `*` and Enter
   no-ops. The loop takes an injectable `wait_key` and is tested with scripted

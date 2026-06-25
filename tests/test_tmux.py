@@ -52,7 +52,11 @@ class FakeTmux:
             return cp(0, out=wid + "\n")
         if verb == "list-windows":
             if "-a" in args:
-                lines = (f"{w[0]}\t{self._session(w)}\t{w[1]}\n" for w in self.windows)
+                # wid \t session \t name \t pane_current_command
+                lines = (
+                    f"{w[0]}\t{self._session(w)}\t{w[1]}\t{self._pane_cmd(w)}\n"
+                    for w in self.windows
+                )
             else:
                 lines = (f"{w[0]}\t{w[1]}\n" for w in self.windows)
             return cp(0, out="".join(lines))
@@ -63,7 +67,10 @@ class FakeTmux:
         return cp(0)  # select-window / switch-client
 
     def _session(self, window):
-        return window[2] if len(window) == 3 else self.session_name
+        return window[2] if len(window) >= 3 else self.session_name
+
+    def _pane_cmd(self, window):
+        return window[3] if len(window) >= 4 else ""
 
     def named(self, verb):
         return [c for c in self.calls if c[0] == verb]
@@ -217,6 +224,24 @@ def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):
     pinned = [c for c in tmux.named("set-window-option") if c[-2] == "automatic-rename"]
     assert ["set-window-option", "-t", "@10", "automatic-rename", "off"] in pinned
     assert all(c[-1] == "off" for c in tmux.named("set-window-option"))
+
+
+def test_all_tmux_windows_prefers_live_docker_on_duplicate_name(cy, tmux):
+    # Two windows share a name: a stale one (a dead shell, listed first) and the
+    # live container window (pane running `docker`). `_all_tmux_windows` must pick
+    # the live one, so the dashboard's Enter lands on the claude session, not the
+    # stale shell. (window tuple: id, name, session, pane_current_command)
+    tmux.windows = [
+        ("@1", "repo-topic", "yolo", "bash"),  # stale, oldest
+        ("@4", "repo-topic", "yolo", "docker"),  # the live session
+    ]
+    assert cy._all_tmux_windows()["repo-topic"] == ("@4", "yolo")
+    # order-independent: live window listed first still wins
+    tmux.windows.reverse()
+    assert cy._all_tmux_windows()["repo-topic"] == ("@4", "yolo")
+    # no docker window → fall back to first
+    tmux.windows = [("@1", "solo", "yolo", "bash"), ("@2", "solo", "yolo", "zsh")]
+    assert cy._all_tmux_windows()["solo"] == ("@1", "yolo")
 
 
 def test_tmux_session_name_flag(cy, run_cli, tmux, dirs):

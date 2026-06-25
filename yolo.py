@@ -4951,16 +4951,33 @@ def _all_tmux_windows() -> dict[str, tuple[str, str]]:
 
     The picker looks across sessions, not just its own, so it can switch to a
     yolo window wherever it lives — e.g. when `ps --watch` runs in a personal
-    tmux session separate from the shared yolo one. On a duplicate name the
-    first window wins, matching _find_tmux_window.
+    tmux session separate from the shared yolo one.
+
+    Window names aren't unique: a session that exits non-cleanly keeps its window
+    open (the `_tmux_window_command` failure hold), so re-launching the same topic
+    later opens a *second* window with the same name — one stale (a dead shell),
+    one live (the running container). So on a duplicate name, prefer the window
+    whose pane is actually running the container (`pane_current_command` == docker)
+    over a stale one; otherwise keep the first. Without this the dashboard's Enter
+    would land on the dead same-named window instead of the live claude session.
     """
-    res = _tmux("list-windows", "-a", "-F", "#{window_id}\t#{session_name}\t#{window_name}")
+    res = _tmux(
+        "list-windows",
+        "-a",
+        "-F",
+        "#{window_id}\t#{session_name}\t#{window_name}\t#{pane_current_command}",
+    )
     if res.returncode != 0:
         return {}
     out: dict[str, tuple[str, str]] = {}
+    live: set[str] = set()  # names whose chosen window is the live (docker) one
     for line in res.stdout.splitlines():
-        wid, session, name = line.split("\t", 2)
-        out.setdefault(name, (wid, session))
+        wid, session, name, cmd = line.split("\t", 3)
+        is_docker = cmd == "docker"
+        if name not in out or (is_docker and name not in live):
+            out[name] = (wid, session)
+            if is_docker:
+                live.add(name)
     return out
 
 

@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` Enter lands on the live session window, not a stale same-named one.**
+  tmux window names aren't unique — a session that exits non-cleanly leaves its
+  window open, so re-launching the same topic later makes a second window with the
+  same name. The dashboard resolved a session to its window by name and picked the
+  oldest match, so Enter could switch you to a dead shell window instead of the
+  running claude session. It now prefers the window whose pane is actually running
+  the container.
+
 - **In a cwd session, per-OS/build dirs are redirected off the bind mount.** A cwd
   session mounts the user's live host checkout in place, so a macOS-built `./.venv`
   (or Rust `target/`, `__pycache__`) on it is a landmine: the first container
