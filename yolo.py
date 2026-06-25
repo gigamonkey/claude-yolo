@@ -3317,7 +3317,7 @@ def _pin_tmux_window_name(target: str) -> None:
 
 
 def _tmux_window_command(run_cmd: list, *, env: dict | None = None) -> str:
-    """The shell command a tmux window runs: run_cmd, held open on failure.
+    """The shell command a tmux window runs: run_cmd, held open on a real failure.
 
     tmux windows close when their command exits (remain-on-exit is off by
     default) — right for a clean `claude` exit, but it would eat the error when
@@ -3326,12 +3326,20 @@ def _tmux_window_command(run_cmd: list, *, env: dict | None = None) -> str:
     `KEY=val` shell assignments to `run_cmd` only (the diff windows pass `LESS=R`,
     so git's pager doesn't auto-quit on a one-screen diff and `q` closes it — see
     `_diff_stat_loop`).
+
+    But an *intentional* stop is not a failure: `docker stop` (`yolo stop`, the
+    dashboard `s`, or `docker stop`) makes the attached `docker run` exit 143
+    (SIGTERM), and Ctrl-C exits 130 (SIGINT). Those must close the window too —
+    else every stopped session leaves a stale window behind, which a later resume
+    of the same topic then duplicates. So hold only for exit codes that aren't 0,
+    130, or 143.
     """
     cmd = shlex.join(str(a) for a in run_cmd)
     if env:
         cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " " + cmd
     return (
-        f"{cmd}; ec=$?; if [ $ec -ne 0 ]; then "
+        f"{cmd}; ec=$?; "
+        "if [ $ec -ne 0 ] && [ $ec -ne 130 ] && [ $ec -ne 143 ]; then "
         'printf "\\n[exited %d -- press Enter to close]\\n" "$ec"; read -r _; fi'
     )
 

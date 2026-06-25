@@ -1576,10 +1576,16 @@ Details that matter:
   title config is never touched.
 - The window command is `shlex.join(run_cmd)` (the argv contains `--settings`
   JSON and the OAuth token — quoting is load-bearing) wrapped by
-  `_tmux_window_command`: on **nonzero** exit it prints the code and waits for
-  Enter, because tmux's default remain-on-exit off would otherwise vaporize the
-  window before a fast `docker run` failure can be read. Clean exits still
-  close the window. The same wrapper guards the dashboard window (a bad
+  `_tmux_window_command`: on a **genuine-failure** exit it prints the code and
+  waits for Enter, because tmux's default remain-on-exit off would otherwise
+  vaporize the window before a fast `docker run` failure (name conflict, daemon
+  down) can be read. Clean exits (0) close the window — and so do the two
+  **intentional-stop** signals: `docker stop` (`yolo stop` / the dashboard `s`)
+  makes the attached `docker run` exit **143** (SIGTERM) and Ctrl-C **130**
+  (SIGINT), so the hold skips those (`[ $ec -ne 0 ] && -ne 130 && -ne 143`).
+  Without that, every stopped session would leave a stale, same-named window that
+  a later resume duplicates (which `_all_tmux_windows`' live-window preference then
+  has to disambiguate). The same wrapper guards the dashboard window (a bad
   self-invocation can't kill the just-created session).
 - **Everything interactive happens before tmux**: credential prompts
   (`ensure_oauth_token` consent/mint, `ensure_logged_in`) run in the invoking

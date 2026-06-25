@@ -916,6 +916,15 @@ def test_tmux_window_command_env_prefixes_assignments(cy):
     assert "LESS=" not in cy._tmux_window_command(["git", "diff"])  # no env → no prefix
 
 
+def test_tmux_window_command_closes_on_intentional_stop(cy):
+    # A real failure holds the window open, but an intentional stop must not —
+    # `docker stop` → exit 143 (SIGTERM), Ctrl-C → 130 (SIGINT). Otherwise every
+    # stopped session leaves a stale window that a later resume duplicates.
+    cmd = cy._tmux_window_command(["docker", "run", "x"])
+    assert "[ $ec -ne 0 ]" in cmd  # genuine launch failure (name conflict, …) holds
+    assert "-ne 130" in cmd and "-ne 143" in cmd  # SIGINT / SIGTERM close the window
+
+
 def test_action_yolo_error_lands_in_footer(cy, monkeypatch):
     def boom(*a, **k):
         raise cy.YoloError("nope")
