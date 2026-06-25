@@ -858,11 +858,18 @@ win. Up to three layers, merged low→high, **all host-side only**:
    as the most specific persisted layer (beats the project entry, still under the
    CLI). It's **auto-managed**, unlike `projects.json`: `yolo start TOPIC [config
    flags]` snapshots the explicitly-passed flags into it (via
-   `_explicit_config_flags`, so a resume relaunches with the same config without
+   `_overlay_flags` = `_explicit_config_flags` minus `_OVERLAY_SKIP_KEYS`, so a
+   resume relaunches with the same config without
    retyping; an empty `{}` is still written, symmetric with the worktree
    lifecycle), `yolo config TOPIC` edits it, and `yolo finish TOPIC` removes the
-   entry. **`yolo resume TOPIC [config flags]` also updates the overlay** —
-   because resume restarts the container, flags passed to it both apply now and
+   entry. **`tmux`/`tmux-session` are *not* auto-snapshotted** (`_OVERLAY_SKIP_KEYS`):
+   the `wip` dashboard launches a worktree with `--no-tmux` as a *mechanic* (it execs
+   docker into the window it already made), and persisting that as `tmux:false`
+   would then suppress tmux for a later `yolo shell <topic>`/`resume <topic>`. An
+   explicit `yolo config TOPIC --no-tmux` still pins it (the `config` path doesn't
+   go through `_overlay_flags`). **`yolo resume TOPIC [config flags]` also updates
+   the overlay** — because resume restarts the container, flags passed to it both
+   apply now and
    persist (`_merge_worktree_overlay`, same concat/override rule as the loader:
    `mounts`/`ports`/`prompts` accumulate onto the stored list with exact-dup
    specs dropped, scalars override; the merged result equals what the run already

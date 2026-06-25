@@ -76,6 +76,31 @@ def test_start_writes_empty_overlay_when_no_flags(cy, run_cli, repo):
     assert overlay_for(cy, home, r, "bare") == {}
 
 
+def test_start_does_not_auto_persist_tmux_to_overlay(cy, run_cli, repo):
+    # The wip dashboard launches a worktree with --no-tmux as a *mechanic*; that
+    # must not be pinned as tmux:false in the overlay (which would then suppress
+    # tmux for a later `yolo shell <topic>`/`resume <topic>`). Other flags persist.
+    r, home = repo
+    run_cli(["start", "topic", "--no-tmux", "--ssh-agent"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "topic") == {"ssh-agent": True}  # no `tmux` key
+
+
+def test_resume_does_not_auto_persist_tmux_to_overlay(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    run_cli(["resume", "topic", "--no-tmux"], home=home, cwd=r)
+    assert "tmux" not in overlay_for(cy, home, r, "topic")
+
+
+def test_config_topic_still_persists_tmux_explicitly(cy, run_cli, repo):
+    # The auto-snapshot drops tmux, but a deliberate `yolo config TOPIC --no-tmux`
+    # (the config path, not start/resume) still pins it.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    run_cli(["config", "topic", "--no-tmux"], home=home, cwd=r)
+    assert overlay_for(cy, home, r, "topic") == {"tmux": False}
+
+
 # --- resume/shell consume ---------------------------------------------------
 
 

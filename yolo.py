@@ -1973,6 +1973,25 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     return out
 
 
+# Keys NOT auto-snapshotted into a worktree overlay by start/resume: `tmux` is a
+# presentation/invocation preference, and the `wip` dashboard launches a worktree
+# with `--no-tmux` as a *mechanic* (it execs docker into the window it already
+# made). Persisting that would pin `tmux:false` in the overlay and then suppress
+# tmux for a later `yolo shell <topic>` / `resume <topic>`. An explicit `yolo config
+# <topic> --no-tmux` still pins it — that path doesn't go through `_overlay_flags`.
+_OVERLAY_SKIP_KEYS = ("tmux", "tmux-session")
+
+
+def _overlay_flags(script_argv: list[str]) -> dict:
+    """Explicit config flags to auto-persist into a worktree overlay (start/resume).
+
+    `_explicit_config_flags` minus `_OVERLAY_SKIP_KEYS` (see that constant).
+    """
+    return {
+        k: v for k, v in _explicit_config_flags(script_argv).items() if k not in _OVERLAY_SKIP_KEYS
+    }
+
+
 def _spec_path(spec: str) -> pathlib.Path:
     """The (expanded, resolved) directory a PATH[:ro|:rw] mount spec names.
 
@@ -6783,8 +6802,10 @@ def _main():
             # Snapshot the explicit CLI config flags into the worktree overlay so a
             # later `yolo resume {topic}` relaunches with the same config (and `yolo
             # config {topic}` can edit it). Always written, even {} — symmetric with
-            # the worktree lifecycle (created here, removed by `finish`).
-            wt_overlay = _explicit_config_flags(script_argv)
+            # the worktree lifecycle (created here, removed by `finish`). `tmux` is
+            # excluded (see _overlay_flags): the dashboard's --no-tmux mechanic must
+            # not pin tmux:false here.
+            wt_overlay = _overlay_flags(script_argv)
             _parse_yolo_dict(wt_overlay, f"worktrees.json [{topic}]")  # never persist unloadable
             wt_file = _worktrees_file(home)
             worktrees = _read_worktrees_file(wt_file)
@@ -6799,7 +6820,7 @@ def _main():
             # time. `shell` is excluded: shelling into a *running* container can't
             # change its mounts, so persisting there would mislead.
             if verb == "resume":
-                _merge_worktree_overlay(home, cwd, _explicit_config_flags(script_argv))
+                _merge_worktree_overlay(home, cwd, _overlay_flags(script_argv))
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
         # Name the Claude session `<repo>:<topic>` — distinguishing it both from a

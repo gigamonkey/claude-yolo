@@ -5,6 +5,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`tmux: true` is no longer silently disabled for worktree sessions.** The `wip`
+  dashboard launches a worktree with `--no-tmux` (a mechanic — it runs docker in
+  the window it already made), but `start`/`resume` were persisting that into the
+  worktree's overlay as `tmux: false`. So after launching a worktree from the
+  dashboard, a later `yolo shell <topic>` / `resume <topic>` would skip tmux even
+  with `tmux: true` set globally. `tmux`/`tmux-session` are now excluded from the
+  auto-snapshotted overlay (an explicit `yolo config <topic> --no-tmux` still pins
+  them). Already-polluted overlays: clear with `yolo config <topic> --unset tmux`.
+
 - **Stopping a tmux session no longer leaves a stale window behind** (which
   `yolo wip` Enter could then land on instead of the live session). A stopped
   session — `yolo stop`, the dashboard `s`, or `docker stop` — makes the attached
