@@ -648,6 +648,34 @@ def test_stop_cancelled_does_nothing(cy, monkeypatch):
     assert "cancelled" in frames[-1][1]
 
 
+def test_S_opens_shell_in_session(cy, monkeypatch):
+    # `S` on a session row docker-exec's a bash shell into its container, in a new
+    # `<name>-shell` tmux window.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_window", lambda cwd, cmd, name, sess, **k: spawned.append((cmd, name))
+    )
+    sections = {
+        "session": [session_item(cy, payload={"cid": "cid9", "name": "repo-topic"})],
+        "worktree": [],
+        "project": [],
+    }
+    frames = run_loop(cy, monkeypatch, sections, ["S", "q"])
+    ((cmd, name),) = spawned
+    assert cmd == ["docker", "exec", "-it", "cid9", "/bin/bash"]
+    assert name == "repo-topic-shell"
+    assert "opening a shell in repo-topic" in frames[-1][1]
+
+
+def test_S_on_worktree_is_noop(cy, monkeypatch):
+    # `S` (shell) is a session-only action — a worktree row does nothing.
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    run_loop(cy, monkeypatch, sections, ["S", "q"])
+    assert spawned == []
+
+
 def test_finish_worktree_confirms_then_calls_core(cy, monkeypatch):
     calls = []
     monkeypatch.setattr(

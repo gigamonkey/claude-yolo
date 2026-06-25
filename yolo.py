@@ -5429,6 +5429,7 @@ def _wip_items(home: pathlib.Path) -> dict:
             "name": s.name,
             "topic": s.topic,
             "state": s.state,
+            "cwd": cwdp,  # the session's working dir (an `S`-shell window's -c)
             "window": win[0] if win else None,
             "worktree": cwdp if is_wt else None,
             "slug": cwdp.parent.name if is_wt and cwdp else None,
@@ -5581,7 +5582,7 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 
 _WIP_HINTS = {
-    "session": "Enter switch · b browse · s stop · d diff · f/r finish/rebase (idle)",
+    "session": "Enter switch · S shell · b browse · s stop · d diff · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · R resume-pick · d diff · c config · f finish · r rebase (idle)",
     "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
@@ -5734,6 +5735,8 @@ def _wip_action(key, item, home, session, term) -> str:
             if not term.confirm(prompt):
                 return "cancelled."
             return stop_session(p["cid"], f"for '{label}'", home, force=working)
+        if key == "S" and kind == "session":
+            return _wip_shell(p, session)
         if key == "f":
             return _wip_finish(kind, p, home, term)
         if key == "r":
@@ -5855,6 +5858,23 @@ def _wip_resume_pick(kind, p, session) -> str:
     )
     _spawn_session_window(cwd, argv_tail, window_name, session)
     return f"opening the session picker for {label}…"
+
+
+def _wip_shell(p, session) -> str:
+    """`S`: open a bash shell in the session's running container, in a new tmux
+    window — `docker exec -it <cid> /bin/bash`, exactly like `yolo shell` into a
+    running container (the image's .bashrc still sources the secrets loader/yolorc).
+    The `-shell` window name renders as `<session> · shell: <name>` in the title.
+    """
+    if not p.get("cid"):
+        return "no running container for this session."
+    _spawn_window(
+        p.get("cwd") or pathlib.Path.home(),  # the window's -c dir; the exec runs in the container
+        ["docker", "exec", "-it", p["cid"], "/bin/bash"],
+        f"{p['name']}-shell",
+        session,
+    )
+    return f"opening a shell in {p['name']}…"
 
 
 def _wip_browse(p, term) -> str:

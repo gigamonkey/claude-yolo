@@ -433,6 +433,7 @@ the selected row:
 | `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
+| `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |

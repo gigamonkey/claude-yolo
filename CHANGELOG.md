@@ -5,6 +5,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` gains `S` — open a shell in the selected session.** On a session
+  row, `S` opens a bash shell in that container (`docker exec`) in a new tmux
+  window, like `yolo shell` into a running container. (`s` is still stop.)
+
 - **`tmux: true` is no longer silently disabled for worktree sessions.** The `wip`
   dashboard launches a worktree with `--no-tmux` (a mechanic — it runs docker in
   the window it already made), but `start`/`resume` were persisting that into the

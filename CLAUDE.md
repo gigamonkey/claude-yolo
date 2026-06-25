@@ -1301,7 +1301,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   `_wip_spawn_target`'s repo/name (same as Enter). `n` on a project prompts for a
   topic and starts a **new worktree** session
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
-  <topic>`, surfacing in the new window like Enter's launch errors), `b` browses a
+  <topic>`, surfacing in the new window like Enter's launch errors), `S` on a
+  session row opens a bash shell in its container (`_wip_shell`: `docker exec -it
+  <cid> /bin/bash` in a new `<name>-shell` window, like `yolo shell`), `b` browses a
   forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `d` on a worktree row (or any worktree-backed
   session row, even a `working` one — diff is read-only) spawns `yolo diff
@@ -1947,7 +1949,8 @@ active-project-or-worktree, `N` new-session on a worktree/project spawning
 no-op), `R` resume-pick spawning `resume TOPIC -r`/`resume -r`, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
-there (cancel on empty, reject a non-dir), `b` browse incl. the
+there (cancel on empty, reject a non-dir), `S` shell on a session row spawning the
+`docker exec` window (a worktree-row no-op), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), `d` on a worktree *and* a worktree-backed session row
