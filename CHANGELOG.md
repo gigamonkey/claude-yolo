@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.23.0 — 2026-06-25
 
 - **`yolo wip` gains `S` — open a shell in the selected session.** On a session
   row, `S` opens a bash shell in that container (`docker exec`) in a new tmux
