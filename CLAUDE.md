@@ -62,6 +62,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py --secret DB_PW:PGPASSWORD # ...as env var $PGPASSWORD (renamed)
 ./yolo.py --secret KEY:~/.ssh/id_ed25519  # ...mounted as a file at that path
 ./yolo.py --plugin-dir ~/.claude-yolo/skills-plugin  # load a local plugin (its skills) into every yolo session
+./yolo.py --clone https://github.com/me/lib ../lib   # git clone a repo into ../lib (a sibling) at session start
 ./yolo.py -- --network host        # extra docker run args
 ./yolo.py                          # == `yolo start`: fresh session in the cwd
 ./yolo.py resume                   # continue most recent session in this dir
@@ -366,6 +367,25 @@ on top of whichever auth is chosen:
   the same host-side-key model as `--secret`/`--yolorc`. **Keep the plugin dir
   outside `~/.claude`** so the host can't discover it; a `.claude-plugin/plugin.json`
   + `skills/<name>/SKILL.md` layout is the plugin shape claude expects.
+- **`--clone URL DIR`** (repeatable; `clones` in config) → **`git clone URL` into
+  `DIR` inside the container at session start.** A **list/concat dest** in
+  `_CONCAT_DESTS`, accumulating across the layers and the CLI. The CLI takes two
+  args (`nargs=2`, the `_CloneAction`); both the CLI and the config form normalize
+  to `{url, dir}` **dicts**, so the config file stores a list of objects
+  (`"clones": [{"url": …, "dir": …}]`) — `yolo config --clone URL DIR` persists that
+  object form. `DIR` is the **container** destination, resolved by `_resolve_clones`
+  against the session's working dir: absolute as-is, `~` → the container home
+  `/home/claude`, else relative to `cwd` (so `../foo` is a sibling). **Only `cwd`
+  itself is bind-mounted**, so a sibling/absolute dest lives in the container's
+  *ephemeral* fs (re-cloned each session — fine for a clone); a *subdir* of `cwd`
+  would land on the host bind-mount (persists, clutters the repo). The clones run in
+  the **claude launch wrapper** (after secrets/yolorc, before `exec claude`) via the
+  baked **`/etc/yolo/clone.sh <url> <dir>`** (`Dockerfile.default`), which skips an
+  existing dest, `sudo mkdir`s/`chown`s a root-owned parent (a sibling's parent is
+  docker-created as root), and treats a clone failure as non-fatal. Public HTTPS
+  URLs need no auth; under `--ssh-agent` the HTTPS→SSH rewrite routes via the agent.
+  Resolved only on launch paths (no add/remove-element edits yet — whole-key
+  `--clone`/`--unset clones` only). Same host-side-key opt-in model as `--secret`.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -915,6 +935,7 @@ bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
 `[HOST:]CONTAINER`), `secrets` (string or list, `NAME[:TARGET][!]`),
 `plugin-dirs` (string or list of plugin dir/`.zip` paths),
+`clones` (a `{url, dir}` object or list of them),
 `require-project-entry`, `tmux`, `tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
@@ -1986,6 +2007,12 @@ arg, that it's *not* also an `--add-dir`, the missing-path exit that doesn't bre
 terminal verbs, layer concatenation), and the `config` verb (persist, validate,
 `--add`/`--remove-plugin-dir` incl. idempotent add and stale remove, the
 replace-conflict guard, and the verb gating).
+`test_clones.py` covers the `--clone`/`clones` axis: `_resolve_clones`
+(relative→sibling, absolute, `~`→container home, dedup-by-dest), the config-file
+`{url, dir}` object/list parse + bad-shape rejection, launch assembly (the
+`bash /etc/yolo/clone.sh <url> <resolved-dir>` in the launch wrapper + the bash
+entrypoint, none by default, layer concatenation), and the `config` verb (persisting
+the **object** form, the repeatable whole-list set, `--unset clones`).
 `test_status.py` covers the session-activity feature: the injected
 `Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
 status path) plus the `AskUserQuestion`-matched `Pre`/`PostToolUse` waiting/working

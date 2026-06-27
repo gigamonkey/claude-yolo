@@ -1496,6 +1496,7 @@ YOLO_KEYS = {
     "ports": ("ports", "list"),
     "secrets": ("secrets", "list"),
     "plugin_dirs": ("plugin_dirs", "list"),
+    "clones": ("clones", "clones"),
     "require_project_entry": ("require_project_entry", "bool"),
     "tmux": ("tmux", "bool"),
     "tmux_session": ("tmux_session", "str"),
@@ -1503,7 +1504,7 @@ YOLO_KEYS = {
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets", "plugin_dirs")
+_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets", "plugin_dirs", "clones")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -1546,6 +1547,18 @@ def _parse_yolo_dict(raw: dict, source: str) -> dict:
             if not isinstance(val, str):
                 sys.exit(f"{source}: {key!r} must be a string")
             out[dest] = os.path.expanduser(val) if kind == "path" else val
+        elif kind == "clones":  # a {url, dir} object or list of them
+            if isinstance(val, dict):
+                val = [val]
+            ok = isinstance(val, list) and all(
+                isinstance(x, dict)
+                and isinstance(x.get("url"), str)
+                and isinstance(x.get("dir"), str)
+                for x in val
+            )
+            if not ok:
+                sys.exit(f"{source}: {key!r} must be a {{url, dir}} object or a list of them")
+            out[dest] = [{"url": x["url"], "dir": x["dir"]} for x in val]  # normalize, drop extras
         else:  # "list" (prompts, mounts): a string or list of strings
             if isinstance(val, str):
                 val = [val]
@@ -1893,6 +1906,27 @@ def _resolve_plugin_dirs(specs: list[str]) -> list[pathlib.Path]:
     return list(out)
 
 
+def _resolve_clones(specs: list, cwd: pathlib.Path) -> list[tuple[str, str]]:
+    """Parse + dedupe the merged clone specs into (url, abs_container_dir) pairs.
+
+    Each spec is a `{url, dir}` dict (config + the CLI action share that shape).
+    `dir` is the **container** destination: absolute as-is, `~` → the container
+    home `/home/claude`, else relative to the session's working dir `cwd` (so
+    `../foo` is a sibling of it). Only `cwd` itself is bind-mounted at its identical
+    path, so a sibling/other path lives in the container's ephemeral fs. Resolved
+    with normpath (not .resolve()) so host symlinks don't change the container path;
+    deduped by resolved dest, later (higher layer) wins. Order preserved.
+    """
+    out: dict[str, str] = {}
+    for s in specs:
+        d = s["dir"]
+        if d.startswith("~"):
+            d = "/home/claude" + d[1:]  # the container home, NOT the host $HOME
+        dest = os.path.normpath(os.path.join(str(cwd), d))  # join leaves an absolute d as-is
+        out[dest] = s["url"]
+    return [(url, dest) for dest, url in out.items()]
+
+
 def _parse_port_spec(spec: str) -> tuple[int | None, int]:
     """One --port / `ports` value, `[HOST:]CONTAINER` -> (host or None, container).
 
@@ -1955,7 +1989,9 @@ def _explicit_config_flags(script_argv: list[str]) -> dict:
     fresh marker list (argparse's append action copies the default before
     appending, so identity survives exactly when the flag never appeared).
     """
-    markers = {dest: [] if kind == "list" else _UNSET for dest, kind in YOLO_KEYS.values()}
+    markers = {
+        dest: [] if kind in ("list", "clones") else _UNSET for dest, kind in YOLO_KEYS.values()
+    }
     saved = {dest: PARSER.get_default(dest) for dest in markers}
     PARSER.set_defaults(**markers)
     try:
@@ -2528,6 +2564,21 @@ def _version() -> str:
     return base + _git_suffix(base)
 
 
+class _CloneAction(argparse.Action):
+    """`--clone URL DIR` (nargs=2) appended as a `{url, dir}` dict, so the CLI and
+    the `{url, dir}` config-file form share one internal shape (a list of dicts),
+    and `yolo config --clone …` persists the object form the config file uses.
+
+    Copies the list before appending (a fresh list, like the built-in `append`
+    action) so `_explicit_config_flags`' identity check still detects the flag.
+    """
+
+    def __call__(self, parser, ns, values, option_string=None):
+        items = list(getattr(ns, self.dest) or [])
+        items.append({"url": values[0], "dir": values[1]})
+        setattr(ns, self.dest, items)
+
+
 PARSER = argparse.ArgumentParser(
     description="Run Claude Code in a Docker container.",
     epilog=(
@@ -2983,6 +3034,20 @@ PARSER.add_argument(
     "read-only at its identical host path. Repeatable; also settable as "
     "`plugin-dirs` in config, where the lists concatenate across the layers and "
     "the CLI. Keep the plugin dir outside ~/.claude so the host can't discover it.",
+)
+PARSER.add_argument(
+    "--clone",
+    dest="clones",
+    action=_CloneAction,
+    nargs=2,
+    default=[],
+    metavar=("URL", "DIR"),
+    help="Clone a git repo into the container at session start: `--clone <url> "
+    "<dir>`. DIR is absolute or relative to the working dir (so `../foo` is a "
+    "sibling; note only the working dir itself is bind-mounted, so a sibling lives "
+    "in the container's ephemeral fs and is re-cloned each session). Repeatable; "
+    "also settable as `clones` in config (a list of {url, dir} objects), where the "
+    "lists concatenate across the layers and the CLI. Public HTTPS URLs need no auth.",
 )
 PARSER.add_argument(
     "--project",
@@ -3964,13 +4029,22 @@ def launch_container(
     # env; the loader runs *before* the rc so an rc can use the exported values; a
     # nonzero rc warns but doesn't block. The claude args are passed positionally to
     # "$@" so the --settings JSON needs no re-quoting.
-    if (yolorc_host or have_env_secrets) and entrypoint is None:
+    # `clones` config: `git clone <url> <dir>` at session start, after secrets/rc
+    # (so the clone can use anything they set up) and before claude, via the baked
+    # /etc/yolo/clone.sh. The dir is resolved to a container path against `cwd`.
+    clones = _resolve_clones(parsed.clones, cwd)
+    clone_cmds = "".join(
+        f"bash /etc/yolo/clone.sh {shlex.quote(url)} {shlex.quote(dest)}; " for url, dest in clones
+    )
+    if (yolorc_host or have_env_secrets or clones) and entrypoint is None:
         entrypoint = "/bin/bash"
         command = [
             "-c",
             "[ -f /etc/yolo/load-secrets.sh ] && . /etc/yolo/load-secrets.sh; "
             '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '
-            'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; exec "$@"',
+            'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; '
+            f"{clone_cmds}"
+            'exec "$@"',
             "yolo-rc",
             "claude",
             "--dangerously-skip-permissions",

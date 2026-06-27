@@ -881,6 +881,37 @@ global / project / worktree layers and the CLI (exact-path duplicates collapse).
 Unlike `mounts`, a plugin dir is **not** also added as a `--add-dir` working
 directory — it's a plugin, not a source tree.
 
+### `clones` (`--clone URL DIR`, repeatable)
+
+Clone a git repo into the container when the session starts — handy for giving
+Claude a reference or dependency repo alongside your project without copying it
+into your working tree. On the CLI it takes two arguments; in config it's a list of
+`{url, dir}` objects:
+
+```bash
+yolo --clone https://github.com/me/lib ../lib              # one session
+yolo config --clone https://github.com/me/lib ../lib       # persist for this project
+```
+
+```json
+{ "clones": [ { "url": "https://github.com/me/lib", "dir": "../lib" } ] }
+```
+
+**`DIR` is a path inside the container**, resolved against the working directory:
+absolute as-is, `~` is the container home (`/home/claude`), otherwise relative — so
+`../lib` is a **sibling** of the working dir. One thing to know: only the working
+directory itself is bind-mounted, so a sibling (or any path outside it) lives in the
+container's **ephemeral** filesystem and is re-cloned each session — which is usually
+what you want for a throwaway reference clone, and keeps it out of your actual repo.
+(A path *inside* the working dir, like `vendor/lib`, would land on the bind-mount and
+persist on the host.)
+
+The clone runs at session start (after secrets and your `yolorc`, before Claude),
+skips if the destination already exists, and a failure just warns rather than
+blocking the session. Public HTTPS URLs need no auth; with `--ssh-agent` on, GitHub
+HTTPS URLs route over your forwarded agent. In config the list concatenates across
+the layers and the CLI.
+
 ### `dockerfile` (`--dockerfile PATH`)
 
 Build the container image from your own Dockerfile instead of the built-in

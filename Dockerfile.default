@@ -29,6 +29,14 @@ RUN mkdir -p /home/claude/.ssh && chown claude:claude /home/claude/.ssh && chmod
 # quotes keep the build shell from expanding $f / $(...).
 RUN mkdir -p /etc/yolo && printf '%s\n'   '[ -d /run/secrets ] || return 0'   'for f in /run/secrets/*; do'   '  case "$f" in *.ephemeral) continue ;; esac'   '  [ -f "$f" ] || continue'   '  export "$(basename "$f")=$(cat "$f")"'   '  if [ -f "$f.ephemeral" ]; then rm -f "$f" "$f.ephemeral"; fi'   'done'   > /etc/yolo/load-secrets.sh
 
+# `bash /etc/yolo/clone.sh <url> <dir>`: clone <url> into <dir> at session start
+# (driven by the `clones` config key, invoked from the launch wrapper). Skips if
+# <dir> exists; creates+owns the parent with sudo when it's root-owned (a sibling of
+# the bind-mounted working dir, whose parent docker created as root); a clone
+# failure warns but doesn't block the session. Single-quoted so the build shell
+# doesn't expand $1/$(...). The claude user has NOPASSWD sudo.
+RUN mkdir -p /etc/yolo && printf '%s\n'   'url="$1"; dir="$2"'   '[ -e "$dir" ] && { echo "yolo: $dir already exists, skipping clone of $url" >&2; exit 0; }'   'parent="$(dirname "$dir")"'   '[ -d "$parent" ] || sudo mkdir -p "$parent"'   '[ -w "$parent" ] || sudo chown "$(id -u):$(id -g)" "$parent"'   'git clone "$url" "$dir" || echo "yolo: clone failed: $url -> $dir" >&2'   > /etc/yolo/clone.sh
+
 USER claude
 # Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
 # install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken

@@ -5,6 +5,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`--clone URL DIR` clones a git repo into the container at session start.** A new
+  `clones` config key for giving Claude a reference/dependency repo alongside your
+  project. The CLI takes two args; config stores `{url, dir}` objects (`yolo config
+  --clone URL DIR` persists that form). `DIR` is a container path resolved against
+  the working dir — absolute, `~` (the container home), or relative, so `../foo` is
+  a sibling. Only the working dir is bind-mounted, so a sibling lives in the
+  container's ephemeral fs and is re-cloned each session (good for a throwaway
+  reference clone). The clone runs after secrets/yolorc and before Claude; it skips
+  an existing dest and treats a failure as non-fatal. Public HTTPS URLs need no
+  auth. Repeatable; concatenates across config layers + the CLI.
+
 - **The forwarded-ports prompt asks Claude to keep the server running.** When ports
   are forwarded, the system-prompt line now tells Claude to keep the server up in
   the steady state (restarting it for testing is fine) so the user can `yolo
