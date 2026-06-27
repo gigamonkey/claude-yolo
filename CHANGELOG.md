@@ -14,7 +14,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   container's ephemeral fs and is re-cloned each session (good for a throwaway
   reference clone). The clone runs after secrets/yolorc and before Claude; it skips
   an existing dest and treats a failure as non-fatal. Public HTTPS URLs need no
-  auth. Repeatable; concatenates across config layers + the CLI.
+  auth. Repeatable; concatenates across config layers + the CLI. A clone may carry
+  an optional config-file-only `depth` (positive int) → a shallow `git clone
+  --depth`.
 
 - **The forwarded-ports prompt asks Claude to keep the server running.** When ports
   are forwarded, the system-prompt line now tells Claude to keep the server up in

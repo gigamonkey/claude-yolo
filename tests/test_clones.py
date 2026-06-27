@@ -43,11 +43,23 @@ def test_resolve_clones_relative_absolute_home_and_dedup(cy, tmp_path):
         {"url": "first", "dir": "../dup"},
         {"url": "wins", "dir": "../dup"},  # same dest -> later (higher layer) wins
     ]
-    got = dict((dest, url) for url, dest in cy._resolve_clones(specs, cwd))
+    got = {dest: url for url, dest, _ in cy._resolve_clones(specs, cwd)}
     assert got[str(tmp_path / "a" / "foo")] == "u1"
     assert got["/work/x"] == "u2"
     assert got["/home/claude/lib"] == "u3"
     assert got[str(tmp_path / "a" / "dup")] == "wins"
+
+
+def test_resolve_clones_carries_depth(cy, tmp_path):
+    out = cy._resolve_clones(
+        [
+            {"url": "u1", "dir": "/a", "depth": 1},
+            {"url": "u2", "dir": "/b"},  # CLI form / no depth
+        ],
+        tmp_path,
+    )
+    assert ("u1", "/a", 1) in out
+    assert ("u2", "/b", None) in out
 
 
 # --- config-file parsing ----------------------------------------------------
@@ -67,6 +79,16 @@ def test_parse_clones_rejects_bad_shape(cy, tmp_path):
         cy._parse_yolo_dict({"clones": [{"url": "u"}]}, "test")  # missing dir
     with pytest.raises(SystemExit, match="url, dir"):
         cy._parse_yolo_dict({"clones": ["u dir"]}, "test")  # strings, not objects
+
+
+def test_parse_clones_depth(cy):
+    # depth is optional; a positive int is kept, anything else is rejected
+    assert cy._parse_yolo_dict({"clones": [{"url": "u", "dir": "d", "depth": 1}]}, "t") == {
+        "clones": [{"url": "u", "dir": "d", "depth": 1}]
+    }
+    for bad in (0, -1, "1", 1.5, True):
+        with pytest.raises(SystemExit, match="depth"):
+            cy._parse_yolo_dict({"clones": [{"url": "u", "dir": "d", "depth": bad}]}, "t")
 
 
 # --- launch assembly --------------------------------------------------------

@@ -912,6 +912,15 @@ blocking the session. Public HTTPS URLs need no auth; with `--ssh-agent` on, Git
 HTTPS URLs route over your forwarded agent. In config the list concatenates across
 the layers and the CLI.
 
+A clone may also carry an optional **`depth`** (a positive integer), which becomes
+`git clone --depth` — a shallow clone, handy for a large reference repo where you
+don't need the history. It's **config-file only** (there's no CLI flag), set per
+clone:
+
+```json
+{ "clones": [ { "url": "https://github.com/me/lib", "dir": "../lib", "depth": 1 } ] }
+```
+
 ### `dockerfile` (`--dockerfile PATH`)
 
 Build the container image from your own Dockerfile instead of the built-in

@@ -380,12 +380,16 @@ on top of whichever auth is chosen:
   *ephemeral* fs (re-cloned each session — fine for a clone); a *subdir* of `cwd`
   would land on the host bind-mount (persists, clutters the repo). The clones run in
   the **claude launch wrapper** (after secrets/yolorc, before `exec claude`) via the
-  baked **`/etc/yolo/clone.sh <url> <dir>`** (`Dockerfile.default`), which skips an
-  existing dest, `sudo mkdir`s/`chown`s a root-owned parent (a sibling's parent is
-  docker-created as root), and treats a clone failure as non-fatal. Public HTTPS
-  URLs need no auth; under `--ssh-agent` the HTTPS→SSH rewrite routes via the agent.
-  Resolved only on launch paths (no add/remove-element edits yet — whole-key
-  `--clone`/`--unset clones` only). Same host-side-key opt-in model as `--secret`.
+  baked **`/etc/yolo/clone.sh <url> <dir> [<depth>]`** (`Dockerfile.default`), which
+  skips an existing dest, `sudo mkdir`s/`chown`s a root-owned parent (a sibling's
+  parent is docker-created as root), and treats a clone failure as non-fatal. Public
+  HTTPS URLs need no auth; under `--ssh-agent` the HTTPS→SSH rewrite routes via the
+  agent. An optional per-clone **`depth`** (a positive int) is **config-file only**
+  (no CLI flag) — `"clones": [{"url": …, "dir": …, "depth": 1}]` — and becomes
+  `git clone --depth <depth>` (a shallow clone), passed by `_resolve_clones` as the
+  optional 3rd arg to `clone.sh`; omitted → a full clone. Resolved only on launch
+  paths (no add/remove-element edits yet — whole-key `--clone`/`--unset clones`
+  only). Same host-side-key opt-in model as `--secret`.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -935,7 +939,7 @@ bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `mounts` (string or list, `PATH[:ro|:rw]`), `ports` (string or list,
 `[HOST:]CONTAINER`), `secrets` (string or list, `NAME[:TARGET][!]`),
 `plugin-dirs` (string or list of plugin dir/`.zip` paths),
-`clones` (a `{url, dir}` object or list of them),
+`clones` (a `{url, dir[, depth]}` object or list of them),
 `require-project-entry`, `tmux`, `tmux-session`.
 Per-invocation **actions** — `--resume` and the verbs (with their `TOPIC`) — are
 deliberately **not** config keys, and neither is `--dangerously-allow-home`
@@ -2008,8 +2012,9 @@ terminal verbs, layer concatenation), and the `config` verb (persist, validate,
 `--add`/`--remove-plugin-dir` incl. idempotent add and stale remove, the
 replace-conflict guard, and the verb gating).
 `test_clones.py` covers the `--clone`/`clones` axis: `_resolve_clones`
-(relative→sibling, absolute, `~`→container home, dedup-by-dest), the config-file
-`{url, dir}` object/list parse + bad-shape rejection, launch assembly (the
+(relative→sibling, absolute, `~`→container home, dedup-by-dest, the carried-through
+`depth`), the config-file `{url, dir[, depth]}` object/list parse + bad-shape
+rejection (incl. the config-only positive-int `depth` validation), launch assembly (the
 `bash /etc/yolo/clone.sh <url> <resolved-dir>` in the launch wrapper + the bash
 entrypoint, none by default, layer concatenation), and the `config` verb (persisting
 the **object** form, the repeatable whole-list set, `--unset clones`).

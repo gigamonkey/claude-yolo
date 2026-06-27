@@ -1547,18 +1547,33 @@ def _parse_yolo_dict(raw: dict, source: str) -> dict:
             if not isinstance(val, str):
                 sys.exit(f"{source}: {key!r} must be a string")
             out[dest] = os.path.expanduser(val) if kind == "path" else val
-        elif kind == "clones":  # a {url, dir} object or list of them
+        elif kind == "clones":  # a {url, dir[, depth]} object or list of them
             if isinstance(val, dict):
                 val = [val]
+
+            def _ok_depth(d):
+                # optional; a positive int (and not a bool, which is an int subclass)
+                return d is None or (isinstance(d, int) and not isinstance(d, bool) and d > 0)
+
             ok = isinstance(val, list) and all(
                 isinstance(x, dict)
                 and isinstance(x.get("url"), str)
                 and isinstance(x.get("dir"), str)
+                and _ok_depth(x.get("depth"))
                 for x in val
             )
             if not ok:
-                sys.exit(f"{source}: {key!r} must be a {{url, dir}} object or a list of them")
-            out[dest] = [{"url": x["url"], "dir": x["dir"]} for x in val]  # normalize, drop extras
+                sys.exit(
+                    f"{source}: {key!r} must be a {{url, dir[, depth>0]}} object or a list of them"
+                )
+            out[dest] = [
+                {
+                    "url": x["url"],
+                    "dir": x["dir"],
+                    **({"depth": x["depth"]} if "depth" in x else {}),
+                }
+                for x in val
+            ]  # normalize, drop extras, keep depth only when set
         else:  # "list" (prompts, mounts): a string or list of strings
             if isinstance(val, str):
                 val = [val]
@@ -1906,25 +1921,26 @@ def _resolve_plugin_dirs(specs: list[str]) -> list[pathlib.Path]:
     return list(out)
 
 
-def _resolve_clones(specs: list, cwd: pathlib.Path) -> list[tuple[str, str]]:
-    """Parse + dedupe the merged clone specs into (url, abs_container_dir) pairs.
+def _resolve_clones(specs: list, cwd: pathlib.Path) -> list[tuple[str, str, int | None]]:
+    """Parse + dedupe the merged clone specs into (url, abs_container_dir, depth).
 
-    Each spec is a `{url, dir}` dict (config + the CLI action share that shape).
+    Each spec is a `{url, dir[, depth]}` dict (config; the CLI action sets no depth).
     `dir` is the **container** destination: absolute as-is, `~` → the container
     home `/home/claude`, else relative to the session's working dir `cwd` (so
     `../foo` is a sibling of it). Only `cwd` itself is bind-mounted at its identical
     path, so a sibling/other path lives in the container's ephemeral fs. Resolved
     with normpath (not .resolve()) so host symlinks don't change the container path;
-    deduped by resolved dest, later (higher layer) wins. Order preserved.
+    deduped by resolved dest, later (higher layer) wins. `depth` (config-only) becomes
+    `git clone --depth` when set. Order preserved.
     """
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, int | None]] = {}
     for s in specs:
         d = s["dir"]
         if d.startswith("~"):
             d = "/home/claude" + d[1:]  # the container home, NOT the host $HOME
         dest = os.path.normpath(os.path.join(str(cwd), d))  # join leaves an absolute d as-is
-        out[dest] = s["url"]
-    return [(url, dest) for dest, url in out.items()]
+        out[dest] = (s["url"], s.get("depth"))
+    return [(url, dest, depth) for dest, (url, depth) in out.items()]
 
 
 def _parse_port_spec(spec: str) -> tuple[int | None, int]:
@@ -4033,9 +4049,13 @@ def launch_container(
     # (so the clone can use anything they set up) and before claude, via the baked
     # /etc/yolo/clone.sh. The dir is resolved to a container path against `cwd`.
     clones = _resolve_clones(parsed.clones, cwd)
-    clone_cmds = "".join(
-        f"bash /etc/yolo/clone.sh {shlex.quote(url)} {shlex.quote(dest)}; " for url, dest in clones
-    )
+
+    def _clone_cmd(url, dest, depth):
+        # depth (config-only) is an optional 3rd arg → `git clone --depth` in clone.sh
+        args = [url, dest, *([str(depth)] if depth else [])]
+        return "bash /etc/yolo/clone.sh " + " ".join(shlex.quote(a) for a in args)
+
+    clone_cmds = "".join(f"{_clone_cmd(url, dest, depth)}; " for url, dest, depth in clones)
     if (yolorc_host or have_env_secrets or clones) and entrypoint is None:
         entrypoint = "/bin/bash"
         command = [
