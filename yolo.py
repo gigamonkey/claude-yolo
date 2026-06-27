@@ -3187,7 +3187,9 @@ def build_claude_args(
                 "forwarded to the host: a web server you run on such a port is reachable "
                 "from the host, where the user opens it with `yolo browse` (or `b` in the "
                 "`yolo wip` dashboard). The server must listen on 0.0.0.0, not 127.0.0.1, "
-                "or docker's forward can't reach it."
+                "or docker's forward can't reach it. Try to keep the server running in the "
+                "steady state so the user can browse it whenever — it's fine to stop or "
+                "restart it while testing, but leave it running once you're done."
             ]
             if forwarded_ports
             else []

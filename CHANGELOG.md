@@ -3,6 +3,13 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The forwarded-ports prompt asks Claude to keep the server running.** When ports
+  are forwarded, the system-prompt line now tells Claude to keep the server up in
+  the steady state (restarting it for testing is fine) so the user can `yolo
+  browse` / `b` to it at any time, rather than leaving it stopped after a test.
+
 ## v0.23.0 — 2026-06-25
 
 - **`yolo wip` gains `S` — open a shell in the selected session.** On a session
