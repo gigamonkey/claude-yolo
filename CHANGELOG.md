@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.24.0 — 2026-06-27
 
 - **`--clone URL DIR` clones a git repo into the container at session start.** A new
   `clones` config key for giving Claude a reference/dependency repo alongside your
@@ -18,8 +18,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   an optional `depth` (positive int) → a shallow `git clone --depth`. Edit clones a
   piece at a time with `yolo config --add-clone URL DIR [DEPTH]` /
   `--remove-clone DIR`, or interactively in the `yolo wip` `c` config editor (which
-  prompts url, dir, and an optional depth) — previously `clones` could only be set
-  as a whole list and wasn't reachable from the editor.
+  prompts url, dir, and an optional depth).
 
 - **The forwarded-ports prompt asks Claude to keep the server running.** When ports
   are forwarded, the system-prompt line now tells Claude to keep the server up in
