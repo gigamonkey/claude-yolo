@@ -854,6 +854,36 @@ def test_c_remove_list_element(cy, monkeypatch, tmp_path):
     assert cmd == ["yolo", "config", "old", "--remove-mount", "/x:ro"]
 
 
+def test_c_clones_add_with_depth_via_edit_key(cy, monkeypatch, tmp_path):
+    # Enter on the `clones` key routes to the dict-valued clones loop (not the
+    # scalar prompt); add prompts url + dir + optional depth → --add-clone.
+    calls = _stub_config_run(cy, monkeypatch)
+    scope = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    term = FakeTerm(["a", "q"], lines=["https://x/lib", "../lib", "2"])
+    cy._config_edit_key(scope, "clones", term)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--add-clone", "https://x/lib", "../lib", "2"]
+
+
+def test_c_clones_add_no_depth(cy, monkeypatch, tmp_path):
+    # A blank depth line → no 3rd arg (a full clone).
+    calls = _stub_config_run(cy, monkeypatch)
+    scope = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    term = FakeTerm(["a", "q"], lines=["https://x/lib", "../lib", ""])
+    cy._config_clones_loop(scope, term)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--add-clone", "https://x/lib", "../lib"]
+
+
+def test_c_clones_remove(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    _seed_worktree_entry(tmp_path, {"clones": [{"url": "https://x/lib", "dir": "../lib"}]})
+    scope = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    cy._config_clones_loop(scope, FakeTerm(["x", "q"]))  # x removes the selected (first) by dir
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "old", "--remove-clone", "../lib"]
+
+
 def test_c_failure_surfaces_in_editor(cy, monkeypatch, tmp_path, capsys):
     _stub_config_run(cy, monkeypatch, returncode=2, stderr="not a directory: /nope")
     term = FakeTerm(["e", "q"], lines=["--mount /nope"])

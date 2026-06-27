@@ -914,12 +914,23 @@ the layers and the CLI.
 
 A clone may also carry an optional **`depth`** (a positive integer), which becomes
 `git clone --depth` — a shallow clone, handy for a large reference repo where you
-don't need the history. It's **config-file only** (there's no CLI flag), set per
-clone:
+don't need the history. There's no `--clone … DEPTH` launch flag, but you can set it
+per clone in config:
 
 ```json
 { "clones": [ { "url": "https://github.com/me/lib", "dir": "../lib", "depth": 1 } ] }
 ```
+
+To edit clones a piece at a time (rather than replacing the whole list with
+`--clone`), use the element flags — these also let you set `depth`:
+
+```bash
+yolo config --add-clone https://github.com/me/lib ../lib 1   # url, dir, optional depth
+yolo config --remove-clone ../lib                            # remove by dir
+```
+
+The `yolo wip` dashboard's `c` config editor edits clones interactively too
+(prompting url, dir, and an optional depth).
 
 ### `dockerfile` (`--dockerfile PATH`)
 

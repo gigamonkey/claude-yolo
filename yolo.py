@@ -2114,6 +2114,11 @@ def _apply_config_edits(
             "--plugin-dir replaces the whole `plugin-dirs` list; "
             "don't combine it with --add-plugin-dir/--remove-plugin-dir."
         )
+    if "clones" in explicit and (parsed.add_clones or parsed.remove_clones):
+        sys.exit(
+            "--clone replaces the whole `clones` list; "
+            "don't combine it with --add-clone/--remove-clone."
+        )
     unsets = [u.replace("_", "-") for u in parsed.unsets]
     for u in unsets:
         if u in explicit:
@@ -2128,6 +2133,8 @@ def _apply_config_edits(
         sys.exit("can't combine --unset secrets with --add-secret/--remove-secret.")
     if "plugin-dirs" in unsets and (parsed.add_plugin_dirs or parsed.remove_plugin_dirs):
         sys.exit("can't combine --unset plugin-dirs with --add-plugin-dir/--remove-plugin-dir.")
+    if "clones" in unsets and (parsed.add_clones or parsed.remove_clones):
+        sys.exit("can't combine --unset clones with --add-clone/--remove-clone.")
 
     for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
@@ -2232,7 +2239,44 @@ def _apply_config_edits(
         if plugin_dirs:
             entry["plugin-dirs"] = plugin_dirs
 
+    if parsed.add_clones or parsed.remove_clones:
+        # Clones are {url, dir[, depth]} dicts, not spec strings, so they get their
+        # own take/match logic. Identity is the `dir` field (the dest), like a port
+        # matches by container port — adding a same-dir clone replaces it (so the
+        # url/depth can be changed); removing matches the stored `dir`.
+        clones = _take_clones_key(entry, where)
+        for rm in parsed.remove_clones:
+            kept = [c for c in clones if c.get("dir") != rm]
+            if len(kept) == len(clones):
+                sys.exit(f"--remove-clone {rm}: no such clone in {where}.")
+            clones = kept
+        for add in parsed.add_clones:
+            clones = [c for c in clones if c.get("dir") != add["dir"]]
+            clones.append(add)
+        if clones:
+            entry["clones"] = clones
+
     return entry
+
+
+def _take_clones_key(entry: dict, where: str) -> list[dict]:
+    """Pop `clones` (either dash/underscore spelling) out of `entry`, as a list of
+    `{url, dir[, depth]}` dicts — normalizing a single-object form to a one-element
+    list (the same shape `_parse_yolo_dict` accepts). Mirrors `_take_list_key`, but
+    for the dict-valued clones key. A wrong shape fails here with the load message."""
+    out: list[dict] = []
+    for ek in [k for k in entry if k.replace("-", "_") == "clones"]:
+        v = entry.pop(ek)
+        if isinstance(v, dict):
+            v = [v]
+        ok = isinstance(v, list) and all(
+            isinstance(x, dict) and isinstance(x.get("url"), str) and isinstance(x.get("dir"), str)
+            for x in v
+        )
+        if not ok:
+            sys.exit(f"{where}: 'clones' must be a {{url, dir[, depth]}} object or a list of them")
+        out.extend(v)
+    return out
 
 
 def _do_config_worktree(
@@ -2395,6 +2439,8 @@ def do_config(
         or parsed.remove_secrets
         or parsed.add_plugin_dirs
         or parsed.remove_plugin_dirs
+        or parsed.add_clones
+        or parsed.remove_clones
         or parsed.unsets
     )
 
@@ -2592,6 +2638,33 @@ class _CloneAction(argparse.Action):
     def __call__(self, parser, ns, values, option_string=None):
         items = list(getattr(ns, self.dest) or [])
         items.append({"url": values[0], "dir": values[1]})
+        setattr(ns, self.dest, items)
+
+
+class _AddCloneAction(argparse.Action):
+    """`--add-clone URL DIR [DEPTH]` (config-only) — the element-edit counterpart
+    to --clone, mirroring --add-mount's role (the `wip` config editor uses it).
+
+    Takes 2 or 3 tokens: URL, DIR, and an optional positive-int DEPTH (a shallow
+    clone — the same config-only `depth` the config file accepts). Appended as a
+    `{url, dir[, depth]}` dict, the shared internal shape; _apply_config_edits
+    matches/replaces a stored clone by its DIR.
+    """
+
+    def __call__(self, parser, ns, values, option_string=None):
+        if not 2 <= len(values) <= 3:
+            parser.error("--add-clone takes URL DIR [DEPTH]")
+        spec = {"url": values[0], "dir": values[1]}
+        if len(values) == 3:
+            try:
+                depth = int(values[2])
+            except ValueError:
+                depth = 0
+            if depth <= 0:
+                parser.error(f"--add-clone DEPTH must be a positive integer, not {values[2]!r}")
+            spec["depth"] = depth
+        items = list(getattr(ns, self.dest) or [])
+        items.append(spec)
         setattr(ns, self.dest, items)
 
 
@@ -2815,6 +2888,27 @@ PARSER.add_argument(
     help="For `config`: remove PATH's entry from the stored `plugin-dirs` list (the "
     "path needn't exist, so a stale one can be removed). Errors if not listed. "
     "Repeatable.",
+)
+PARSER.add_argument(
+    "--add-clone",
+    dest="add_clones",
+    action=_AddCloneAction,
+    nargs="+",
+    default=[],
+    metavar="URL DIR [DEPTH]",
+    help="For `config`: add one clone to the stored `clones` list (or replace the "
+    "entry with the same DIR), leaving the rest alone — unlike --clone, which "
+    "replaces the whole list. An optional 3rd DEPTH (positive int) is a shallow "
+    "`git clone --depth`. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-clone",
+    dest="remove_clones",
+    action="append",
+    default=[],
+    metavar="DIR",
+    help="For `config`: remove the clone with this DIR from the stored `clones` "
+    "list. Errors if no clone has that DIR. Repeatable.",
 )
 PARSER.add_argument(
     "--add-prompt",
@@ -6123,11 +6217,19 @@ def _config_scope(kind, payload, home):
     return None
 
 
+def _clone_display(c: dict) -> str:
+    """A clone spec as `url -> dir` (+ ` (depth N)` when shallow), for the editor."""
+    s = f"{c.get('url')} -> {c.get('dir')}"
+    return s + (f" (depth {c['depth']})" if c.get("depth") else "")
+
+
 def _config_value_display(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
+    if isinstance(v, dict):  # a single clone spec
+        return _clone_display(v)
     if isinstance(v, list):
-        return ", ".join(str(x) for x in v)
+        return ", ".join(_clone_display(x) if isinstance(x, dict) else str(x) for x in v)
     return str(v)
 
 
@@ -6248,6 +6350,48 @@ def _config_list_loop(scope, key, term) -> str:
             msg = _config_apply(scope, [f"--remove-{stem}", elems[sel]])[1]
 
 
+def _config_clones_loop(scope, term) -> str:
+    """Add/remove `clones` entries (the dict-valued key needs its own loop): `a`
+    prompts url + dir + optional depth → `--add-clone`; `x` removes by dir. Returns
+    a footer message. Mirrors `_config_list_loop` for the spec-string list keys."""
+    sel, msg = 0, ""
+    while True:
+        clones = scope.read().get("clones", [])
+        if isinstance(clones, dict):
+            clones = [clones]
+        sel = min(sel, len(clones) - 1) if clones else 0
+        print("\x1b[H\x1b[2J", end="")
+        print(f"\x1b[1;36mconfig\x1b[0m \x1b[90m{scope.label} · clones\x1b[0m\n")
+        if not clones:
+            print("\x1b[90m(none)\x1b[0m")
+        for i, c in enumerate(clones):
+            line = _clone_display(c)
+            print(f"\x1b[7m› {line}\x1b[0m" if i == sel else f"  {line}")
+        print("\n\x1b[90ma add · x remove · q done\x1b[0m")
+        print(f"\x1b[1;33m{msg}\x1b[0m" if msg else "")
+        sys.stdout.flush()
+        msg = ""
+        k = term.wait_key(86400)
+        if k in ("q", "\x1b"):
+            return f"edited clones for {scope.label}."
+        if k in ("up", "k") and clones:
+            sel = max(0, sel - 1)
+        elif k in ("down", "j") and clones:
+            sel = min(len(clones) - 1, sel + 1)
+        elif k == "a":
+            url = term.prompt_line("clone url: ")
+            if not url:
+                continue
+            dest = term.prompt_line("clone dir (abs, ~, or ../sibling): ")
+            if not dest:
+                continue
+            depth = term.prompt_line("depth (optional, blank = full clone): ")
+            flags = ["--add-clone", url, dest] + ([depth] if depth.strip() else [])
+            msg = _config_apply(scope, flags)[1]
+        elif k == "x" and clones:
+            msg = _config_apply(scope, ["--remove-clone", clones[sel].get("dir", "")])[1]
+
+
 def _draw_config_editor(scope, entry, keys, inherited, sel, msg) -> None:
     """One config-editor frame: the editable keys (selectable), the inherited pane
     (dimmed, read-only), and a key hint."""
@@ -6317,6 +6461,8 @@ def _config_edit_key(scope, key, term) -> str:
     """Edit one key: list keys open the element view, scalars re-prompt a value."""
     if key.replace("-", "_") not in YOLO_KEYS:
         return f"unknown key {key!r} — 'x' to remove or 'e' for raw flags."
+    if key == "clones":  # dict-valued list — its own add/remove loop (url+dir+depth)
+        return _config_clones_loop(scope, term)
     if key in _LIST_FLAG:
         return _config_list_loop(scope, key, term)
     value = _prompt_config_value(term, key)
@@ -6718,6 +6864,8 @@ def _main():
         ("--remove-secret", parsed.remove_secrets),
         ("--add-plugin-dir", parsed.add_plugin_dirs),
         ("--remove-plugin-dir", parsed.remove_plugin_dirs),
+        ("--add-clone", parsed.add_clones),
+        ("--remove-clone", parsed.remove_clones),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")

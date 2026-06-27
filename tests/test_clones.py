@@ -119,6 +119,16 @@ def test_clones_concatenate_across_layers(cy, run_cli, dirs):
     assert "bash /etc/yolo/clone.sh https://x/c /c" in script  # CLI layer
 
 
+def test_clone_depth_in_wrapper(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(
+        json.dumps({"clones": [{"url": "https://x/lib", "dir": "/lib", "depth": 1}]})
+    )
+    argv = run_cli([], home=home, cwd=work)
+    # depth becomes the optional 3rd arg to clone.sh (-> git clone --depth)
+    assert "bash /etc/yolo/clone.sh https://x/lib /lib 1" in wrapper_script(cy, argv)
+
+
 # --- config verb ------------------------------------------------------------
 
 
@@ -143,3 +153,52 @@ def test_config_clone_repeatable_replaces_whole_list(cy, run_cli, dirs):
     }
     run_cli(["config", "--unset", "clones"], home=home, cwd=work)
     assert "clones" not in entry(home, work)
+
+
+def test_config_add_remove_clone(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--add-clone", "https://x/lib", "../lib"], home=home, cwd=work)
+    run_cli(["config", "--add-clone", "https://x/api", "../api", "1"], home=home, cwd=work)
+    assert entry(home, work)["clones"] == [
+        {"url": "https://x/lib", "dir": "../lib"},
+        {"url": "https://x/api", "dir": "../api", "depth": 1},  # optional depth kept
+    ]
+    # Adding a same-dir clone replaces it (so url/depth can be changed).
+    run_cli(["config", "--add-clone", "https://x/lib2", "../lib"], home=home, cwd=work)
+    assert entry(home, work)["clones"] == [
+        {"url": "https://x/api", "dir": "../api", "depth": 1},
+        {"url": "https://x/lib2", "dir": "../lib"},
+    ]
+    run_cli(["config", "--remove-clone", "../api"], home=home, cwd=work)
+    assert entry(home, work)["clones"] == [{"url": "https://x/lib2", "dir": "../lib"}]
+
+
+def test_config_remove_clone_missing_errors(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--add-clone", "https://x/lib", "../lib"], home=home, cwd=work)
+    with pytest.raises(SystemExit, match="no such clone"):
+        run_cli(["config", "--remove-clone", "../nope"], home=home, cwd=work)
+
+
+def test_config_add_clone_conflict_guard(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit, match="don't combine"):
+        run_cli(
+            ["config", "--clone", "https://x/a", "../a", "--add-clone", "https://x/b", "../b"],
+            home=home,
+            cwd=work,
+        )
+
+
+def test_add_clone_bad_depth_rejected(cy, run_cli, dirs, capsys):
+    home, work = dirs
+    # argparse's parser.error raises SystemExit(2); the message goes to stderr.
+    with pytest.raises(SystemExit):
+        run_cli(["config", "--add-clone", "https://x/a", "../a", "notanint"], home=home, cwd=work)
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_add_clone_only_for_config(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit, match="only applies to .config"):
+        run_cli(["start", "--add-clone", "https://x/a", "../a"], home=home, cwd=work)

@@ -384,12 +384,17 @@ on top of whichever auth is chosen:
   skips an existing dest, `sudo mkdir`s/`chown`s a root-owned parent (a sibling's
   parent is docker-created as root), and treats a clone failure as non-fatal. Public
   HTTPS URLs need no auth; under `--ssh-agent` the HTTPS→SSH rewrite routes via the
-  agent. An optional per-clone **`depth`** (a positive int) is **config-file only**
-  (no CLI flag) — `"clones": [{"url": …, "dir": …, "depth": 1}]` — and becomes
+  agent. An optional per-clone **`depth`** (a positive int) becomes
   `git clone --depth <depth>` (a shallow clone), passed by `_resolve_clones` as the
-  optional 3rd arg to `clone.sh`; omitted → a full clone. Resolved only on launch
-  paths (no add/remove-element edits yet — whole-key `--clone`/`--unset clones`
-  only). Same host-side-key opt-in model as `--secret`.
+  optional 3rd arg to `clone.sh`; omitted → a full clone. There's **no top-level
+  `--clone … DEPTH` launch flag** (depth is config-only that way), but it *is*
+  settable through the element-edit flags below and the `wip` `c` editor. Resolved
+  only on launch paths. Element edits: **`--add-clone URL DIR [DEPTH]`** /
+  **`--remove-clone DIR`** (config-only, like `--add-mount`/`--remove-mount`) edit a
+  single `clones` element — add replaces a same-`DIR` entry (so the url/depth can be
+  changed) and takes an optional positive-int `DEPTH`; remove matches the stored
+  `dir`. Whole-key `--clone`/`--unset clones` still replace/drop the list. Same
+  host-side-key opt-in model as `--secret`.
 - **`--rebuild-image`** (default off) → pass `--no-cache` to `docker build`, forcing
   a full image rebuild from scratch (useful when a baked tool is stale or the
   Dockerfile changed).
@@ -1042,10 +1047,16 @@ Behavior à la `git config`:
   `~/x` and its absolute form are one entry: add validates via
   `_parse_plugin_dir_spec` (the path must exist) and is a no-op if already listed;
   remove needn't have an existing path, so a stale one is removable.
+  **`--add-clone URL DIR [DEPTH]` / `--remove-clone DIR`** edit the dict-valued
+  `clones` key (not a spec string — so its own `_take_clones_key` + an
+  `_AddCloneAction` taking 2–3 tokens): add appends a `{url, dir[, depth]}` and
+  **replaces a same-`DIR` entry** (so the url/depth can change), the optional 3rd
+  `DEPTH` being a positive-int shallow clone; remove matches the stored `dir`.
   Contradictory instructions in one call (set + `--unset` of the same key,
   `--mount` with `--add/--remove-mount`, `-p` with `--add/--remove-prompt`,
   `--port` with `--add/--remove-port`, `--secret` with `--add/--remove-secret`,
-  `--plugin-dir` with `--add/--remove-plugin-dir`)
+  `--plugin-dir` with `--add/--remove-plugin-dir`, `--clone` with
+  `--add/--remove-clone`)
   are errors, not silently ordered; sets apply first, then unsets, then list
   edits.
 - **`yolo config --global`** targets the flat `~/.yolo.json` instead of the
@@ -1344,7 +1355,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   keys), where `Enter` edits the selected key (bools/choices via the j/k
   `_pick_one` picker, paths via the Tab-completing `prompt_path`, list keys drill
   into an add/remove element view `_config_list_loop` — mounts/plugin-dirs
-  Tab-complete the dir), `a` picks a not-yet-set key to add, `x` unsets one, and
+  Tab-complete the dir; the dict-valued `clones` key gets its own
+  `_config_clones_loop` that prompts url + dir + optional depth), `a` picks a
+  not-yet-set key to add, `x` unsets one, and
   `e` is a raw-flags escape hatch. Every write composes a `yolo config [TOPIC]
   <flags>` subprocess (`_config_apply`, from the repo/project dir, reusing all of
   `yolo config`'s validation/persistence; bool keys emit `--key`/`--no-key`, list
@@ -1522,7 +1535,7 @@ Implementation shape:
   `config` family — `--init`, `--global`, `--unset`,
   `--add-mount`/`--remove-mount`, `--add-prompt`/`--remove-prompt`,
   `--add-port`/`--remove-port`, `--add-secret`/`--remove-secret`,
-  `--add-plugin-dir`/`--remove-plugin-dir`.
+  `--add-plugin-dir`/`--remove-plugin-dir`, `--add-clone`/`--remove-clone`.
   Each is validated against its verb in dispatch (e.g. `-r` outside `resume`,
   `--new` without a `TOPIC`, or `--new` with `-r` all error). (`--port` is the
   exception: a launch flag that doubles as `browse`'s selection.)
@@ -1987,7 +2000,9 @@ diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-fi
 summary), `c` opening the config editor (`_config_editor_loop` / `_config_scope`: the
 raw-flags `e` hatch composing `yolo config [TOPIC] <flags>` from the right dir for
 worktree and project scope, `x`+confirm unsetting a scalar, the `_config_list_loop`
-add-mount path+ro/rw-pick and remove-element flows, the error surfacing in the
+add-mount path+ro/rw-pick and remove-element flows, the `_config_clones_loop`
+add-with-depth (routed via `_config_edit_key`), add-without-depth, and remove-by-dir
+flows, the error surfacing in the
 editor frame, the current-values + inherited-pane display, and the units
 `_config_value_flags` (bool `--key`/`--no-key`), `_prompt_config_value` kind
 routing, and `_pick_one` navigation/cancel; a session row is the no-op message),
@@ -2016,8 +2031,12 @@ replace-conflict guard, and the verb gating).
 `depth`), the config-file `{url, dir[, depth]}` object/list parse + bad-shape
 rejection (incl. the config-only positive-int `depth` validation), launch assembly (the
 `bash /etc/yolo/clone.sh <url> <resolved-dir>` in the launch wrapper + the bash
-entrypoint, none by default, layer concatenation), and the `config` verb (persisting
-the **object** form, the repeatable whole-list set, `--unset clones`).
+entrypoint, the `depth`→`--depth` 3rd arg, none by default, layer concatenation),
+and the `config` verb (persisting the **object** form, the repeatable whole-list
+set, `--unset clones`, the `--add-clone`/`--remove-clone` element edits incl. depth,
+same-dir replace, missing-remove error, bad-depth rejection, the `--clone`-conflict
+guard, and the config-only gating). The `wip` `c` editor's clones loop is in
+`test_wip.py`.
 `test_status.py` covers the session-activity feature: the injected
 `Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
 status path) plus the `AskUserQuestion`-matched `Pre`/`PostToolUse` waiting/working
