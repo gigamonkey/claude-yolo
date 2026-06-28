@@ -906,11 +906,12 @@ what you want for a throwaway reference clone, and keeps it out of your actual r
 (A path *inside* the working dir, like `vendor/lib`, would land on the bind-mount and
 persist on the host.)
 
-The clone runs at session start (after secrets and your `yolorc`, before Claude),
-skips if the destination already exists, and a failure just warns rather than
-blocking the session. Public HTTPS URLs need no auth; with `--ssh-agent` on, GitHub
-HTTPS URLs route over your forwarded agent. In config the list concatenates across
-the layers and the CLI.
+The clone runs at session start after secrets are loaded but **before** your
+`yolorc` and Claude — so a `yolorc` that starts a server can rely on the cloned repo
+already being there. It skips if the destination already exists, and a failure just
+warns rather than blocking the session. Public HTTPS URLs need no auth; with
+`--ssh-agent` on, GitHub HTTPS URLs route over your forwarded agent. In config the
+list concatenates across the layers and the CLI.
 
 A clone may also carry an optional **`depth`** (a positive integer), which becomes
 `git clone --depth` — a shallow clone, handy for a large reference repo where you

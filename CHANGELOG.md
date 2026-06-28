@@ -3,6 +3,15 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **Clones now run before your `yolorc`, not after.** At session start the order is
+  secrets → clones → `yolorc` → Claude (previously the `yolorc` was sourced before
+  the clones). A `yolorc` commonly starts a server or runs setup that depends on a
+  cloned repo already being present, so the clone has to come first; clones
+  themselves need nothing from the rc (HTTPS needs no auth, SSH uses the forwarded
+  agent).
+
 ## v0.24.0 — 2026-06-27
 
 - **`--clone URL DIR` clones a git repo into the container at session start.** A new

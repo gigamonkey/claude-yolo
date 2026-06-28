@@ -129,6 +129,18 @@ def test_clone_depth_in_wrapper(cy, run_cli, dirs):
     assert "bash /etc/yolo/clone.sh https://x/lib /lib 1" in wrapper_script(cy, argv)
 
 
+def test_clone_runs_after_secrets_before_yolorc(cy, run_cli, dirs):
+    home, work = dirs
+    rc = work / "setup.sh"
+    rc.write_text("echo hi\n")  # an rc that (e.g.) starts a server depending on the clone
+    argv = run_cli(["--clone", "https://x/lib", "/lib", "--yolorc", str(rc)], home=home, cwd=work)
+    script = wrapper_script(cy, argv)
+    # secrets loader → clones → rc → exec claude: the clone must come before the rc
+    # is sourced (an rc commonly depends on the cloned repo being present).
+    assert script.index("load-secrets") < script.index("clone.sh") < script.index("YOLO_RC")
+    assert script.index("YOLO_RC") < script.index("exec")
+
+
 # --- config verb ------------------------------------------------------------
 
 

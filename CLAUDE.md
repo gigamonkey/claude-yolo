@@ -379,7 +379,8 @@ on top of whichever auth is chosen:
   itself is bind-mounted**, so a sibling/absolute dest lives in the container's
   *ephemeral* fs (re-cloned each session — fine for a clone); a *subdir* of `cwd`
   would land on the host bind-mount (persists, clutters the repo). The clones run in
-  the **claude launch wrapper** (after secrets/yolorc, before `exec claude`) via the
+  the **claude launch wrapper** (after secrets, before the `--yolorc` and `exec
+  claude` — an rc commonly starts a server that depends on the clone) via the
   baked **`/etc/yolo/clone.sh <url> <dir> [<depth>]`** (`Dockerfile.default`), which
   skips an existing dest, `sudo mkdir`s/`chown`s a root-owned parent (a sibling's
   parent is docker-created as root), and treats a clone failure as non-fatal. Public
@@ -460,8 +461,10 @@ on top of whichever auth is chosen:
   bind-mounted **read-only** at the fixed `/home/claude/.yolorc`
   (`_YOLORC_CONTAINER_PATH`) and `YOLO_RC` is pointed at it. **Two source paths,
   one per session kind:** a *claude* launch is command-wrapped — yolo overrides the
-  entrypoint to `/bin/bash` and runs `. "$YOLO_RC"; exec claude …` (claude isn't a
-  shell, so `.bashrc` never runs for it); the claude args are passed positionally
+  entrypoint to `/bin/bash` and runs `<load-secrets>; <clones>; . "$YOLO_RC"; exec
+  claude …` (so the rc is sourced *after* any clones, since an rc commonly starts a
+  server depending on a clone; claude isn't a shell, so `.bashrc` never runs for
+  it); the claude args are passed positionally
   to `"$@"` so the `--settings` JSON and OAuth token need no re-quoting. A `yolo
   shell` (fresh or `docker exec`'d into a running container) instead sources it via
   the baked **`.bashrc`** (guarded by a `YOLO_RC_SOURCED` sentinel so nested
@@ -815,8 +818,9 @@ the session's own trust boundary.
   rationale is that blanket self-delete would empty `/run/secrets` for a later `yolo
   shell` exec'd into the same container. The loader is **sourced from two places**
   (claude never runs `.bashrc`): the **claude launch wrapper** (extended from the
-  `--yolorc` wrapper — sources the loader, then the rc, then `exec "$@"`; triggered
-  by env secrets, the OAuth token, *or* a yolorc) and the baked **`.bashrc`** (for
+  `--yolorc` wrapper — sources the loader, runs any `clones`, sources the rc, then
+  `exec "$@"`; triggered by env secrets, the OAuth token, a clone, *or* a yolorc)
+  and the baked **`.bashrc`** (for
   `yolo shell`, sentinel-guarded by `YOLO_SECRETS_SOURCED`, before the `YOLO_RC`
   line so an rc can use the values). Nothing to load → no `/run/secrets` mount,
   loader is a no-op. **The Anthropic OAuth token is delivered through this exact

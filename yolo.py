@@ -4129,19 +4129,23 @@ def launch_container(
     image_tag = _build_image(parsed, cwd)
 
     # For a claude launch (entrypoint is None → the image's `claude
-    # --dangerously-skip-permissions` ENTRYPOINT) with env values to load —
+    # --dangerously-skip-permissions` ENTRYPOINT) with startup work to do —
     # env-target secrets, the OAuth token in oauth-token mode (the default, so this
-    # is the common path), and/or --yolorc — drop into bash to source the secrets
-    # loader (which exports each /run/secrets file, the token included) and then the
-    # rc, before exec'ing the reconstructed claude command. claude isn't a shell, so
-    # it never reads .bashrc (where `yolo shell` gets these) — the wrapper is how a
-    # claude session picks them up. `source` (not run) so the exports reach claude's
-    # env; the loader runs *before* the rc so an rc can use the exported values; a
-    # nonzero rc warns but doesn't block. The claude args are passed positionally to
-    # "$@" so the --settings JSON needs no re-quoting.
-    # `clones` config: `git clone <url> <dir>` at session start, after secrets/rc
-    # (so the clone can use anything they set up) and before claude, via the baked
-    # /etc/yolo/clone.sh. The dir is resolved to a container path against `cwd`.
+    # is the common path), `clones`, and/or --yolorc — drop into bash to do it before
+    # exec'ing the reconstructed claude command. claude isn't a shell, so it never
+    # reads .bashrc (where `yolo shell` gets the secrets/rc) — the wrapper is how a
+    # claude session picks them up. The order is **secrets → clones → rc → claude**:
+    #   - secrets (`source`, not run, so the exports reach claude's env) go first so a
+    #     clone over --ssh-agent-rewritten HTTPS — or anything else needing a secret —
+    #     can authenticate;
+    #   - clones (the baked /etc/yolo/clone.sh, one per repo; dir resolved to a
+    #     container path against `cwd`) go *before* the rc, since an rc commonly
+    #     starts a server that depends on a cloned repo being present, not vice versa
+    #     (a clone needs no rc — HTTPS needs nothing, SSH uses the agent forwarded at
+    #     docker-run time);
+    #   - the rc is `source`d last (a nonzero rc warns but doesn't block).
+    # The claude args are passed positionally to "$@" so the --settings JSON needs no
+    # re-quoting.
     clones = _resolve_clones(parsed.clones, cwd)
 
     def _clone_cmd(url, dest, depth):
@@ -4155,9 +4159,9 @@ def launch_container(
         command = [
             "-c",
             "[ -f /etc/yolo/load-secrets.sh ] && . /etc/yolo/load-secrets.sh; "
+            f"{clone_cmds}"
             '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '
             'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; '
-            f"{clone_cmds}"
             'exec "$@"',
             "yolo-rc",
             "claude",
