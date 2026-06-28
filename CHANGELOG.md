@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.24.1 — 2026-06-27
 
 - **Clones now run before your `yolorc`, not after.** At session start the order is
   secrets → clones → `yolorc` → Claude (previously the `yolorc` was sourced before
