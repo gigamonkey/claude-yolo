@@ -974,6 +974,23 @@ _SECRETS_CONTAINER_DIR = "/run/secrets"
 _CONTAINER_HOME = "/home/claude"
 # A secret NAME must be a shell identifier: it becomes an env var name in-container.
 _SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Characters not allowed anywhere in a docker container name (docker constrains a
+# name to [a-zA-Z0-9][a-zA-Z0-9_.-]*).
+_CONTAINER_NAME_BAD_RE = re.compile(r"[^a-zA-Z0-9_.-]")
+
+
+def _sanitize_container_name(name: str) -> str:
+    """Coerce a derived name into a valid docker container name.
+
+    The name is derived from the working-directory basename (or <repo>-<topic>),
+    which can hold spaces, unicode, or a leading dot — none of which docker
+    accepts, so an unsanitized name fails `docker run` with a cryptic error.
+    Replace every disallowed character with '-', strip leading characters until
+    the first is alphanumeric (docker requires that), and fall back to 'yolo'
+    when nothing usable remains.
+    """
+    cleaned = _CONTAINER_NAME_BAD_RE.sub("-", name).lstrip("_.-")
+    return cleaned or "yolo"
 
 
 def _valid_secret_name(name: str) -> bool:
@@ -3850,6 +3867,10 @@ def launch_container(
         container = f"{container}-{pathlib.Path(config_dir).resolve().name}"
     if parsed.auth == "bedrock":
         container = f"{container}-{parsed.aws_profile or 'bedrock'}"
+    # The name is derived from the cwd basename / config-dir / profile, any of which
+    # can contain characters docker rejects; sanitize the whole thing here (after the
+    # suffixes) so the run dir, labels, and tmux window all key off the same valid name.
+    container = _sanitize_container_name(container)
 
     # A container of this name already running means a live session for this
     # worktree/cwd — you can't launch a second with the same name (docker forbids

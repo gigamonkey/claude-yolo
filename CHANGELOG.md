@@ -3,6 +3,15 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **Derived container names are now sanitized.** The container name comes from the
+  working-directory basename (or `{repo}-{topic}` for a worktree) plus any config-dir
+  / profile suffixes. If that source held a character docker rejects — a space, a
+  unicode letter, a leading dot — the launch used to fail with a cryptic `docker run`
+  error. yolo now coerces the name to a valid one: disallowed characters become `-`,
+  leading `_.-` are stripped, and an entirely-invalid name falls back to `yolo`.
+
 ## v0.24.1 — 2026-06-27
 
 - **Clones now run before your `yolorc`, not after.** At session start the order is
