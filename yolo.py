@@ -3873,7 +3873,17 @@ def launch_container(
     # basename starting with a dot/underscore, or holding stray characters, is
     # otherwise rejected). Done after the suffixes so any component is covered, and
     # before the run-dir keying below so the GC still matches on the final name.
-    container = _docker_safe_name(container)
+    safe = _docker_safe_name(container)
+    if safe != container:
+        # The name had to be coerced, which means a sibling directory that differs
+        # only in the stripped characters (e.g. `.foo` vs `foo`) would coerce to the
+        # *same* name and collide — docker's --name must be unique, and the run dir
+        # is keyed by it. Append a short stable hash of the cwd so coerced names stay
+        # unique per directory. Deterministic (a pure function of cwd), so resume and
+        # the run-dir GC recompute the identical name. Only coerced names pay this;
+        # an already-valid directory name is left pristine.
+        safe = f"{safe}-{hashlib.sha256(str(cwd).encode()).hexdigest()[:8]}"
+    container = safe
 
     # A container of this name already running means a live session for this
     # worktree/cwd — you can't launch a second with the same name (docker forbids

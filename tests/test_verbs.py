@@ -5,6 +5,7 @@ worktree machinery against a throwaway repo, and stub only `running_container_fo
 (docker) plus the launch side effects via the `run_cli` fixture.
 """
 
+import re
 import subprocess
 import time
 
@@ -1102,11 +1103,9 @@ def test_docker_safe_name(cy):
     assert f("", fallback="x") == "x"
 
 
-def test_cwd_leading_dot_is_sanitized(cy, run_cli, tmp_path):
-    """A hidden directory (basename starting with '.') can't be a docker --name or
-    --hostname raw — docker rejects it. yolo strips the leading dot so cwd mode in
-    such a directory still launches."""
-    r = tmp_path / ".dotfiles"
+def _dot_repo(tmp_path, name):
+    """A git repo whose basename is `name`, plus an isolated fake HOME."""
+    r = tmp_path / name
     r.mkdir()
     git(r, "init", "-q", "-b", "main")
     git(r, "config", "user.email", "t@example.com")
@@ -1116,13 +1115,47 @@ def test_cwd_leading_dot_is_sanitized(cy, run_cli, tmp_path):
     git(r, "commit", "-qm", "init")
     home = tmp_path / "home"
     home.mkdir()
+    return r, home
+
+
+def test_cwd_leading_dot_is_sanitized(cy, run_cli, tmp_path):
+    """A hidden directory (basename starting with '.') can't be a docker --name or
+    --hostname raw — docker rejects it. yolo coerces the leading dot away so cwd
+    mode in such a directory still launches, and appends a stable cwd-hash to the
+    (coerced) container name so it can't collide with a sibling named `dotfiles`."""
+    r, home = _dot_repo(tmp_path, ".dotfiles")
     argv = run_cli(["start"], home=home, cwd=r)
     # the first --name / --hostname on the argv are docker-run's (the container),
     # distinct from the later `claude --name` session flag after the image.
     name = argv[argv.index("--name") + 1]
     host = argv[argv.index("--hostname") + 1]
-    assert name == "dotfiles" and host == "dotfiles"
+    # coerced --name is disambiguated with an 8-char hex suffix; hostname (which
+    # needn't be unique) keeps the clean, readable form.
+    assert re.fullmatch(r"dotfiles-[0-9a-f]{8}", name), name
+    assert host == "dotfiles"
     assert name[0].isalnum() and host[0].isalnum()  # docker's leading-char rule
+
+
+def test_cwd_dot_and_plain_siblings_dont_collide(cy, run_cli, tmp_path):
+    """`foo` and `.foo` both coerce to the base name `foo`; the cwd-hash suffix on
+    the coerced one keeps the two container names distinct (docker --name must be
+    unique, and the run dir is keyed by it)."""
+    plain, home = _dot_repo(tmp_path, "foo")
+    hidden = tmp_path / ".foo"
+    hidden.mkdir()
+    git(hidden, "init", "-q", "-b", "main")
+    git(hidden, "config", "user.email", "t@example.com")
+    git(hidden, "config", "user.name", "Tester")
+    (hidden / "README").write_text("hi\n")
+    git(hidden, "add", ".")
+    git(hidden, "commit", "-qm", "init")
+    plain_name = run_cli(["start"], home=home, cwd=plain)
+    plain_name = plain_name[plain_name.index("--name") + 1]
+    hidden_name = run_cli(["start"], home=home, cwd=hidden)
+    hidden_name = hidden_name[hidden_name.index("--name") + 1]
+    assert plain_name == "foo"  # an already-valid name is left pristine
+    assert re.fullmatch(r"foo-[0-9a-f]{8}", hidden_name), hidden_name
+    assert plain_name != hidden_name
 
 
 def test_bare_is_equivalent_to_start(cy, run_cli, repo):
