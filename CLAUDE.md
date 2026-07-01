@@ -1804,7 +1804,14 @@ request shouldn't silently become a fresh session).
 - The container name is the cwd basename (or `{main_repo_name}-{TOPIC}` for a
   worktree), then suffixed with `-{config-dir-basename}` when
   `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`.
-  Suffixes stack, so the axes compose in the name too.
+  Suffixes stack, so the axes compose in the name too. The final assembled name
+  is run through `_sanitize_container_name` (in `launch_container`, after the
+  suffixes) so a source with characters docker rejects — a cwd basename holding a
+  space/unicode, a leading dot — still yields a valid `--name` rather than a
+  cryptic `docker run` failure: every disallowed character (anything outside
+  `[a-zA-Z0-9_.-]`) becomes `-`, leading `_.-` are stripped (docker requires an
+  alphanumeric first char), and an entirely-invalid name falls back to `yolo`.
+  The run dir, labels, and tmux window all key off this sanitized name.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.

@@ -166,6 +166,53 @@ def test_config_dir_must_exist(cy, run_cli, dirs):
         run_cli(["--config-dir", str(work / "nope")], home=home, cwd=work)
 
 
+# --- container-name sanitization --------------------------------------------
+
+
+def test_sanitize_container_name_helper(cy):
+    # valid names pass through untouched
+    assert cy._sanitize_container_name("work") == "work"
+    assert cy._sanitize_container_name("my-repo_v2.1") == "my-repo_v2.1"
+    # invalid characters become '-'
+    assert cy._sanitize_container_name("my project") == "my-project"
+    assert cy._sanitize_container_name("café@home") == "caf--home"
+    # the first character must be alphanumeric — strip leading _.-
+    assert cy._sanitize_container_name(".config") == "config"
+    assert cy._sanitize_container_name("-lead") == "lead"
+    # an entirely-invalid name falls back rather than yielding an empty --name
+    assert cy._sanitize_container_name("!!!") == "yolo"
+    assert cy._sanitize_container_name("") == "yolo"
+
+
+def test_derived_name_with_spaces_is_sanitized(cy, run_cli, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "my project"
+    for d in (home, work):
+        d.mkdir()
+    argv = run_cli([], home=home, cwd=work)
+    assert container_name(argv) == "my-project"
+
+
+def test_derived_name_leading_dot_is_sanitized(cy, run_cli, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / ".hidden"
+    for d in (home, work):
+        d.mkdir()
+    argv = run_cli([], home=home, cwd=work)
+    assert container_name(argv) == "hidden"
+
+
+def test_sanitization_applies_after_suffixes(cy, run_cli, tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "my project"
+    cfg = tmp_path / "alt cfg"
+    for d in (home, work, cfg):
+        d.mkdir()
+    argv = run_cli(["--config-dir", str(cfg)], home=home, cwd=work)
+    # base and the -{config-dir} suffix are both sanitized in the final name
+    assert container_name(argv) == "my-project-alt-cfg"
+
+
 # --- bedrock ----------------------------------------------------------------
 
 
