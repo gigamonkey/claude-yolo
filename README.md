@@ -216,6 +216,7 @@ yolo resume something                   # re-enter it, continue the session
 yolo shell something                    # open a bash shell in its container
 yolo stop something                     # stop its running session (transcript kept)
 yolo rebase something                   # rebase its branch onto --base (e.g. main's new commits)
+yolo merge something                    # merge its branch into --base, keep the worktree + branch
 yolo diff something                     # git diff its branch against --base (PR-style three-dot)
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
@@ -248,6 +249,18 @@ Verb details:
   actively `working` (or can't be confirmed idle) it's refused unless you pass
   `--force`. A rebase that hits conflicts is left in-progress in the worktree for
   you to `git rebase --continue` or `git rebase --abort`.
+
+- **`merge TOPIC`** merges the worktree's branch into `--base` (default `HEAD`)
+  but **leaves the worktree and branch in place** — the difference from `finish
+  --finish-action merge`, which merges and then removes them. Use it to fold a
+  branch's work into your mainline while you keep iterating on the branch. The
+  merge lands in the main checkout, so `--base` must be what it currently has
+  checked out (`HEAD` always is; a base naming the checked-out branch resolves to
+  the same commit) — a base that isn't checked out is refused rather than merged
+  into the wrong place. A conflict is aborted cleanly and the branch is kept, so
+  nothing is left half-merged. Unlike `rebase`, a running session in the worktree
+  isn't a hazard (the merge only reads the branch's committed tip), so there's no
+  idle guard.
 
 - **`diff TOPIC`** shows `git diff --base...branch` for the worktree — a
   three-dot diff that shows what the branch *adds* since it diverged from `--base`
@@ -438,6 +451,7 @@ the selected row:
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
+| `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (confirms) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row) |
 | `q`     | anything                         | quit the dashboard |

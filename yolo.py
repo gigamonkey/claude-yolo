@@ -2695,6 +2695,7 @@ PARSER.add_argument(
         "browse",
         "finish",
         "rebase",
+        "merge",
         "diff",
         "list",
         "ps",
@@ -2715,11 +2716,13 @@ PARSER.add_argument(
     "config). 'finish' removes a "
     "worktree and requires a TOPIC; 'rebase' rebases a worktree's branch onto "
     "--base (default HEAD), replaying it on top of commits landed on the base "
-    "since it branched (requires a TOPIC). 'diff' shows `git diff base...branch` "
+    "since it branched (requires a TOPIC). 'merge' merges a worktree's branch into "
+    "--base (default HEAD) but leaves the worktree and branch in place, so you can "
+    "keep working (requires a TOPIC). 'diff' shows `git diff base...branch` "
     "for a worktree (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
     "all running yolo containers across repos (see --watch); 'wip' opens a "
     "tmux dashboard for managing everything — running sessions, inactive "
-    "worktrees, and projects — with launch/stop/finish/rebase/diff/browse actions; 'dir' prints a "
+    "worktrees, and projects — with launch/stop/finish/rebase/merge/diff/browse actions; 'dir' prints a "
     "session's directory (a worktree's root with a TOPIC, else the current "
     "directory) for `cd $(yolo dir TOPIC)`; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
@@ -4569,6 +4572,89 @@ def rebase_worktree(
     return "\n".join(msgs)
 
 
+def do_merge(topic: str, home: pathlib.Path, base: str) -> None:
+    """`merge` verb: merge a worktree's branch into `base`, keeping worktree + branch.
+
+    A thin wrapper over `merge_worktree` (the shared core behind the CLI and the
+    dashboard's `m`), like `do_rebase` over `rebase_worktree`. Unlike `finish
+    --finish-action merge`, the worktree and branch are left in place — only the
+    merge happens — so you can keep iterating on the branch and merge again later.
+    """
+    _, main_root, slug = _repo_paths()
+    worktree = home / ".claude-yolo" / "worktrees" / slug / topic
+    print(merge_worktree(worktree, main_root, slug, topic, home, base))
+
+
+def merge_worktree(
+    worktree: pathlib.Path,
+    main_root: pathlib.Path,
+    slug: str,
+    topic: str,
+    home: pathlib.Path,
+    base: str,
+    *,
+    capture: bool = False,
+) -> str:
+    """Merge `worktree`'s branch into `base` in the main checkout; keep both.
+
+    The in-process core behind the `merge` verb and the dashboard's `m` action. The
+    merge runs in `main_root` (the main checkout), so `base` must be what that
+    checkout currently has checked out: the default `HEAD` always is, and a `base`
+    naming the checked-out branch (e.g. `main`) resolves to the same commit. A `base`
+    that isn't checked out (another local branch, or a remote-tracking ref like
+    origin/main) can't be merged into locally without switching branches, so it's
+    refused with guidance rather than silently merging into the wrong branch.
+
+    Distinct from `finish --finish-action merge`, which merges *and then* removes the
+    worktree and deletes the branch: here both stay, so the branch keeps living for
+    more work and later merges. The worktree itself is never touched (only its
+    committed tip is read), so a running session in it is not a hazard — hence no
+    session guard, unlike `rebase`/`finish`.
+
+    On a merge failure (conflicts, or a main checkout too dirty to merge into) the
+    merge is aborted and a `YoloError` is raised, so nothing is left half-merged.
+    With `capture=True` git's output is captured (and folded into the error) rather
+    than streamed — for the dashboard, which can't let git scribble over its frame.
+    """
+    if not worktree.is_dir():
+        raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+    # The merge lands in main_root's checkout, so base must BE that checkout. base
+    # defaults to HEAD (always the checkout); a base naming the checked-out branch
+    # resolves to the same commit. Anything else (an unchecked-out branch, a remote
+    # ref) would merge into the wrong place, so refuse it.
+    head = subprocess.run(
+        ["git", "-C", str(main_root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    base_rev = subprocess.run(
+        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
+        capture_output=True,
+        text=True,
+    )
+    if base_rev.returncode != 0 or not base_rev.stdout.strip():
+        raise YoloError(f"can't resolve base ref '{base}'.")
+    target = _current_branch(main_root) or "the current checkout"
+    if base_rev.stdout.strip() != head:
+        raise YoloError(
+            f"base '{base}' isn't what the main repo has checked out ({target}); "
+            f"`merge` only lands in the checkout, so check out '{base}' in {main_root} first."
+        )
+    kw = {"capture_output": True, "text": True} if capture else {}
+    merge = subprocess.run(["git", "-C", str(main_root), "merge", topic], **kw)
+    if merge.returncode != 0:
+        subprocess.run(["git", "-C", str(main_root), "merge", "--abort"], capture_output=True)
+        detail = "\n" + (merge.stderr.strip() or merge.stdout.strip()) if capture else ""
+        raise YoloError(
+            f"merging '{topic}' into {target} failed (nothing was merged); resolve it "
+            f"manually in {main_root}.{detail}"
+        )
+    note = (
+        " (already up to date)" if capture and "Already up to date" in (merge.stdout or "") else ""
+    )
+    return f"Merged '{topic}' into {target}{note}; the worktree and branch are kept."
+
+
 def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) -> None:
     """`diff` verb: `git diff base...HEAD` for a worktree's branch.
 
@@ -5776,8 +5862,8 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 
 _WIP_HINTS = {
-    "session": "Enter switch · S shell · b browse · s stop · d diff · f/r finish/rebase (idle)",
-    "worktree": "Enter open · N new · R resume-pick · d diff · c config · f finish · r rebase (idle)",
+    "session": "Enter switch · S shell · b browse · s stop · d diff · m merge · f/r finish/rebase (idle)",
+    "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
     "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
@@ -5935,6 +6021,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_finish(kind, p, home, term)
         if key == "r":
             return _wip_rebase(kind, p, home, term)
+        if key == "m":
+            return _wip_merge(kind, p, home, term)
         if key == "d":
             return _wip_diff(kind, p, home, session)
         if key == "c":
@@ -6122,6 +6210,26 @@ def _wip_rebase(kind, p, home, term) -> str:
             p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
         )
     return "rebase applies to worktrees and idle sessions."
+
+
+def _wip_merge(kind, p, home, term) -> str:
+    """`m`: merge a worktree's branch into its base but keep the worktree + branch.
+
+    Unlike `f` (finish), the worktree and branch survive — only the merge happens.
+    The merge reads the branch's committed tip and lands in the main checkout, so a
+    running session in the worktree isn't a hazard (no session guard); it applies to
+    a worktree row or a worktree-backed session row. Base comes from *this
+    worktree's* own config (`_worktree_config`)."""
+    if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
+        if not p.get("main_root"):
+            return "couldn't resolve the worktree's main repo."
+        if not term.confirm(f"Merge '{p['topic']}' into its base (keep the worktree)?"):
+            return "cancelled."
+        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+        return merge_worktree(
+            p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
+        )
+    return "merge applies to worktrees and worktree sessions."
 
 
 def _wip_diff(kind, p, home, session) -> str:
@@ -6805,6 +6913,8 @@ def _main():
         sys.exit("`finish` needs a topic name, e.g. `yolo finish my-topic`.")
     if verb == "rebase" and not topic:
         sys.exit("`rebase` needs a topic name, e.g. `yolo rebase my-topic`.")
+    if verb == "merge" and not topic:
+        sys.exit("`merge` needs a topic name, e.g. `yolo merge my-topic`.")
     if verb == "diff" and not topic:
         sys.exit("`diff` needs a topic name, e.g. `yolo diff my-topic`.")
     if topic and verb not in (
@@ -6815,6 +6925,7 @@ def _main():
         "browse",
         "finish",
         "rebase",
+        "merge",
         "diff",
         "dir",
         "config",
@@ -6962,6 +7073,9 @@ def _main():
         return
     if verb == "rebase":
         do_rebase(topic, home, parsed.base, force=parsed.force)
+        return
+    if verb == "merge":
+        do_merge(topic, home, parsed.base)
         return
     if verb == "diff":
         do_diff(topic, home, parsed.base, stat=parsed.stat)

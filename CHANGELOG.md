@@ -3,6 +3,19 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **New `yolo merge TOPIC` verb (and `m` key in the `wip` dashboard)** merges a
+  worktree's branch into `--base` (default `HEAD`) but leaves the worktree and
+  branch in place — unlike `finish --finish-action merge`, which merges and then
+  removes them. So you can integrate a branch's work into your mainline and keep
+  iterating on it. The merge lands in the main checkout, so the base must be what
+  it has checked out (`HEAD` always is); a base that isn't checked out is refused
+  rather than merged into the wrong branch. A conflict aborts cleanly and keeps the
+  branch. In the dashboard `m` applies to a worktree row or a worktree-backed
+  session row (the merge only reads the branch's committed tip, so a running
+  session isn't a hazard — no idle guard, unlike `f`/`r`).
+
 ## v0.24.1 — 2026-06-27
 
 - **Clones now run before your `yolorc`, not after.** At session start the order is

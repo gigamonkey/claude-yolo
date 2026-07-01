@@ -715,6 +715,43 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     assert frames[-1][1] == "rebased"
 
 
+def test_merge_worktree_confirms_then_calls_core(cy, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cy,
+        "merge_worktree",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "merged",
+    )
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[True])
+    assert calls == [("old", {"capture": True})]
+    assert frames[-1][1] == "merged"
+
+
+def test_merge_cancelled_at_confirm(cy, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cy, "merge_worktree", lambda *a, **k: calls.append(1) or "x")
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[False])
+    assert calls == []  # declined at the confirm prompt
+    assert frames[-1][1] == "cancelled."
+
+
+def test_merge_on_worktree_session_row(cy, monkeypatch):
+    # `m` on a worktree-backed session row merges too (unlike f/r, no idle guard —
+    # the merge only reads the branch's committed tip).
+    calls = []
+    monkeypatch.setattr(
+        cy,
+        "merge_worktree",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append(topic) or "ok",
+    )
+    working = session_item(cy, payload={"state": "working"})
+    sections = {"session": [working], "worktree": [], "project": []}
+    run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[True])
+    assert calls == ["topic"]
+
+
 def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
     # `d` on a worktree row spawns `yolo diff <topic> --base <base>` in a new window;
     # base comes from the worktree's own config (home=None → built-in HEAD here).

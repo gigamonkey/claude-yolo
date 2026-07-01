@@ -684,6 +684,94 @@ def test_rebase_honours_base(cy, run_cli, repo):
     assert not (wt / "second.txt").exists()
 
 
+# --- merge ------------------------------------------------------------------
+
+
+def test_merge_merges_branch_into_main_keeping_worktree(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    topic_head = git(wt, "rev-parse", "HEAD").stdout.strip()
+    run_cli(["merge", "topic"], home=home, cwd=r)
+    # main now contains the branch's work (fast-forward: main HEAD == topic HEAD)…
+    assert git(r, "rev-parse", "HEAD").stdout.strip() == topic_head
+    assert (r / "work.txt").exists()
+    # …and the worktree and branch are still there.
+    assert wt.is_dir()
+    assert git(r, "rev-parse", "--verify", "topic").returncode == 0
+
+
+def test_merge_creates_merge_commit_when_diverged(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    # main diverges too, so the merge can't fast-forward
+    (r / "main.txt").write_text("mainwork")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main work")
+    run_cli(["merge", "topic"], home=home, cwd=r)
+    # a real merge commit with two parents; both sides' files present
+    parents = git(r, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+    assert len(parents) == 3  # commit + 2 parents
+    assert (r / "work.txt").exists() and (r / "main.txt").exists()
+    assert wt.is_dir()  # worktree kept
+
+
+def test_merge_requires_topic(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["merge"], home=home, cwd=r)
+
+
+def test_merge_errors_without_worktree(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit):
+        run_cli(["merge", "ghost"], home=home, cwd=r)
+
+
+def test_merge_conflict_aborts_and_keeps_branch(cy, run_cli, repo):
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    # both branches edit the same file differently → conflict on merge
+    (wt / "README").write_text("topic side\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "topic edit")
+    (r / "README").write_text("main side\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main edit")
+    with pytest.raises(SystemExit):
+        run_cli(["merge", "topic"], home=home, cwd=r)
+    # the merge was aborted (no half-merged state) and the branch survives
+    no_merge = subprocess.run(
+        ["git", "-C", str(r), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    assert no_merge.returncode != 0  # MERGE_HEAD gone → the merge was aborted
+    assert git(r, "rev-parse", "--verify", "topic").returncode == 0
+    assert wt.is_dir()
+
+
+def test_merge_refuses_base_not_checked_out(cy, run_cli, repo):
+    r, home = repo
+    # a base that resolves but isn't the checked-out branch: merge can't land there
+    other = git(r, "rev-parse", "HEAD").stdout.strip()
+    git(r, "branch", "otherbase", other)
+    (r / "main.txt").write_text("mainwork")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main moves on")  # HEAD now != otherbase
+    run_cli(["start", "topic"], home=home, cwd=r)
+    with pytest.raises(SystemExit):
+        run_cli(["merge", "topic", "--base", "otherbase"], home=home, cwd=r)
+
+
 # --- diff -------------------------------------------------------------------
 
 

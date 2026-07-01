@@ -78,6 +78,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py finish fix-auth --finish-action merge    # ...merge the branch into HEAD, then delete it
 ./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
 ./yolo.py rebase fix-auth          # rebase the worktree's branch onto --base (default HEAD)
+./yolo.py merge fix-auth           # merge the worktree's branch into --base, keep the worktree+branch
 ./yolo.py list                     # this repo's worktrees
 ./yolo.py list --all               # every repo's worktrees under ~/.claude-yolo/worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
@@ -93,7 +94,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 `--config-dir`, `--claude-json`, `--ssh-agent`, `--mount`, `--port`, `--tmux` —
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
-(`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`list`/`ps`/`wip`/`dir`/
+(`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`merge`/`diff`/`list`/`ps`/`wip`/`dir`/
 `dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
 `secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
 trailing positional); see [Workflow verbs](#workflow-verbs).
@@ -1211,6 +1212,25 @@ gracefully outside one — there's just no repo slug to label/find by).
   bypass, since `git rebase` needs a clean tree regardless (this is why `force`
   here gates *only* the running-container check, not the dirty check as it does in
   `finish`).
+- **`merge TOPIC`** (`do_merge` → the `merge_worktree` core) — merge a worktree's
+  branch into `base`, but **keep the worktree and branch** (the difference from
+  `finish --finish-action merge`, whose `_finish_merge` merges and then removes the
+  worktree + deletes the branch). The merge runs in the **main checkout**
+  (`git -C <main_root> merge <topic>`), so `base` must be what that checkout has
+  checked out: `base` is resolved to a commit and compared to `HEAD` — the default
+  `HEAD` always matches, a `base` naming the checked-out branch resolves equal, and
+  anything else (an unchecked-out local branch, a remote ref like `origin/main`) is
+  **refused** rather than merged into the wrong place (you'd have to check it out
+  first). No session guard, unlike `rebase`/`finish`: the merge only reads the
+  branch's committed tip and never touches the worktree, so a running session in it
+  isn't a hazard (it applies to a worktree row *or* a worktree-backed session row in
+  `wip`, even a `working` one). A merge failure (conflicts, or a main checkout too
+  dirty) is **aborted** (`git merge --abort`) and raises, so nothing is left
+  half-merged. The core owns the guards and **returns** its message (raising
+  `YoloError`), so the CLI prints it and the dashboard's `m` shows it in the footer —
+  same core+wrapper shape as `rebase`. `capture=True` folds git's output into the
+  error for the dashboard. A terminal verb; `--base` is the same config-backed ref
+  as `rebase`/`finish`/`list`.
 - **`diff TOPIC`** (`do_diff`) — `git -C <worktree> diff <base>...HEAD`, a
   **three-dot** diff against `base` (resolved to a commit in the main checkout
   first, like `rebase`/`list`, so a `HEAD` base is main's tip not the worktree's
@@ -1347,7 +1367,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   session row opens a bash shell in its container (`_wip_shell`: `docker exec -it
   <cid> /bin/bash` in a new `<name>-shell` window, like `yolo shell`), `b` browses a
   forwarded port (prompting if >1), `s`
-  stops, `f` finishes, `r` rebases, `d` on a worktree row (or any worktree-backed
+  stops, `f` finishes, `r` rebases, `m` on a worktree row (or any worktree-backed
+  session row, even a `working` one — the merge only reads the branch's committed
+  tip, so it has no idle guard) **merges** the branch into its base while keeping
+  the worktree + branch (`_wip_merge` → the `merge_worktree` core, confirmed first;
+  base from `_worktree_config`), `d` on a worktree row (or any worktree-backed
   session row, even a `working` one — diff is read-only) spawns `yolo diff
   <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
   `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
@@ -1437,7 +1461,11 @@ Implementation shape:
   session-activity check (taking `slug`/`home`/`force`), the dirty-tree refusal,
   base-resolve, and the rebase itself — so the CLI and the dashboard's `r` enforce
   the same policy; `capture` folds git's output into the result for the dashboard's
-  frame), `browse_session` (from `do_browse`; `_docker_port` now also
+  frame), `merge_worktree` (from `do_merge`; same core+wrapper shape as
+  `rebase_worktree` — merges the branch into `base` in the main checkout, keeping
+  the worktree and branch, guarding that `base` is the checked-out ref and aborting
+  a failed merge; `capture` folds git's output into the error for the dashboard's
+  `m`), `browse_session` (from `do_browse`; `_docker_port` now also
   raises `YoloError`), and `register_project` (from `config --init`). The cores
   **return** their result string rather than printing, so the wrapper prints it
   (CLI) and the dashboard shows it in the footer.
@@ -1452,7 +1480,7 @@ Implementation shape:
   in particular keeps its stdout free of the config
   provenance note). The other
   terminal verbs (`list`, `ps`, `wip`, `tokens`, `forget-token`, `finish`, `rebase`,
-  `setup-token`,
+  `merge`, `diff`, `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
   after the config-dir resolution specifically so it caches the token under the
   right per-dir service name, while `forget-token` is dispatched *before* the
@@ -1528,7 +1556,7 @@ Implementation shape:
   set: `_worktree_dir`/`setup_worktree` for a worktree, or `_repo_slug_or_none()` +
   `cwd.name` for the cwd.
 - Verb-only flags: `--base REF` (config-backed via the `base` key; consumed by
-  `start`, `list`, `finish`, and `rebase`), `--finish-action`/`--finish-remote`
+  `start`, `list`, `finish`, `rebase`, `merge`, and `diff`), `--finish-action`/`--finish-remote`
   (config-backed like `base`, so ungated; consumed by `finish`), `--new`
   (resume, worktree-only), `--force` (`finish`, `rebase`, and `stop` — skips the
   uncommitted-changes guard for `finish`, the not-confirmed-idle running container
@@ -1924,7 +1952,10 @@ dirty-tree refusals; and the session-aware running-container handling — a
 `waiting` session rebases through, `working`/unknown refuse, and `--force`
 overrides — driven by a stamped `.yolo-status` state file read through the
 container's own labels, including that a session under an alternate `--config-dir`
-is still read correctly), the `diff` verb (required-topic/missing-worktree
+is still read correctly), the `merge` verb (a fast-forward and a diverged
+merge-commit case both keeping the worktree + branch, the required-topic/
+missing-worktree refusals, the conflict abort-and-keep, and the
+base-not-checked-out refusal), the `diff` verb (required-topic/missing-worktree
 refusals; the three-dot `base...HEAD` showing branch-only changes, not base's own,
 via a real repo with commits on both; the `--stat` non-tmux fallback printing the
 stat, the empty "No changes", and `--stat`-only-on-diff gating), and `list` (the
@@ -1997,7 +2028,9 @@ there (cancel on empty, reject a non-dir), `S` shell on a session row spawning t
 `docker exec` window (a worktree-row no-op), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
-cores, which own the guard), `d` on a worktree *and* a worktree-backed session row
+cores, which own the guard), `m` on a worktree *and* a worktree-backed session row
+(confirm/cancel, the core stubbed) calling `merge_worktree` with `capture=True`,
+`d` on a worktree *and* a worktree-backed session row
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
 `git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
