@@ -1082,6 +1082,49 @@ def test_start_no_topic_runs_in_cwd(cy, run_cli, repo):
     assert "--continue" not in cmd and "--resume" not in cmd  # fresh
 
 
+def test_docker_safe_name(cy):
+    """Directory basenames coerced into valid docker --name / --hostname strings."""
+    f = cy._docker_safe_name
+    # already-valid names pass through untouched (existing containers keep their name)
+    assert f("repo") == "repo"
+    assert f("my-project_1") == "my-project_1"
+    assert f("my.project") == "my.project"  # a mid-name dot is fine for docker
+    # leading dot/underscore (hidden dirs, dunder dirs) are the reported break
+    assert f(".dotfiles") == "dotfiles"
+    assert f("._foo-") == "foo"  # leading & trailing junk stripped
+    assert f("__pycache__") == "pycache"  # leading & trailing underscores stripped
+    # stray characters become hyphens
+    assert f("my project!") == "my-project"
+    # nothing usable, or under docker's 2-char minimum, falls back
+    assert f(".") == "workspace"
+    assert f("...") == "workspace"
+    assert f("a") == "workspace"
+    assert f("", fallback="x") == "x"
+
+
+def test_cwd_leading_dot_is_sanitized(cy, run_cli, tmp_path):
+    """A hidden directory (basename starting with '.') can't be a docker --name or
+    --hostname raw — docker rejects it. yolo strips the leading dot so cwd mode in
+    such a directory still launches."""
+    r = tmp_path / ".dotfiles"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "Tester")
+    (r / "README").write_text("hi\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "init")
+    home = tmp_path / "home"
+    home.mkdir()
+    argv = run_cli(["start"], home=home, cwd=r)
+    # the first --name / --hostname on the argv are docker-run's (the container),
+    # distinct from the later `claude --name` session flag after the image.
+    name = argv[argv.index("--name") + 1]
+    host = argv[argv.index("--hostname") + 1]
+    assert name == "dotfiles" and host == "dotfiles"
+    assert name[0].isalnum() and host[0].isalnum()  # docker's leading-char rule
+
+
 def test_bare_is_equivalent_to_start(cy, run_cli, repo):
     r, home = repo
     bare = run_cli([], home=home, cwd=r)

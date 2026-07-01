@@ -1419,6 +1419,22 @@ def _cwd_slug(cwd) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
 
 
+def _docker_safe_name(name: str, fallback: str = "workspace") -> str:
+    """Coerce a directory basename into a valid Docker `--name` / `--hostname`.
+
+    Docker container names must match `[a-zA-Z0-9][a-zA-Z0-9_.-]+` and a hostname
+    likewise can't start with a dot, so a cwd whose basename starts with a `.` (a
+    hidden directory like `.dotfiles`) or a `_`, or holds other stray characters,
+    can't be used raw — docker refuses the run with an "invalid container name"
+    error. Replace disallowed characters with `-`, strip leading/trailing `._-`
+    (e.g. the dot of a hidden dir), and fall back to a constant when nothing usable
+    is left or the result is under docker's two-character minimum. A no-op for the
+    already-valid names that reach it, so existing containers keep their name.
+    """
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]", "-", name).strip("._-")
+    return cleaned if len(cleaned) >= 2 else fallback
+
+
 def _has_resumable_session(host_claude_dir, cwd) -> bool:
     """Whether a resumable Claude transcript exists for `cwd` under the config dir.
 
@@ -3853,6 +3869,11 @@ def launch_container(
         container = f"{container}-{pathlib.Path(config_dir).resolve().name}"
     if parsed.auth == "bedrock":
         container = f"{container}-{parsed.aws_profile or 'bedrock'}"
+    # Coerce the assembled name into something docker will accept (a cwd or repo
+    # basename starting with a dot/underscore, or holding stray characters, is
+    # otherwise rejected). Done after the suffixes so any component is covered, and
+    # before the run-dir keying below so the GC still matches on the final name.
+    container = _docker_safe_name(container)
 
     # A container of this name already running means a live session for this
     # worktree/cwd — you can't launch a second with the same name (docker forbids
@@ -3901,9 +3922,11 @@ def launch_container(
         str(cwd),
         "-v",
         f"{cwd}:{cwd}",
-        # Hostname set to working dir basename so Claude Code status line shows project name without git
+        # Hostname set to working dir basename so Claude Code status line shows
+        # project name without git (sanitized: a hidden-dir basename like `.foo`
+        # isn't a valid hostname either).
         "--hostname",
-        cwd.name,
+        _docker_safe_name(cwd.name),
         # A deterministic marker that this is a yolo container, so anything inside
         # (Claude, scripts, hooks) can tell — e.g. to commit freely on the current
         # branch, since the worktree/branch is already the unit of isolation. Its

@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **cwd sessions in a hidden directory now launch.** A current-directory session
+  whose folder basename starts with a `.` (e.g. `~/.dotfiles`) or `_`, or holds
+  stray characters, is now sanitized into a valid docker `--name`/`--hostname`
+  (the leading dot is stripped) instead of failing with docker's "invalid
+  container name" error.
+
 - **New `yolo merge TOPIC` verb (and `m` key in the `wip` dashboard)** merges a
   worktree's branch into `--base` (default `HEAD`) but leaves the worktree and
   branch in place — unlike `finish --finish-action merge`, which merges and then
