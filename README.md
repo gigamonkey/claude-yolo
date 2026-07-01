@@ -1423,6 +1423,12 @@ file-based credential fallback so they never touch a real keyring), so they asse
 on the `docker run` command the script *would* build without touching the host or
 launching anything.
 
+For the deep, feature-by-feature internals — how auth, secrets, the config
+layering, the `wip` dashboard, tmux mode, the worktree verbs, and the run-dir GC
+actually work, plus the per-file test coverage map — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). `CLAUDE.md` is the lean overview loaded into
+Claude Code sessions.
+
 ## Provenance
 
 This started life as [Michal Migurski's
