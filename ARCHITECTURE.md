@@ -1498,7 +1498,8 @@ Implementation shape:
   malformed port spec can't break `list`/`finish`/`config`.
 - **`launch_container`** is the single assembly path shared by every launch
   (extracted from the old inline `main`): it first finalizes the container name
-  (the `-{config}`/`-{profile}` suffixes, up front) and **GCs + creates the
+  (the `-{config}`/`-{profile}` suffixes, then the coerce + live-conflict pick —
+  see the container-naming bullet below) and **GCs + creates the
   per-session run dir** (keyed by that name; see the run-dir section), then
   assembles mounts (cwd + the extra `--mount` dirs), ssh-agent block, the
   credential/config/auth blocks (staging creds into the run dir; oauth-token mode
@@ -1555,7 +1556,10 @@ Implementation shape:
   `shell`/`finish`/`list`, by `yolo.cwd` for a plain cwd `shell`. The cwd filter is
   what disambiguates a current-directory container from this repo's worktree
   containers (they share a repo slug but run under different paths). Robust to the
-  `-{config}`/`-{profile}` name suffixes.
+  `-{config}`/`-{profile}` suffixes *and* the live-conflict hash suffix — the label
+  is the identity, the name isn't. `_running_container_name` (same query, `{{.Names}}`
+  instead of `{{.ID}}`) returns the container's actual name, which the already-running
+  guard needs because the name isn't recomputable (see the container-naming bullet).
 - **Verb dispatch / topic-optionality** (`main`). `finish` without a `TOPIC` errors;
   `start`/`resume`/`shell` without one run in the cwd. A bare invocation (no verb) is
   normalized to `start`. The single launch path then branches on whether a `TOPIC` is
@@ -1599,21 +1603,22 @@ The mechanics, all funneled through two functions:
   started outside tmux mode), it spawns anyway and lets docker report the
   conflict in the window.
 - **The already-running guard** (in `launch_container`, *before* `_build_image`,
-  shared by both modes — same `running_container_for` query). A running container
-  of this name means a live session for the worktree/cwd; you can't launch a
-  second with the same name, so resuming/starting one "on top" is never valid.
-  Handle it up front (so we never do the now-pointless, possibly-slow image build
-  and then fail): **non-tmux** `sys.exit`s with guidance (switch to the terminal
-  it's running in, or exit it and resume; `yolo shell` for another view) rather
-  than building and dying on docker's raw name conflict. **tmux** instead
-  **switches to the existing window** (resuming a live session = going back to it)
-  and **warns** that the reused container keeps the image it was started with, so
-  a changed Dockerfile / rebuilt image won't apply until the session is exited and
-  resumed — the "it built a new image but launched the old one" surprise. The tmux
-  no-window fall-through (container started outside tmux) still builds + spawns and
-  lets docker report the conflict, unchanged. (Terminal verbs and `shell`-into-
-  running are exempt: `shell` *wants* to attach to a running container, handled by
-  the `docker exec` path in `main` before this is reached.)
+  shared by both modes). It looks up the session for this worktree/cwd by label and
+  reads its actual name (`_running_container_name`); a live one means you can't
+  launch a second, so resuming/starting one "on top" is never valid. Handle it up
+  front (so we never do the now-pointless, possibly-slow image build and then fail):
+  **non-tmux** `sys.exit`s with guidance (switch to the terminal it's running in, or
+  exit it and resume; `yolo shell` for another view) rather than building and dying
+  on docker's raw name conflict. **tmux** instead **switches to the existing window**
+  (resuming a live session = going back to it) and **warns** that the reused
+  container keeps the image it was started with, so a changed Dockerfile / rebuilt
+  image won't apply until the session is exited and resumed — the "it built a new
+  image but launched the old one" surprise. The window is found by that actual name
+  (not a recomputed one — the live-conflict name isn't a pure function of the
+  directory); the tmux no-window fall-through (container started outside tmux) spawns
+  under that same name so docker reports the conflict, unchanged. (Terminal verbs and
+  `shell`-into-running are exempt: `shell` *wants* to attach to a running container,
+  handled by the `docker exec` path in `main` before this is reached.)
 - **`_launch_in_tmux`** ensures the session exists (`_ensure_tmux_session` —
   a fresh one is created detached with window 0 running the `yolo wip
   --_dashboard` dashboard, re-invoked via `_self_invocation`: sys.argv[0]
@@ -1634,10 +1639,12 @@ The mechanics, all funneled through two functions:
 
 Details that matter:
 
-- **Window names are container names** (already unique among running
-  containers, suffixes included); the exec'd-shell windows get a
-  `-shell` suffix and never reuse (docker exec can't conflict — a second
-  `yolo shell` deliberately opens a second window).
+- **Window names are container names** (kept distinct by the live-conflict naming —
+  the hash suffix falls out when the friendly name is already held, and
+  `_name_available` treats a live window as holding the name too, so two sessions
+  never share a window name); the exec'd-shell windows get a `-shell` suffix and
+  never reuse (docker exec can't conflict — a second `yolo shell` deliberately opens
+  a second window).
 - **Window names are pinned** so the status bar keeps showing which
   container/topic each window is. Every window yolo creates (the dashboard and
   each session) gets `automatic-rename off` + `allow-rename off`
@@ -1835,10 +1842,39 @@ request shouldn't silently become a fresh session).
   be the literal `1`; presence-based checks are unaffected, an exact `= 1` check
   would need updating.) Distinct from `YOLO_PS1` (a *presentation* var the
   `.bashrc` adopts for the prompt); `YOLO_SESSION` is the semantic flag.
-- The container name is the cwd basename (or `{main_repo_name}-{TOPIC}` for a
-  worktree), then suffixed with `-{config-dir-basename}` when
-  `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`.
-  Suffixes stack, so the axes compose in the name too.
+- **Container naming (`launch_container`).** The base is the cwd basename (or
+  `{main_repo_name}-{TOPIC}` for a worktree), suffixed with `-{config-dir-basename}`
+  when `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`
+  (suffixes stack, so the axes compose in the name too). That base is then run
+  through `_docker_safe_name` into the **friendly name** (`abbrev`): docker requires
+  a `--name`/`--hostname` matching `[a-zA-Z0-9][a-zA-Z0-9_.-]+`, so a basename that
+  starts with a `.`/`_` (a hidden dir) or holds stray characters is coerced —
+  disallowed characters become `-`, leading/trailing `._-` are stripped, and a name
+  left empty or under docker's 2-char minimum falls back to `workspace`. Without
+  this, `yolo` in `~/.dotfiles` died on docker's "invalid container name".
+
+  Two directories can want the same `abbrev` — `~/proj/bar` and `~/proj/.bar` both
+  coerce to `bar`, and even two plain same-basename dirs (`~/work/api`, `~/side/api`)
+  share `api`. Since docker's `--name` must be unique (and the per-session run dir is
+  keyed by it), each directory therefore has a **second name**, the per-cwd
+  `abbrev-{hash8(cwd)}`. A **fresh** launch claims `abbrev` unless it is *already
+  held by a live session*, in which case it falls back to the hashed name so the two
+  coexist. "Held" is checked across **both** namespaces the name lives in
+  (`_name_available`): a docker container of that name (running *or* stopped — either
+  blocks `docker run --name`), and — under `--tmux` — a window of that name (a window
+  outlives its `--rm` container via the keep-open-on-failure wrapper, so a crashed
+  session's stale window must still block a same-named newcomer, or it would shadow
+  it on the next switch). Only a real, live collision uglifies the name — so with
+  nothing conflicting, `~/.dotfiles` runs as the clean `dotfiles`.
+
+  Because the chosen name is a function of *live state*, not just the directory, it
+  can't be recomputed reliably later: once `.bar` has taken `bar-<hash>` (because
+  `bar` was up) and `bar` exits, recomputing would pick the now-free `bar` and lose
+  track of the running container. So **resume never recomputes** — the already-running
+  guard finds the session by label and reads the container's *actual* `--name`
+  (`_running_container_name`) for the tmux-window switch and messages. The
+  **`--hostname`** is the coerced `abbrev` (never the hashed form): it needn't be
+  unique, and it's only the Claude Code status-line label.
 - The `# https://claude.ai/chat/...` URL on line 2 and the upstream gist
   reference in git history are the script's provenance — this started as
   Migurski's gist.
@@ -1854,11 +1890,12 @@ never touch the host or Docker: `tests/conftest.py`'s `run_cli` fixture stubs
 `build_docker_image`, `ensure_logged_in`, `extract_credentials`,
 `ensure_oauth_token`, `git_identity_args`, and `os.execvp` (and points `_run_dir`
 at the test home + no-ops the docker-ps `_gc_run_dir`), then asserts on the
-captured `docker run` argv. It also defaults `running_container_for` to "nothing
-running" (the launch-time already-running guard does a `docker ps`) — but only
-when a test hasn't set its own stub, so the tmux/verb tests that patch it to a
-truthy id before calling `run_cli` still win (identity check against the
-freshly-loaded module's original). `test_config.py` covers config parsing/merging
+captured `docker run` argv. It also defaults the launch-time docker-ps lookups to
+"nothing running / name free" — `running_container_for`, `_running_container_name`
+(the already-running guard), and `_running_container_names` (the fresh-launch
+name-availability check) — but only when a test hasn't set its own stub, so the
+tmux/verb tests that patch them to a truthy value before calling `run_cli` still win
+(identity check against the freshly-loaded module's original). `test_config.py` covers config parsing/merging
 (`~/.yolo.json` + `projects.json`), mount-spec parsing, the stale-state
 warnings, the `dockerfile` config key (parse + `config`-verb persist/validate),
 the `finish-action`/`finish-remote` keys (parse, the `FINISH_CHOICES` validation,
