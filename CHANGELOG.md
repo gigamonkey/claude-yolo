@@ -8,11 +8,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 - **cwd sessions in a hidden directory now launch.** A current-directory session
   whose folder basename starts with a `.` (e.g. `~/.dotfiles`) or `_`, or holds
   stray characters, is now coerced into a valid docker `--name`/`--hostname`
-  instead of failing with docker's "invalid container name" error. When a name has
-  to be coerced, its container name gets a short stable hash of the directory
-  appended so a coerced name (`.foo` → `foo`) can't collide with a sibling named
-  plainly (`foo`) on docker's unique `--name`; already-valid directory names are
-  left untouched.
+  instead of failing with docker's "invalid container name" error.
+
+- **Session names only get uglified on a real conflict.** A container is named for
+  its directory (the short, friendly form); if a *different* directory's session is
+  already live under that name — either a running container or, under `--tmux`, a
+  still-open window that outlived its container — the newcomer falls back to a
+  per-directory hashed name (`foo` → `foo-3f9a1c2d`) so the two coexist. With no
+  live conflict the name stays clean, so `~/.dotfiles` runs as `dotfiles` and two
+  same-basename directories (`~/work/api`, `~/side/api`) no longer collide. Resume
+  reads the running container's actual name rather than recomputing it, so switching
+  back to a session is reliable even after the conflicting sibling has exited.
 
 - **New `yolo merge TOPIC` verb (and `m` key in the `wip` dashboard)** merges a
   worktree's branch into `--base` (default `HEAD`) but leaves the worktree and

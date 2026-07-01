@@ -831,7 +831,7 @@ def test_resume_refuses_when_cwd_session_running(cy, run_cli, dirs, monkeypatch)
     # A live session for this dir → can't launch a second container with the same
     # name; non-tmux refuses up front, before the (now-pointless) image build.
     home, work = dirs
-    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "abc123")
+    monkeypatch.setattr(cy, "_running_container_name", lambda *a, **k: "work")
     built = []
     monkeypatch.setattr(
         cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"

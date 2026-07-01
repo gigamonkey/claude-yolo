@@ -265,7 +265,8 @@ def test_tmux_needs_tmux_on_path(cy, run_cli, tmux, dirs, monkeypatch):
 
 def test_tmux_reuses_window_for_running_container(cy, run_cli, tmux, dirs, monkeypatch):
     home, work = dirs
-    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    # the guard reads the running container's actual name; its tmux window carries it
+    monkeypatch.setattr(cy, "_running_container_name", lambda *a, **k: "work")
     tmux.has_session = True
     tmux.windows.append(("@3", "work"))
     argv = run_cli(["resume", "--tmux"], home=home, cwd=work)
@@ -277,10 +278,10 @@ def test_tmux_reuses_window_for_running_container(cy, run_cli, tmux, dirs, monke
 def test_tmux_spawns_when_container_runs_but_no_window_matches(
     cy, run_cli, tmux, dirs, monkeypatch
 ):
-    # container started outside tmux mode: nothing to reuse, spawn and let
-    # docker report the name conflict inside the (kept-open) window
+    # container started outside tmux mode: nothing to reuse, spawn under its real
+    # name and let docker report the name conflict inside the (kept-open) window
     home, work = dirs
-    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    monkeypatch.setattr(cy, "_running_container_name", lambda *a, **k: "work")
     tmux.has_session = True
     run_cli(["resume", "--tmux"], home=home, cwd=work)
     assert len(tmux.named("new-window")) == 1
@@ -291,7 +292,7 @@ def test_tmux_reuse_skips_image_build_and_warns(cy, run_cli, tmux, dirs, monkeyp
     # pointless — skip the build and warn that a changed Dockerfile won't apply
     # until the session is restarted (the reported "built it but ran the old one").
     home, work = dirs
-    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    monkeypatch.setattr(cy, "_running_container_name", lambda *a, **k: "work")
     built = []
     monkeypatch.setattr(
         cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"
@@ -306,7 +307,7 @@ def test_tmux_reuse_skips_image_build_and_warns(cy, run_cli, tmux, dirs, monkeyp
 def test_tmux_no_window_still_builds(cy, run_cli, tmux, dirs, monkeypatch):
     # Running but no window (started outside tmux): fall through to build + spawn.
     home, work = dirs
-    monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: "deadbeef1234")
+    monkeypatch.setattr(cy, "_running_container_name", lambda *a, **k: "work")
     built = []
     monkeypatch.setattr(
         cy, "_build_image", lambda parsed, cwd: built.append(cwd) or "claude-yolo:x"

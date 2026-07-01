@@ -914,17 +914,37 @@ def _session_run_dir(container: str) -> pathlib.Path:
     return d
 
 
-def _running_container_names() -> set[str]:
-    """Names of all running docker containers (for the run-dir GC). {} on trouble."""
+def _running_container_names(*, include_stopped: bool = False) -> set[str]:
+    """Names of docker containers — running, or *all* with include_stopped. {} on
+    trouble. The GC wants running only; name-collision avoidance wants all, since a
+    stopped container's name still blocks `docker run --name`."""
+    args = ["docker", "ps", "--format", "{{.Names}}"]
+    if include_stopped:
+        args.insert(2, "-a")
     try:
-        result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True
-        )
+        result = subprocess.run(args, capture_output=True, text=True)
     except FileNotFoundError:
         return set()
     if result.returncode != 0:
         return set()
     return set(result.stdout.split())
+
+
+def _name_available(name: str, tmux_session: str | None) -> bool:
+    """Whether `name` is free to claim as a fresh session's container --name.
+
+    Taken if any docker container already has it (docker --name must be unique, even
+    against a stopped one) or — under tmux — a window of that name already exists.
+    The two namespaces can disagree: a window outlives its --rm container via the
+    keep-open-on-failure wrapper, so a crashed session's stale window would otherwise
+    shadow a same-named newcomer on the next resume/switch. Checking both is what
+    lets `~/proj/bar` and `~/proj/.bar` (both wanting `bar`) coexist safely.
+    """
+    if name in _running_container_names(include_stopped=True):
+        return False
+    if tmux_session and _find_tmux_window(tmux_session, name) is not None:
+        return False
+    return True
 
 
 def _gc_run_dir() -> None:
@@ -3254,6 +3274,29 @@ PARSER.add_argument(
 )
 
 
+def _yolo_ps_first(
+    slug: str | None, topic: str | None, cwd: pathlib.Path | None, fmt: str
+) -> str | None:
+    """First `docker ps` value (formatted by `fmt`) of a yolo container matching the
+    repo / worktree / cwd labels, or None. Shared by the id and name lookups."""
+    filters = []
+    if slug:
+        filters += ["--filter", f"label=yolo.repo={slug}"]
+    if topic:
+        filters += ["--filter", f"label=yolo.worktree={topic}"]
+    if cwd:
+        filters += ["--filter", f"label=yolo.cwd={cwd}"]
+    try:
+        out = subprocess.run(
+            ["docker", "ps", *filters, "--format", fmt],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except FileNotFoundError:
+        return None
+    return out.splitlines()[0] if out else None
+
+
 def running_container_for(
     slug: str | None, topic: str | None = None, *, cwd: pathlib.Path | None = None
 ) -> str | None:
@@ -3265,22 +3308,22 @@ def running_container_for(
     container (a worktree runs under its own path, so the cwd label disambiguates the
     two even though they share a repo slug).
     """
-    filters = []
-    if slug:
-        filters += ["--filter", f"label=yolo.repo={slug}"]
-    if topic:
-        filters += ["--filter", f"label=yolo.worktree={topic}"]
-    if cwd:
-        filters += ["--filter", f"label=yolo.cwd={cwd}"]
-    try:
-        out = subprocess.run(
-            ["docker", "ps", *filters, "--format", "{{.ID}}"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except FileNotFoundError:
-        return None
-    return out.splitlines()[0] if out else None
+    return _yolo_ps_first(slug, topic, cwd, "{{.ID}}")
+
+
+def _running_container_name(
+    slug: str | None, topic: str | None = None, *, cwd: pathlib.Path | None = None
+) -> str | None:
+    """The docker --name of a running yolo container for this repo/cwd, or None.
+
+    Same label match as running_container_for, but returns the name rather than the
+    id. A fresh session's name is chosen from live availability at launch (a plain
+    basename when free, a per-cwd hashed name when a same-named sibling holds it), so
+    it is *not* a pure function of the directory — resume must read the actual name
+    off the running container (its tmux window carries that name) instead of
+    recomputing it, which could differ once the conflicting sibling has exited.
+    """
+    return _yolo_ps_first(slug, topic, cwd, "{{.Names}}")
 
 
 def _read_settings_hooks(config_dir: str | None, home: pathlib.Path) -> dict:
@@ -3860,45 +3903,33 @@ def launch_container(
     # .git to the main repo, matching the projects.json key wip groups by.
     _record_recent_project(home, _project_key(cwd))
 
-    # Finalize the container name up front (the -{config}/-{profile} suffixes the
-    # auth/config blocks below would otherwise tack on), because the per-session
-    # run dir is keyed by the *final* name so the docker-ps GC can match it.
+    # Assemble the base name (the -{config}/-{profile} suffixes the auth/config
+    # blocks below would otherwise tack on), then coerce it into something docker
+    # accepts (a cwd/repo basename starting with a dot/underscore, or holding stray
+    # characters, is otherwise rejected). `abbrev` is the short, friendly form.
     config_dir = parsed.config_dir
-    container = container_base
+    base = container_base
     if config_dir:
-        container = f"{container}-{pathlib.Path(config_dir).resolve().name}"
+        base = f"{base}-{pathlib.Path(config_dir).resolve().name}"
     if parsed.auth == "bedrock":
-        container = f"{container}-{parsed.aws_profile or 'bedrock'}"
-    # Coerce the assembled name into something docker will accept (a cwd or repo
-    # basename starting with a dot/underscore, or holding stray characters, is
-    # otherwise rejected). Done after the suffixes so any component is covered, and
-    # before the run-dir keying below so the GC still matches on the final name.
-    safe = _docker_safe_name(container)
-    if safe != container:
-        # The name had to be coerced, which means a sibling directory that differs
-        # only in the stripped characters (e.g. `.foo` vs `foo`) would coerce to the
-        # *same* name and collide — docker's --name must be unique, and the run dir
-        # is keyed by it. Append a short stable hash of the cwd so coerced names stay
-        # unique per directory. Deterministic (a pure function of cwd), so resume and
-        # the run-dir GC recompute the identical name. Only coerced names pay this;
-        # an already-valid directory name is left pristine.
-        safe = f"{safe}-{hashlib.sha256(str(cwd).encode()).hexdigest()[:8]}"
-    container = safe
+        base = f"{base}-{parsed.aws_profile or 'bedrock'}"
+    abbrev = _docker_safe_name(base)
 
-    # A container of this name already running means a live session for this
-    # worktree/cwd — you can't launch a second with the same name (docker forbids
-    # it), so resuming/starting one "on top" is never valid. Handle it up front,
-    # before the (now-pointless) image build, rather than building and then failing:
-    #   - tmux: switch to its existing window — "resuming" a live session means
-    #     going back to it, not starting another. Warn that the running container
-    #     keeps the image it was started with, so a changed Dockerfile / rebuilt
-    #     image won't apply until it's exited and resumed. (Running but *no* window —
-    #     started outside tmux — falls through to spawn + let docker report the name
-    #     conflict in the window, as before.)
-    #   - non-tmux: there's no window to switch to (it's a live `-it` process in
-    #     another terminal), so refuse with guidance instead of building and then
-    #     dying on docker's raw name-conflict error.
-    if running_container_for(slug, worktree_name, cwd=None if worktree_name else cwd):
+    # A live session for this worktree/cwd already? Find it by label (independent of
+    # its name) and read the *actual* --name it runs under — the name is picked from
+    # live availability below, so it can't be reliably recomputed here. Starting a
+    # second "on top" is never valid, so handle it up front, before the (pointless)
+    # image build:
+    #   - tmux: switch to its existing window — "resuming" a live session means going
+    #     back to it. Warn that it keeps the image it was started with, so a changed
+    #     Dockerfile won't apply until it's exited and resumed. (Running but *no*
+    #     window — started outside tmux — falls through to spawn under the same name
+    #     so docker reports the conflict in the window, as before.)
+    #   - non-tmux: no window to switch to (it's a live `-it` process in another
+    #     terminal), so refuse with guidance rather than dying on docker's raw error.
+    existing = _running_container_name(slug, worktree_name, cwd=None if worktree_name else cwd)
+    if existing:
+        container = existing
         target = f"worktree '{worktree_name}'" if worktree_name else "this directory"
         if parsed.tmux:
             print(
@@ -3919,6 +3950,17 @@ def launch_container(
                 f"it's running in, or exit it and resume again. For another view into "
                 f"it without disturbing it, use `{shell_hint}`."
             )
+    else:
+        # Fresh launch: claim the friendly `abbrev` unless a *different* directory's
+        # live session already holds it — in docker's namespace, or (under tmux) as a
+        # still-open window. Only then fall back to a per-cwd hashed name so the two
+        # coexist. So a hidden dir like `~/.dotfiles` runs as the clean `dotfiles`
+        # unless a plain `dotfiles` session is actually up at the same time. The run
+        # dir is keyed by this final name so the docker-ps GC can match it.
+        if _name_available(abbrev, parsed.tmux_session if parsed.tmux else None):
+            container = abbrev
+        else:
+            container = f"{abbrev}-{hashlib.sha256(str(cwd).encode()).hexdigest()[:8]}"
 
     # Reclaim leftover run dirs of finished sessions, then make this session's dir
     # (mode 700). It holds the chmod-600 credential/secret files bind-mounted for
