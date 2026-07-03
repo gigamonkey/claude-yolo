@@ -1673,6 +1673,19 @@ Details that matter:
   session created before this feature heals itself without a `kill-server`. A
   *personal* session targeted via `--tmux-session` has no dashboard window, so its
   title config is never touched.
+- **`prefix y` jumps to the wip dashboard by name** (`_set_tmux_wip_binding`,
+  asserted alongside the title options — same create-and-heal condition, same
+  personal-session exemption). The dashboard starts as window 0 but windows move
+  and renumber, so the binding is `select-window -t :=yolo-wip` — the shape of
+  tmux's stock number bindings (`select-window -t :=0`), keyed by the pinned
+  window *name* instead of an index. tmux bindings are server-global (no
+  per-session bind-key), so the command is session-relative (`:` = the pressing
+  client's current session, `=` = exact match): it lands on the dashboard in any
+  yolo-owned session and merely flashes "can't find window" in a personal one. A
+  user's own `prefix y` binding is respected — `list-keys -T prefix y` showing a
+  command that doesn't mention `yolo-wip` means it isn't ours, so it's left
+  untouched (an unbound key makes list-keys fail, which falls through to
+  binding).
 - The window command is `shlex.join(run_cmd)` (the argv contains `--settings`
   JSON and the OAuth token — quoting is load-bearing) wrapped by
   `_tmux_window_command`: on a **genuine-failure** exit it prints the code and

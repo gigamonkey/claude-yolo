@@ -3541,6 +3541,10 @@ def _ps1_env_args(cwd: pathlib.Path, worktree_name: str | None) -> list[str]:
 
 TMUX_DASHBOARD_WINDOW = "yolo-wip"
 
+# Prefix key bound to jump to the wip dashboard window ("y" for yolo; unbound in
+# stock tmux, so there's nothing default to shadow).
+TMUX_WIP_KEY = "y"
+
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
     """Run one tmux command with output captured; callers branch on returncode."""
@@ -3639,12 +3643,14 @@ def _ensure_tmux_session(session: str) -> None:
         # untouched.
         if _find_tmux_window(session, TMUX_DASHBOARD_WINDOW):
             _set_tmux_title_options(session)
+            _set_tmux_wip_binding()
         return
     dashboard = _tmux_window_command([_self_invocation(), "wip", "--_dashboard"])
     res = _tmux("new-session", "-d", "-s", session, "-n", TMUX_DASHBOARD_WINDOW, dashboard)
     if res.returncode != 0:
         sys.exit(f"tmux new-session failed: {res.stderr.strip()}")
     _set_tmux_title_options(session)
+    _set_tmux_wip_binding()
     _pin_tmux_window_name(f"={session}:{TMUX_DASHBOARD_WINDOW}")
 
 
@@ -3676,6 +3682,38 @@ def _set_tmux_title_options(session: str) -> None:
     )
     _tmux("set-option", "-t", session, "set-titles", "on")
     _tmux("set-option", "-t", session, "set-titles-string", title)
+
+
+def _set_tmux_wip_binding() -> None:
+    """Bind `prefix y` to jump to the wip dashboard window, wherever it sits.
+
+    The dashboard is created as window 0, but windows renumber and move, so
+    "prefix 0 reaches wip" is a coincidence, not a contract. This selects the
+    window *by its pinned name* — the same shape as tmux's stock number bindings
+    (`select-window -t :=0`), keyed by name instead of index.
+
+    tmux bindings are server-global (there is no per-session bind-key), so the
+    bound command is deliberately session-relative: `:` targets the pressing
+    client's current session and `=` demands an exact name match. In any
+    yolo-owned session it lands on the dashboard regardless of index; in a
+    personal session it just flashes "can't find window" in the status line. A
+    key the user has bound themselves is respected: an existing binding whose
+    command doesn't mention the dashboard window isn't ours, so it's left alone
+    (an unbound key makes list-keys fail, which falls through to binding; ours
+    is re-bound, keeping the heal-on-launch idempotence of the title options).
+    """
+    existing = _tmux("list-keys", "-T", "prefix", TMUX_WIP_KEY)
+    if existing.returncode == 0 and TMUX_DASHBOARD_WINDOW not in existing.stdout:
+        return
+    _tmux(
+        "bind-key",
+        "-T",
+        "prefix",
+        TMUX_WIP_KEY,
+        "select-window",
+        "-t",
+        f":={TMUX_DASHBOARD_WINDOW}",
+    )
 
 
 def _launch_in_tmux(

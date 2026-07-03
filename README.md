@@ -380,6 +380,11 @@ What `--tmux` does on each launch:
 - Focuses it: outside tmux your terminal execs into `tmux attach` (so it
   becomes the tmux client, much as the default mode becomes the session);
   inside tmux your current client just switches to the new window.
+- Binds **`prefix y`** ("y" for yolo — unbound in stock tmux) to jump to the
+  `wip` dashboard window. The dashboard starts as window 0, but windows move
+  and renumber, so the binding selects it *by name* and always lands on it. If
+  you've bound `prefix y` to something of your own, yolo leaves your binding
+  alone.
 
 If the matching container is already running — say you `yolo resume foo` twice
 — you can't launch a second one with the same name, so yolo handles it up front
@@ -415,7 +420,8 @@ for one run.
 `yolo wip` opens a full-screen, color-coded, tmux-resident dashboard for managing
 *everything* yolo — it's the window-0 dashboard a `--tmux` session opens onto, and
 you can jump to it any time with `yolo wip` (it ensures the shared session exists
-and focuses the dashboard window). It refreshes every 2 seconds like `ps --watch`,
+and focuses the dashboard window) or, from inside the tmux session, with
+**`prefix y`** (which finds the dashboard by name, wherever it sits). It refreshes every 2 seconds like `ps --watch`,
 in three sections:
 
 - **Sessions** — every running yolo session across all repos, in one table

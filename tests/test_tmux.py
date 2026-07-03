@@ -34,6 +34,7 @@ class FakeTmux:
         self.session_name = "yolo"
         self.windows = []  # (window_id, window_name[, session_name])
         self.attached = False  # a client is attached to the session
+        self.prefix_keys = {}  # key -> its `list-keys` output line
         self._next = 10
 
     def __call__(self, *args):
@@ -64,6 +65,12 @@ class FakeTmux:
             return cp(0, out="/dev/ttys001\n" if self.attached else "")
         if verb == "display-message":
             return cp(0, out=self.session_name + "\n")
+        if verb == "list-keys":  # list-keys -T <table> <key>
+            line = self.prefix_keys.get(args[-1])
+            return cp(0, out=line + "\n") if line else cp(1, err=f"unknown key: {args[-1]}")
+        if verb == "bind-key":  # bind-key -T <table> <key> <command...>
+            self.prefix_keys[args[3]] = " ".join(args)
+            return cp(0)
         return cp(0)  # select-window / switch-client
 
     def _session(self, window):
@@ -195,6 +202,40 @@ def test_tmux_new_session_enables_terminal_title(cy, run_cli, tmux, dirs):
     assert "shell:" in title and "session:" in title
 
 
+def test_tmux_new_session_binds_wip_key(cy, run_cli, tmux, dirs):
+    # prefix-y jumps to the dashboard *by name*, so it works at any window index
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    assert [
+        "bind-key",
+        "-T",
+        "prefix",
+        cy.TMUX_WIP_KEY,
+        "select-window",
+        "-t",
+        f":={cy.TMUX_DASHBOARD_WINDOW}",
+    ] in tmux.calls
+
+
+def test_tmux_wip_key_respects_user_binding(cy, run_cli, tmux, dirs):
+    # The user bound the key to something of their own — yolo leaves it alone.
+    tmux.prefix_keys[cy.TMUX_WIP_KEY] = f"bind-key -T prefix {cy.TMUX_WIP_KEY} new-window"
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    assert tmux.named("bind-key") == []
+
+
+def test_tmux_wip_key_rebinds_over_its_own_binding(cy, run_cli, tmux, dirs):
+    # An existing binding that targets the dashboard window is ours — re-assert it
+    # (same idempotent self-heal as the title options).
+    tmux.prefix_keys[cy.TMUX_WIP_KEY] = (
+        f"bind-key -T prefix {cy.TMUX_WIP_KEY} select-window -t :={cy.TMUX_DASHBOARD_WINDOW}"
+    )
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    assert len(tmux.named("bind-key")) == 1
+
+
 def test_tmux_personal_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
     # A pre-existing session with no yolo dashboard window (a personal one aimed at
     # via --tmux-session) is left alone — its title config isn't touched.
@@ -202,6 +243,7 @@ def test_tmux_personal_session_is_not_reconfigured(cy, run_cli, tmux, dirs):
     tmux.has_session = True  # exists, but tmux.windows is empty → no yolo-wip window
     run_cli(["--tmux"], home=home, cwd=work)
     assert tmux.named("set-option") == []
+    assert tmux.named("bind-key") == []
 
 
 def test_tmux_existing_yolo_session_reasserts_title(cy, run_cli, tmux, dirs):
@@ -215,6 +257,8 @@ def test_tmux_existing_yolo_session_reasserts_title(cy, run_cli, tmux, dirs):
     assert ["set-option", "-t", "yolo", "set-titles", "on"] in opts
     title = next(c[4] for c in opts if c[3] == "set-titles-string")
     assert cy.TMUX_DASHBOARD_WINDOW in title and "shell:" in title and "session:" in title
+    # the wip jump key heals alongside the title options
+    assert len(tmux.named("bind-key")) == 1
 
 
 def test_tmux_window_names_are_pinned(cy, run_cli, tmux, dirs):

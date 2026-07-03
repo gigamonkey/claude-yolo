@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`prefix y` in tmux mode jumps to the `wip` dashboard.** The dashboard
+  starts as window 0, but windows move and renumber, so `prefix 0` reaching it
+  was a coincidence; the new binding selects the dashboard window *by name* and
+  always lands on it. Bound whenever yolo creates (or re-touches) its tmux
+  session; a `prefix y` you've bound yourself is left alone.
+
 - **The `wip` dashboard no longer quits while sessions are running.** `q`/Esc
   used to close the dashboard (and its tmux window) even with live sessions,
   leaving them with no home base; now the press is refused with a footer
