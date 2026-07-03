@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.26.0 — 2026-07-03
 
 - **`prefix y` in tmux mode jumps to the `wip` dashboard.** The dashboard
   starts as window 0, but windows move and renumber, so `prefix 0` reaching it
