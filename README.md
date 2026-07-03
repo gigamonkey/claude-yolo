@@ -454,7 +454,7 @@ the selected row:
 | `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (confirms) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row) |
-| `q`     | anything                         | quit the dashboard |
+| `q`     | anything                         | quit the dashboard — only once **no sessions are running** (the footer explains the refusal otherwise; stop them with `s` first). If the dashboard window is nonetheless gone while the tmux session lives on, `yolo wip` respawns it. |
 
 `f` and `r` won't interrupt an actively `working` session: applied to a worktree
 (or an idle `waiting` session) they go through, but a worktree whose session is

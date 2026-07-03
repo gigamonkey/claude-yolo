@@ -7,6 +7,7 @@ stubbed, mirroring how test_tmux drives the ps picker. The seeded-dashboard wind
 itself is covered in test_tmux (the `wip --_dashboard` command).
 """
 
+import contextlib
 import json
 import pathlib
 import subprocess
@@ -42,6 +43,11 @@ def no_docker_ps(cy, monkeypatch):
     monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: None)
 
 
+class KeysExhausted(Exception):
+    """FakeTerm ran out of scripted keys (run_loop catches this to end _wip_loop,
+    since `q` no longer quits the dashboard while sessions are running)."""
+
+
 class FakeTerm:
     """A scripted picker terminal: canned keys, prompt lines, and confirmations."""
 
@@ -51,7 +57,9 @@ class FakeTerm:
         self._confirms = list(confirms or [])
 
     def wait_key(self, timeout):
-        return self._keys.pop(0) if self._keys else "q"  # default-quit ends the loop
+        if not self._keys:
+            raise KeysExhausted()
+        return self._keys.pop(0)
 
     def prompt_line(self, prompt):
         return self._lines.pop(0) if self._lines else ""
@@ -112,8 +120,10 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
     monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
     term = FakeTerm(keys, lines=lines, confirms=confirms)
     # home=None → per-worktree _worktree_config returns built-in defaults, so the
-    # loop runs without touching real config.
-    cy._wip_loop(None, "yolo", term)
+    # loop runs without touching real config. The loop ends either on `q` (only
+    # allowed with no sessions) or by exhausting the scripted keys.
+    with contextlib.suppress(KeysExhausted):
+        cy._wip_loop(None, "yolo", term)
     return frames
 
 
@@ -366,7 +376,7 @@ def test_loop_navigation_moves_across_sections(cy, monkeypatch):
         "worktree": [worktree_item(cy)],
         "project": [project_item(cy)],
     }
-    frames = run_loop(cy, monkeypatch, sections, ["down", "down", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["down", "down"])
     assert [sel for sel, _ in frames] == [
         "session:repo-topic",
         "worktree:repo:old",
@@ -376,9 +386,35 @@ def test_loop_navigation_moves_across_sections(cy, monkeypatch):
 
 def test_loop_refresh_preserves_selection_by_key(cy, monkeypatch):
     sections = {"session": [session_item(cy)], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["down", None, "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["down", None])
     # after moving to the worktree, a refresh (None) keeps it selected
     assert frames[-1][0] == "worktree:repo:old"
+
+
+def test_q_quits_when_no_sessions(cy, monkeypatch):
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["q", "down"])
+    assert len(frames) == 1  # q returned right away; the 'down' was never consumed
+
+
+def test_q_blocked_while_sessions_running(cy, monkeypatch):
+    # Quitting would close the dashboard's tmux window under running sessions, so
+    # q and Esc are refused (with a footer explaining why) until none are left.
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["q", "\x1b"])
+    assert [footer for _, footer in frames[1:]] == [
+        "1 session still running — stop them before quitting.",
+        "1 session still running — stop them before quitting.",
+    ]
+
+
+def test_draw_wip_quit_hint_only_without_sessions(cy, capsys):
+    empty = {"session": [], "worktree": [], "project": []}
+    cy._draw_wip(empty, None, "")
+    assert "q quit" in capsys.readouterr().out
+    busy = {"session": [session_item(cy)], "worktree": [], "project": []}
+    cy._draw_wip(busy, "session:repo-topic", "")
+    assert "q quit" not in capsys.readouterr().out
 
 
 # --- loop: actions ----------------------------------------------------------
@@ -388,7 +424,7 @@ def test_enter_session_switches_window(cy, monkeypatch):
     calls = []
     monkeypatch.setattr(cy, "_focus_tmux_window", lambda s, w: calls.append((s, w)))
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["\r", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["\r"])
     assert calls == [("yolo", "@5")]
     assert "switched to repo-topic" in frames[-1][1]
 
@@ -529,7 +565,7 @@ def test_N_on_session_row_is_noop(cy, monkeypatch):
     monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
     monkeypatch.setattr(cy, "_focus_tmux_window", lambda *a: None)
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["N", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["N"])
     assert spawned == [] and "applies to worktrees and projects" in frames[-1][1]
 
 
@@ -601,7 +637,7 @@ def test_browse_session_one_port(cy, monkeypatch):
     monkeypatch.setattr(cy, "_forwarded_ports", lambda cid: [8000])
     monkeypatch.setattr(cy, "browse_session", lambda cid, select=None: f"http://x/{select}")
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["b", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["b"])
     assert "opened http://x/None" in frames[-1][1]
 
 
@@ -610,7 +646,7 @@ def test_browse_session_prompts_for_multiple_ports(cy, monkeypatch):
     seen = []
     monkeypatch.setattr(cy, "browse_session", lambda cid, select=None: seen.append(select) or "ok")
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["b", "q"], lines=["3000"])
+    run_loop(cy, monkeypatch, sections, ["b"], lines=["3000"])
     assert seen == [3000]
 
 
@@ -621,7 +657,7 @@ def test_stop_confirms_then_calls_core(cy, monkeypatch):
     )
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
     # waiting session -> force False
-    run_loop(cy, monkeypatch, sections, ["s", "q"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["s"], confirms=[True])
     assert stopped == [("cid0", False)]
 
 
@@ -635,7 +671,7 @@ def test_stop_working_session_uses_force(cy, monkeypatch):
         "worktree": [],
         "project": [],
     }
-    run_loop(cy, monkeypatch, sections, ["s", "q"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["s"], confirms=[True])
     assert stopped == [True]
 
 
@@ -643,7 +679,7 @@ def test_stop_cancelled_does_nothing(cy, monkeypatch):
     stopped = []
     monkeypatch.setattr(cy, "stop_session", lambda *a, **k: stopped.append(1) or "ok")
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["s", "q"], confirms=[False])
+    frames = run_loop(cy, monkeypatch, sections, ["s"], confirms=[False])
     assert stopped == []
     assert "cancelled" in frames[-1][1]
 
@@ -660,7 +696,7 @@ def test_S_opens_shell_in_session(cy, monkeypatch):
         "worktree": [],
         "project": [],
     }
-    frames = run_loop(cy, monkeypatch, sections, ["S", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["S"])
     ((cmd, name),) = spawned
     assert cmd == ["docker", "exec", "-it", "cid9", "/bin/bash"]
     assert name == "repo-topic-shell"
@@ -698,7 +734,7 @@ def test_finish_waiting_session_allowed(cy, monkeypatch):
         lambda wt, mr, slug, topic, home, base, **k: calls.append(topic) or "ok",
     )
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["f", "q"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["f"], confirms=[True])
     assert calls == ["topic"]  # the idle session's worktree gets finished
 
 
@@ -748,7 +784,7 @@ def test_merge_on_worktree_session_row(cy, monkeypatch):
     )
     working = session_item(cy, payload={"state": "working"})
     sections = {"session": [working], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["m"], confirms=[True])
     assert calls == ["topic"]
 
 
@@ -779,7 +815,7 @@ def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
         lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
     )
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}  # a worktree session
-    run_loop(cy, monkeypatch, sections, ["d", "q"])
+    run_loop(cy, monkeypatch, sections, ["d"])
     ((repo, argv, name),) = spawned
     assert (
         repo == "/repo"
@@ -794,7 +830,7 @@ def test_d_on_cwd_session_is_noop(cy, monkeypatch):
     monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
     sess = session_item(cy, payload={"topic": "", "main_root": None})
     sections = {"session": [sess], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
+    frames = run_loop(cy, monkeypatch, sections, ["d"])
     assert spawned == []
     assert "diff applies to worktrees" in frames[-1][1]
 
@@ -1036,7 +1072,7 @@ def test_add_project_prompts_and_registers(cy, monkeypatch, tmp_path):
     d = tmp_path / "newproj"
     d.mkdir()
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d)])
+    run_loop(cy, monkeypatch, sections, ["a"], lines=[str(d)])
     assert registered == [str(d.resolve())]
 
 
@@ -1082,6 +1118,26 @@ def test_do_wip_bootstrap_focuses_dashboard(cy, tmp_path, monkeypatch):
     cy.do_wip(tmp_path, dashboard=False, tmux_session="yolo")
     assert fake.named("new-session")  # session was created (seeded the dashboard)
     assert focused and focused[0][0] == "yolo"  # and we focused its window
+
+
+def test_do_wip_respawns_missing_dashboard_window(cy, tmp_path, monkeypatch):
+    # A live tmux session whose dashboard window is gone (crashed, or killed by
+    # hand): a user-typed `yolo wip` respawns it instead of dead-ending.
+    from test_tmux import FakeTmux
+
+    fake = FakeTmux()
+    fake.has_session = True
+    fake.windows = [("@1", "repo-topic")]  # a session window, but no yolo-wip
+    monkeypatch.setattr(cy, "_tmux", fake)
+    monkeypatch.setattr(cy.shutil, "which", lambda n: "/usr/bin/tmux" if n == "tmux" else None)
+    monkeypatch.setattr(cy, "_self_invocation", lambda: "yolo")
+    focused = []
+    monkeypatch.setattr(cy, "_focus_tmux_window", lambda s, w: focused.append((s, w)))
+    cy.do_wip(tmp_path, dashboard=False, tmux_session="yolo")
+    assert not fake.named("new-session")  # existing session reused
+    respawned = [w for w in fake.windows if w[1] == cy.TMUX_DASHBOARD_WINDOW]
+    assert len(respawned) == 1
+    assert focused == [("yolo", respawned[0][0])]
 
 
 def test_do_wip_without_tmux_exits(cy, tmp_path, monkeypatch):

@@ -1317,7 +1317,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   sessions now seed (`_ensure_tmux_session` runs `yolo wip --_dashboard`, the
   hidden flag that means "run the loop", vs a user-typed `yolo wip` that
   bootstraps the session + focuses the dashboard window via `_focus_tmux_window`,
-  the shared focus helper extracted from `_launch_in_tmux`). Requires tmux.
+  the shared focus helper extracted from `_launch_in_tmux` — **respawning the
+  dashboard window first** if the session is alive but lost it to a crash or a
+  by-hand kill, so there's always a way back in). Requires tmux.
   Sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
   `docker ps` carrying the cid + labels, ordered by `_order_sessions`:
   unknown→waiting→working, each by *least-recent activity first* — unknown
@@ -1401,7 +1403,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   registers a project (on a selected
   *recent-only* project it registers **that** one straight into `projects.json`;
   otherwise it prompts for a path via the same Tab-completing `prompt_path` the `+`
-  row uses), `q` quits. `f`/`r`
+  row uses), `q`/Esc quits — but **only when no sessions are running** (quitting
+  closes the dashboard's tmux window; with sessions live the press is refused
+  with a footer message, the `q quit` hint is dropped from the footer, and the
+  loop re-lists live before deciding so a ≤2s-stale frame can't misjudge). `f`/`r`
   apply to any worktree row and to *waiting* session rows (a `working` session is
   never offered them); the running-session guard lives in the
   `finish_worktree`/`rebase_worktree` cores, so a worktree row with a `working`
@@ -2027,8 +2032,11 @@ editor frame, the current-values + inherited-pane display, and the units
 `_config_value_flags` (bool `--key`/`--no-key`), `_prompt_config_value` kind
 routing, and `_pick_one` navigation/cancel; a session row is the no-op message),
 a raised `YoloError` landing in the
-footer instead of killing the loop, `a` add-project), plus `do_wip` bootstrap
-(focus the dashboard window, the no-tmux exit, the no-TTY passive fallback),
+footer instead of killing the loop, `a` add-project, and the quit guard — `q`
+returning only with no sessions, `q`/Esc refused with the footer message while
+one runs, the `q quit` hint hidden from `_draw_wip` accordingly), plus `do_wip`
+bootstrap (focus the dashboard window, respawning it when the live session has
+lost it, the no-tmux exit, the no-TTY passive fallback),
 `_worktree_config` (a worktree's `base`/`finish-action`/`finish-remote` from a
 freshly-edited global `~/.yolo.json` *and* from the worktree's own repo entry
 overriding global; `None` home → built-in defaults), and `_complete_path`

@@ -5975,7 +5975,10 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     )
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"\x1b[90mupdated {now} · a add-project · q quit · j/k move\x1b[0m")
+    # q only works (and is only advertised) once no sessions are running — see
+    # the quit guard in _wip_loop.
+    quit_hint = "" if sections["session"] else " · q quit"
+    print(f"\x1b[90mupdated {now} · a add-project · j/k move{quit_hint}\x1b[0m")
     print(
         f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m" if not footer else f"\x1b[1;33m{footer}\x1b[0m"
     )
@@ -6037,7 +6040,20 @@ def _wip_loop(home, session, term) -> None:
             continue
         footer = ""
         if key in ("q", "\x1b"):
-            return
+            # Quitting closes the dashboard's tmux window, orphaning any running
+            # sessions from their home base — so it's only allowed when nothing is
+            # running. Re-list live first, so the decision reflects the world, not
+            # a frame up to one refresh-tick stale.
+            sections = _wip_items(home)
+            nav = _wip_nav(sections)
+            deadline = time.monotonic() + PS_WATCH_INTERVAL
+            if not sections["session"]:
+                return
+            n = len(sections["session"])
+            footer = (
+                f"{n} session{'' if n == 1 else 's'} still running — stop them before quitting."
+            )
+            continue
         if key in ("up", "k") and selected in keys:
             selected = keys[max(0, keys.index(selected) - 1)]
             continue
@@ -6708,9 +6724,10 @@ def do_wip(home, *, dashboard, tmux_session) -> None:
 
     Two roles. As the **window-0 command** the tmux session seeds (`--_dashboard`),
     it runs the interactive loop in cbreak mode. As a **user-typed `yolo wip`**, it
-    ensures the shared tmux session exists (seeding that dashboard window) and
-    focuses it — attaching this terminal, or switching the client if we're already
-    in tmux. Requires tmux either way. (base / finish-action / finish-remote aren't
+    ensures the shared tmux session exists (seeding that dashboard window),
+    respawns the dashboard window if the session is alive but lost it (a crash, or
+    a by-hand kill of the window), and focuses it — attaching this terminal, or
+    switching the client if we're already in tmux. Requires tmux either way. (base / finish-action / finish-remote aren't
     passed in: each worktree resolves its own from config at display/action time —
     see `_worktree_config` — so a config edit reaches a running dashboard and each
     repo uses its own base.)
@@ -6729,7 +6746,24 @@ def do_wip(home, *, dashboard, tmux_session) -> None:
     _ensure_tmux_session(tmux_session)
     window_id = _find_tmux_window(tmux_session, TMUX_DASHBOARD_WINDOW)
     if not window_id:
-        sys.exit(f"couldn't find the dashboard window in tmux session '{tmux_session}'.")
+        # The session exists but its dashboard window is gone (it crashed, or was
+        # killed by hand — the loop itself refuses to quit while sessions run).
+        # Respawn it in place rather than dead-ending with no way back in.
+        res = _tmux(
+            "new-window",
+            "-t",
+            f"={tmux_session}:",
+            "-n",
+            TMUX_DASHBOARD_WINDOW,
+            "-P",
+            "-F",
+            "#{window_id}",
+            _tmux_window_command([_self_invocation(), "wip", "--_dashboard"]),
+        )
+        if res.returncode != 0:
+            sys.exit(f"tmux new-window failed: {res.stderr.strip()}")
+        window_id = res.stdout.strip()
+        _pin_tmux_window_name(window_id)
     _focus_tmux_window(tmux_session, window_id)
 
 

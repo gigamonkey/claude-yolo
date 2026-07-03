@@ -3,6 +3,16 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The `wip` dashboard no longer quits while sessions are running.** `q`/Esc
+  used to close the dashboard (and its tmux window) even with live sessions,
+  leaving them with no home base; now the press is refused with a footer
+  message — and the `q quit` hint is hidden — until every session is stopped.
+  As a backstop, a user-typed `yolo wip` now **respawns the dashboard window**
+  when the tmux session is alive but has lost it (a crash, or a by-hand kill),
+  instead of exiting with "couldn't find the dashboard window".
+
 ## v0.25.0 — 2026-07-01
 
 - **cwd sessions in odd-named directories now launch, with clean names.** A
