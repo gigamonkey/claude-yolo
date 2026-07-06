@@ -3,6 +3,12 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **Image: Node 26 (from Node 24).** The default image now installs Node 26.x
+  from NodeSource. The Dockerfile change re-hashes the content-addressed image
+  tag, so the next launch rebuilds automatically.
+
 ## v0.26.0 — 2026-07-03
 
 - **`prefix y` in tmux mode jumps to the `wip` dashboard.** The dashboard
