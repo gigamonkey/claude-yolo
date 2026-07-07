@@ -217,7 +217,7 @@ yolo shell something                    # open a bash shell in its container
 yolo stop something                     # stop its running session (transcript kept)
 yolo rebase something                   # rebase its branch onto --base (e.g. main's new commits)
 yolo merge something                    # merge its branch into --base, keep the worktree + branch
-yolo diff something                     # git diff its branch against --base (PR-style three-dot)
+yolo diff something                     # PR-style diff vs --base, including uncommitted changes
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
 yolo finish something --finish-action push    # ...or push it to a remote, keep it locally
@@ -262,11 +262,14 @@ Verb details:
   isn't a hazard (the merge only reads the branch's committed tip), so there's no
   idle guard.
 
-- **`diff TOPIC`** shows `git diff --base...branch` for the worktree — a
-  three-dot diff that shows what the branch *adds* since it diverged from `--base`
-  (default `HEAD`), the PR-style review diff (so a commit the base made on its own
-  doesn't show up as a deletion). git pages it as usual. It's read-only — no
-  container, no locks — so it works while a session is running. With **`--stat`**
+- **`diff TOPIC`** shows what the branch *adds* since it diverged from `--base`
+  (default `HEAD`) — the PR-style review diff (so a commit the base made on its
+  own doesn't show up as a deletion). It diffs from the merge-base to the
+  worktree's **working tree**, so on a clean worktree it's the usual
+  `git diff base...branch`, and on a dirty one it *also* includes uncommitted
+  changes to tracked files (handy for reviewing a session mid-flight). git pages
+  it as usual. It's read-only — no container, no locks, and it never touches the
+  worktree or index — so it works while a session is running. With **`--stat`**
   it instead opens an interactive `git diff --stat`: arrow/`j`/`k` to move,
   Enter/Space to open the selected file's diff in a new tmux window, `q` to close
   (this is what `yolo wip`'s `d` uses, so it needs tmux).

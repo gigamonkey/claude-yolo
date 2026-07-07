@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## v0.26.2 — 2026-07-07
+
+- **`diff` (and the `wip` dashboard's `d`) now includes uncommitted changes.**
+  The diff runs from the branch's merge-base to the worktree's *working tree*
+  instead of its committed `HEAD`, so dirty changes to tracked files show up
+  alongside committed ones — you can review a session's work in flight without
+  waiting for a commit. On a clean worktree the output is unchanged (still the
+  PR-style `base...branch` review diff), and it stays read-only (it never touches
+  the worktree or index). New untracked files are still not shown (git's default
+  diff behavior).
+
 ## v0.26.1 — 2026-07-07
 
 - **`finish --finish-action merge` keeps the worktree if the merge fails.** The
