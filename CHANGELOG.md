@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.26.1 — 2026-07-07
 
 - **`finish --finish-action merge` keeps the worktree if the merge fails.** The
   merge now runs *before* the worktree is removed, so a conflict (or any merge

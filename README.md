@@ -1057,9 +1057,10 @@ modes:
 
 - **`merge`** — merge the branch into the current checkout (the `HEAD` of the
   main repo, where `finish` runs — not `base`, which may be a remote ref you
-  can't merge into), then delete it. If the merge fails (conflicts, a dirty tree,
-  unrelated histories) it's aborted and the branch is kept — the worktree is gone
-  but the commits live on in the branch.
+  can't merge into), then remove the worktree and delete the branch. The merge
+  runs *before* the worktree is removed, so if it fails (conflicts, a dirty tree,
+  unrelated histories) it's aborted and nothing is removed — the worktree and its
+  branch are kept intact to retry from.
 
 - **`push`** — push the branch to a remote (with `-u`, so the local branch tracks
   it) and keep it locally. The remote is the **`finish-remote`** key
