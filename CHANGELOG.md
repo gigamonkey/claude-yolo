@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`finish --finish-action merge` keeps the worktree if the merge fails.** The
+  merge now runs *before* the worktree is removed, so a conflict (or any merge
+  failure) aborts the merge and leaves both the worktree and its branch intact to
+  retry from — instead of removing the worktree first and leaving the commits
+  stranded on the kept branch. On a successful merge the behavior is unchanged
+  (worktree removed, branch deleted).
+
 - **Image: Node 26 (from Node 24).** The default image now installs Node 26.x
   from NodeSource. The Dockerfile change re-hashes the content-addressed image
   tag, so the next launch rebuilds automatically.

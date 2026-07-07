@@ -418,8 +418,9 @@ def test_finish_merge_conflict_keeps_branch(cy, run_cli, repo):
     (r / "README").write_text("from main\n")
     git(r, "add", ".")
     git(r, "commit", "-qm", "main edit")
-    run_cli(["finish", "topic", "--finish-action", "merge"], home=home, cwd=r)
-    assert not wt.exists()
+    with pytest.raises(SystemExit):  # merge failure aborts finish
+        run_cli(["finish", "topic", "--finish-action", "merge"], home=home, cwd=r)
+    assert wt.exists()  # worktree kept — the merge failed, so nothing was removed
     assert "topic" in git(r, "branch", "--list", "topic").stdout  # kept on failure
     # the aborted merge left main clean
     assert git(r, "status", "--porcelain").stdout.strip() == ""

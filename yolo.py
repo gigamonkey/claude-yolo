@@ -99,7 +99,8 @@ AUTH_CHOICES = ["keychain", "oauth-token", "bedrock"]
 
 # What `yolo finish` does with the branch after removing the worktree:
 #   delete-if-merged = delete it iff reachable from base, else keep it (default);
-#   merge          = merge it into the current checkout, then delete it;
+#   merge          = merge it into the current checkout, then delete it (the
+#                    worktree is kept if the merge fails);
 #   push           = push it to a remote (--finish-remote, default origin), keep it locally;
 #   keep           = leave the branch alone.
 FINISH_CHOICES = ["delete-if-merged", "merge", "push", "keep"]
@@ -4365,8 +4366,9 @@ def do_finish(
     - `delete-if-merged` (default): delete the branch iff it's reachable from
       `base` (merged or never diverged); otherwise keep it with a note about
       where it stands vs. upstream.
-    - `merge`: merge the branch into the current checkout, then delete it (on a
-      merge failure the branch is kept and the worktree is already gone).
+    - `merge`: merge the branch into the current checkout, then remove the
+      worktree and delete the branch (on a merge failure nothing is removed — the
+      worktree and branch are kept to retry from).
     - `push`: push the branch to `remote` (--finish-remote) and keep it locally.
     - `keep`: leave the branch alone.
     """
@@ -4420,6 +4422,13 @@ def finish_worktree(
             f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force."
         )
 
+    # For the `merge` action, merge *before* removing the worktree so a failed
+    # merge (conflicts, dirty tree, no common history) leaves the worktree intact
+    # to retry from. The merge runs against `main_root`, independent of whether the
+    # worktree dir exists, so ordering it first costs nothing on the success path.
+    if action == "merge":
+        _finish_merge_or_raise(topic, main_root)
+
     _remove_worktree(worktree, topic, force, main_root)
 
     # The worktree is gone, so its overlay config goes too (only finish removes it;
@@ -4433,7 +4442,11 @@ def finish_worktree(
     prefix = f"Removed worktree for '{topic}'."
 
     if action == "merge":
-        msgs.append(_finish_merge(topic, prefix, main_root))
+        # The merge already succeeded above (a failure would have raised), so the
+        # branch is integrated — delete it.
+        subprocess.run(["git", "-C", str(main_root), "branch", "-d", topic], check=True)
+        target = _current_branch(main_root) or "the current branch"
+        msgs.append(f"{prefix} Merged '{topic}' into {target} and deleted the branch.")
     elif action == "push":
         msgs.append(_finish_push(topic, remote, prefix, main_root))
     elif action == "keep":
@@ -4469,24 +4482,22 @@ def _branch_status_note(branch: str, repo: pathlib.Path) -> str:
     return "fully pushed" if unpushed in ("0", "") else f"{unpushed} commit(s) not pushed"
 
 
-def _finish_merge(topic: str, prefix: str, repo: pathlib.Path) -> str:
-    """Merge `topic` into `repo`'s checkout, then delete it (the `merge` action).
+def _finish_merge_or_raise(topic: str, repo: pathlib.Path) -> None:
+    """Merge `topic` into `repo`'s checkout (the `merge` action), or raise.
 
-    On any merge failure (conflicts, dirty tree, no common history) the merge is
-    aborted and the branch is kept — the worktree is already gone, but the commits
-    live on in the branch, recoverable by merging or re-checking-out manually.
+    Called *before* the worktree is removed, so on any merge failure (conflicts,
+    dirty tree, no common history) the merge is aborted and a `YoloError` is raised
+    — leaving both the worktree and the branch intact to retry from. On success the
+    caller removes the worktree and deletes the now-merged branch.
     """
     merge = subprocess.run(["git", "-C", str(repo), "merge", topic], capture_output=True, text=True)
     if merge.returncode != 0:
         subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True)
         detail = merge.stderr.strip() or merge.stdout.strip()
-        return (
-            f"{prefix} Merging '{topic}' failed (the branch is kept); resolve it "
-            f"manually.\n{detail}"
+        raise YoloError(
+            f"Merging '{topic}' failed; the worktree and branch are kept. "
+            f"Resolve it manually.\n{detail}"
         )
-    subprocess.run(["git", "-C", str(repo), "branch", "-d", topic], check=True)
-    target = _current_branch(repo) or "the current branch"
-    return f"{prefix} Merged '{topic}' into {target} and deleted the branch."
 
 
 def _finish_push(topic: str, remote: str, prefix: str, repo: pathlib.Path) -> str:
