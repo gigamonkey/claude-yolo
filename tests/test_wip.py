@@ -1013,7 +1013,9 @@ def test_diff_stat_loop_navigates_and_opens_selected_file(cy, monkeypatch):
     cy._diff_stat_loop(files, DIFF_STAT, "/wt", "BASESHA", "yolo", "topic", "HEAD", term)
     ((cwd, cmd, name, kw),) = spawned
     assert cwd == "/wt"
-    assert cmd == ["git", "diff", "BASESHA...HEAD", "--", "c.py"]  # the selected file
+    # two-dot against the merge-base origin, so the working tree (dirty changes) is
+    # the right-hand side
+    assert cmd == ["git", "diff", "BASESHA", "--", "c.py"]  # the selected file
     assert name == "diff-c.py"
     assert kw == {"env": {"LESS": "R"}}  # pager stays open until q (no auto-quit)
 

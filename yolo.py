@@ -2755,8 +2755,9 @@ PARSER.add_argument(
     "--base (default HEAD), replaying it on top of commits landed on the base "
     "since it branched (requires a TOPIC). 'merge' merges a worktree's branch into "
     "--base (default HEAD) but leaves the worktree and branch in place, so you can "
-    "keep working (requires a TOPIC). 'diff' shows `git diff base...branch` "
-    "for a worktree (requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
+    "keep working (requires a TOPIC). 'diff' shows a worktree's changes vs "
+    "base (like `git diff base...branch`, but also including uncommitted changes; "
+    "requires a TOPIC). 'list' shows this repo's worktrees; 'ps' shows "
     "all running yolo containers across repos (see --watch); 'wip' opens a "
     "tmux dashboard for managing everything — running sessions, inactive "
     "worktrees, and projects — with launch/stop/finish/rebase/merge/diff/browse actions; 'dir' prints a "
@@ -4780,15 +4781,19 @@ def merge_worktree(
 
 
 def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) -> None:
-    """`diff` verb: `git diff base...HEAD` for a worktree's branch.
+    """`diff` verb: the branch's changes vs `base`, including uncommitted work.
 
-    A three-dot diff against `base` — resolved to a commit in the *main* checkout,
-    so a ref like HEAD means main's tip, not the worktree's own branch (same reason
-    as `rebase`/`list`) — so it shows what the branch *adds* since it diverged: the
-    PR-style review diff, matching the `↑ahead` of `list`'s COMMITS column. Stdio is
-    inherited, so git pages it as usual; an empty diff is just no output. No
-    mutation and no session-state concerns (diffing doesn't touch the worktree), so
-    unlike `rebase`/`finish` there's no guard or in-process core.
+    Diffs from the merge-base of `base` and the worktree's HEAD to the worktree's
+    *working tree* — a two-dot `git diff <merge-base>`. `base` is resolved to a
+    commit in the *main* checkout, so a ref like HEAD means main's tip, not the
+    worktree's own branch (same reason as `rebase`/`list`). On a clean worktree
+    this is exactly the PR-style `base...HEAD` review diff (what the branch *adds*
+    since it diverged, matching the `↑ahead` of `list`'s COMMITS column); on a
+    dirty one it *also* shows uncommitted changes to tracked files, since the
+    right-hand side is the working tree rather than HEAD. Stdio is inherited, so
+    git pages it as usual; an empty diff is just no output. Read-only — it never
+    touches the worktree or index — so unlike `rebase`/`finish` there's no guard or
+    in-process core.
 
     With `--stat` it instead opens the interactive diff-stat picker
     (`_diff_stat_picker`): `git diff --stat`, navigable, where Enter/Space on a file
@@ -4807,34 +4812,47 @@ def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) ->
     target = rev.stdout.strip()
     if rev.returncode != 0 or not target:
         raise YoloError(f"can't resolve base ref '{base}'.")
+    # Diff from where the branch diverged (merge-base) so base-only commits don't
+    # show, but keep the working tree as the right-hand side so dirty changes do.
+    # `git diff A...B` is sugar for `git diff $(merge-base A B) B`; using the
+    # merge-base as a two-dot origin swaps B (=HEAD) for the working tree. Falls
+    # back to `target` when there's no common history (an unrelated base).
+    mb = subprocess.run(
+        ["git", "-C", str(worktree), "merge-base", target, "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    diff_from = mb.stdout.strip() or target
     if stat:
-        _diff_stat_picker(worktree, target, base, topic)
+        _diff_stat_picker(worktree, diff_from, base, topic)
         return
-    subprocess.run(["git", "-C", str(worktree), "diff", f"{target}...HEAD"])
+    subprocess.run(["git", "-C", str(worktree), "diff", diff_from])
 
 
-def _diff_stat_picker(worktree: pathlib.Path, target: str, base: str, topic: str) -> None:
+def _diff_stat_picker(worktree: pathlib.Path, diff_from: str, base: str, topic: str) -> None:
     """Interactive `git diff --stat`: navigate the changed files, Enter/Space opens a
     file's full diff in a new tmux window, q/Esc quits (closing this window).
 
     The file list comes from `--name-only` (exact paths) and the display from
     `--stat` — both list files in the same diff order, so file line `i` maps to
-    `files[i]` even when `--stat` truncates the displayed path. Needs a tty + tmux
-    (it spawns sibling windows); without them it just prints the stat and returns.
+    `files[i]` even when `--stat` truncates the displayed path. `diff_from` is the
+    merge-base origin from `do_diff`; the two-dot diff against it includes dirty
+    (uncommitted) changes to tracked files. Needs a tty + tmux (it spawns sibling
+    windows); without them it just prints the stat and returns.
     """
-    files = _git_lines(worktree, "diff", "--name-only", f"{target}...HEAD")
+    files = _git_lines(worktree, "diff", "--name-only", diff_from)
     if not files:
         print(f"No changes in '{topic}' vs {base}.")
         return
     cols = shutil.get_terminal_size((80, 24)).columns
-    stat_lines = _git_lines(worktree, "diff", f"--stat={cols}", f"{target}...HEAD")
+    stat_lines = _git_lines(worktree, "diff", f"--stat={cols}", diff_from)
     if not (sys.stdin.isatty() and os.environ.get("TMUX")):
         print("\n".join(stat_lines))  # non-interactive fallback (no window to spawn into)
         return
     session = _tmux_session_name()
     _run_picker(
         lambda term: _diff_stat_loop(
-            files, stat_lines, worktree, target, session, topic, base, term
+            files, stat_lines, worktree, diff_from, session, topic, base, term
         )
     )
 
@@ -4862,11 +4880,13 @@ def _draw_diff_stat(topic: str, base: str, stat_lines: list, nfiles: int, select
     print("\n\x1b[90mj/k move · Enter/Space open file diff · q quit\x1b[0m")
 
 
-def _diff_stat_loop(files, stat_lines, worktree, target, session, topic, base, term) -> None:
+def _diff_stat_loop(files, stat_lines, worktree, diff_from, session, topic, base, term) -> None:
     """The diff-stat picker's event loop (terminal plumbing is `_run_picker`'s job).
 
-    Selection is an index into `files`; Enter/Space spawns `git diff target...HEAD --
+    Selection is an index into `files`; Enter/Space spawns `git diff <diff_from> --
     <file>` in a new tmux window (paged), q/Esc returns (the picker window closes).
+    The two-dot `diff_from` (a merge-base) diffs against the working tree, so a
+    file's uncommitted changes show alongside its committed ones.
     """
     selected = 0
     while True:
@@ -4882,7 +4902,7 @@ def _diff_stat_loop(files, stat_lines, worktree, target, session, topic, base, t
             path = files[selected]
             _spawn_window(
                 worktree,
-                ["git", "diff", f"{target}...HEAD", "--", path],
+                ["git", "diff", diff_from, "--", path],
                 f"diff-{pathlib.PurePosixPath(path).name}",
                 session,
                 # LESS=R stops git's pager auto-quitting a one-screen diff, so the

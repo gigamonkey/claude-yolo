@@ -810,6 +810,36 @@ def test_diff_shows_branch_changes_three_dot(cy, run_cli, repo, capfd):
     assert "main.txt" not in out  # base-only changes are not (three-dot)
 
 
+def test_diff_includes_uncommitted_changes(cy, run_cli, repo, capfd):
+    # `diff` diffs against the working tree, so uncommitted (dirty) changes to
+    # tracked files show up — both committed and not.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "committed.txt").write_text("c\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "committed work")
+    (wt / "README").write_text("dirty edit\n")  # tracked, uncommitted
+    capfd.readouterr()
+    run_cli(["diff", "topic"], home=home, cwd=r)
+    out = capfd.readouterr().out
+    assert "committed.txt" in out and "+c" in out  # the committed change
+    assert "README" in out and "+dirty edit" in out  # the uncommitted change
+
+
+def test_diff_stat_shows_uncommitted_changes(cy, run_cli, repo, capfd, monkeypatch):
+    # The --stat view (what the wip `d` action drives) reflects dirty changes too.
+    monkeypatch.delenv("TMUX", raising=False)
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)  # no commits, only a dirty edit
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "README").write_text("dirty edit\n")
+    capfd.readouterr()
+    run_cli(["diff", "topic", "--stat"], home=home, cwd=r)
+    out = capfd.readouterr().out
+    assert "README" in out and "1 file changed" in out  # dirty file in the stat
+
+
 def test_diff_stat_prints_stat_without_tmux(cy, run_cli, repo, capfd, monkeypatch):
     # --stat wants tmux for the interactive picker; without it (a test/CLI run) it
     # just prints `git diff --stat` and returns.
