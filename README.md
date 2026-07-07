@@ -131,12 +131,27 @@ Or just run the bundled **`./install-from-git`** script, which wraps that
 You can also run it without installing using `uvx`:
 
 ```bash
-uvx --from git+https://github.com/gigamonkey/claude-yolo yolo`
+uvx --from git+https://github.com/gigamonkey/claude-yolo yolo
 ```
 
+### Installing for development
+
+If you're **working on `yolo` itself**, install it editable from a checkout so a
+real `yolo` lands on your PATH (with `keyring` resolved into its venv) while your
+source edits take effect immediately — no rebuild, no reinstall:
+
+```bash
+uv tool install -e .   # from a clone of this repo
+```
+
+`uv` drops the checkout onto the tool venv's path, so `yolo` runs the working
+copy: edit `yolo.py` (or a sibling data file like `Dockerfile.default`) and the
+next run picks it up. `yolo --version` prints a `+editable` suffix so you can tell
+this install apart from a released one. No `uv tool upgrade` needed — it already
+points at your source; `uv tool uninstall claude-yolo` removes it.
+
 Alternatively, the file self-runs under `uv` via its PEP 723 header, so you can
-skip the build entirely and just symlink it from somewhere in your path. This is
-probably only useful if you are working on `yolo` itself.
+skip the build entirely and just symlink it from somewhere in your path:
 
 ```bash
 chmod +x yolo.py
