@@ -808,7 +808,8 @@ without ever writing a plaintext secrets file or putting the value on a command
 line. There are two halves: **storing** a secret (the `secret` verb) and
 **injecting** it (the `secrets` config key / `--secret` flag). Storing one does
 *not* inject it anywhere — injection is opt-in per project, the same trust model
-as [`dockerfile`](#dockerfile---dockerfile-path) and `yolorc` (the *key* lives in
+as [`dockerfile`](#dockerfile---dockerfile-path) and
+[`yolorc`](#yolorc---yolorc-path) (the *key* lives in
 host-side config, which Claude can't edit from inside a container, so Claude can't
 grant its next session a new secret).
 
@@ -865,7 +866,8 @@ yolo config --add-secret GH_TOKEN     # persist for this project
 `docker inspect`'s env, host `ps`, or tmux's saved pane command. Env-target
 secrets are written to chmod-600 files in a private per-session directory
 bind-mounted at `/run/secrets` and exported by a small loader yolo bakes into the
-image (sourced before your `yolorc`, so an rc can use the values — e.g. `echo
+image (sourced before your [`yolorc`](#yolorc---yolorc-path), so an rc can use
+the values — e.g. `echo
 "$GH_TOKEN" | gh auth login --with-token`). File-target secrets are bind-mounted
 read-only at their path. Either way the staged files live in a private per-user
 temp dir (`$XDG_RUNTIME_DIR` on Linux, else `$TMPDIR` — on macOS that's excluded
@@ -945,7 +947,8 @@ what you want for a throwaway reference clone, and keeps it out of your actual r
 persist on the host.)
 
 The clone runs at session start after secrets are loaded but **before** your
-`yolorc` and Claude — so a `yolorc` that starts a server can rely on the cloned repo
+[`yolorc`](#yolorc---yolorc-path) and Claude — so a `yolorc` that starts a
+server can rely on the cloned repo
 already being there. It skips if the destination already exists, and a failure just
 warns rather than blocking the session. Public HTTPS URLs need no auth; with
 `--ssh-agent` on, GitHub HTTPS URLs route over your forwarded agent. In config the
@@ -970,6 +973,54 @@ yolo config --remove-clone ../lib                            # remove by dir
 
 The `yolo wip` dashboard's `c` config editor edits clones interactively too
 (prompting url, dir, and an optional depth).
+
+### `yolorc` (`--yolorc PATH`)
+
+A shell file `source`d **inside the container** before the session starts — the
+hook for per-session setup: authenticate a CLI, export environment variables,
+start a service, install a tool the image lacks. Because it's sourced rather
+than run, its `export`s reach Claude's environment; and because it runs before
+Claude does, the setup happens without Claude having to run (or transcript) it:
+
+```bash
+yolo --yolorc ./setup.sh          # one session
+yolo config --yolorc ./setup.sh   # persist for this project
+```
+
+```bash
+# setup.sh — composes with the other startup features:
+echo "$GH_TOKEN" | gh auth login --with-token   # a secret injected via `secrets`
+export DATABASE_URL=postgres://localhost:5433/dev
+(cd ../lib && make serve &)                     # a repo fetched via `clones`
+```
+
+**Opt-in by design.** A `.yolorc` sitting in a repo does nothing on its own —
+yolo never runs an rc by presence-detection; the file runs only when this key
+points at it. Same trust model as [`dockerfile`](#dockerfile---dockerfile-path)
+and [`secrets`](#secrets---secret-nametarget-repeatable): the *key* lives in
+host-side config Claude can't edit, so neither a cloned repo nor a past session
+can schedule code to run in your next one. (The rc itself runs inside the
+container, so it can't do anything the session couldn't already.)
+
+**Path resolution** mirrors `dockerfile`: a relative path resolves against the
+session working dir (the worktree dir in worktree mode, else the launch cwd),
+so a checked-in rc travels with the project; an absolute path (`~` ok) is used
+as-is, for an out-of-tree rc the container can't edit. The file must exist —
+a typo'd path fails at launch (and `yolo config` refuses to store one) rather
+than being silently skipped.
+
+**How it runs.** The resolved file is bind-mounted read-only at
+`/home/claude/.yolorc` with `$YOLO_RC` pointing at it. A claude session sources
+it via a startup wrapper in the fixed order **secrets → clones → rc → claude**,
+so the rc can use injected secrets and rely on cloned repos being present. A
+`yolo shell` (fresh, or exec'd into a running session) sources it from
+`.bashrc` instead, once per shell tree. Either way, an rc that exits nonzero
+**warns but doesn't block** the session.
+
+Like an in-tree `dockerfile`, an rc **inside the working tree** is editable by
+Claude between runs (the read-only mount is of the same file the rw cwd mount
+exposes) — an accepted trade-off for an opt-in feature, but prefer an
+out-of-tree rc when that matters.
 
 ### `dockerfile` (`--dockerfile PATH`)
 
