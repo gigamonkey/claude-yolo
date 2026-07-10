@@ -852,8 +852,10 @@ therefore **out-of-band and parallel-safe**:
 - **Per-session run dir**, keyed by the (final, suffix-laden) container name:
   `<run-dir>/<container>/` (`_session_run_dir`, mode **700**; files **chmod 600**,
   written via `_write_run_file` with `O_CREAT|0o600` so they're never briefly
-  world-readable). Holds the staged secrets (`secrets/` subdir for env targets) plus
-  the credential snapshot / throwaway mask.
+  world-readable). Holds the staged secrets (`secrets/` subdir for env targets), the
+  credential snapshot / throwaway mask, and — for tmux-spawned sessions — the
+  `startup.log` pane snapshot (`_snapshot_startup_pane`; host-side only,
+  deliberately **never** mounted into the container).
 
 - **Location: a per-user temp subdir** `claude-yolo-run/` (`_run_dir`). On **Linux**
   it prefers `$XDG_RUNTIME_DIR` when set (a per-user, mode-700 tmpfs); otherwise (and
@@ -1373,7 +1375,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
   <topic>`, surfacing in the new window like Enter's launch errors), `S` on a
   session row opens a bash shell in its container (`_wip_shell`: `docker exec -it
-  <cid> /bin/bash` in a new `<name>-shell` window, like `yolo shell`), `b` browses a
+  <cid> /bin/bash` in a new `<name>-shell` window, like `yolo shell`), `l` on a
+  session row opens its captured **startup log** (`_wip_startup_log`: `less -R`
+  on `<run-dir>/<name>/startup.log` in a new `log-<name>` window — the log exists
+  only for sessions yolo spawned into tmux; see the startup-log paragraph in the
+  tmux section), `b` browses a
   forwarded port (prompting if >1), `s`
   stops, `f` finishes, `r` rebases, `m` on a worktree row (or any worktree-backed
   session row, even a `working` one — the merge only reads the branch's committed
@@ -1415,7 +1421,22 @@ gracefully outside one — there's just no repo slug to label/find by).
   result/`YoloError` in the footer; **launches shell out** into a fresh tmux
   window (`_spawn_session_window`: `new-window -c <repo>` running a fresh
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
-  config and execs docker straight into the window). The dashboard is long-lived
+  config and execs docker straight into the window). `_spawn_session_window`
+  also sets **`YOLO_STARTUP_LOG=1`** on the window's command: the marker that
+  tells the inner yolo to snapshot the pane to a **startup log**
+  (`_snapshot_startup_pane`, called at the very end of `launch_container`,
+  after every host-side startup line has printed and just before
+  `_dispatch_launch` execs docker) — `capture-pane -p -e -S -` of its own
+  `$TMUX_PANE` into `<run-dir>/<container>/startup.log` (via `_write_run_file`,
+  so chmod 600; reclaimed by the run-dir GC; never mounted into the container).
+  That's the output the Claude TUI would otherwise bury and eventually push past
+  `history-limit`. A one-shot snapshot rather than `pipe-pane` because yolo
+  execvp's away — no process survives to turn a pipe off before the TUI floods
+  it — and the exec boundary is exactly when the fresh window's whole history
+  *is* the startup output. The gate is the marker *plus* `$TMUX_PANE`, not
+  `$TMUX_PANE` alone, so a hand-run `yolo` in someone's long-lived shell pane
+  never sweeps their unrelated scrollback into a file. The `wip` `l` key views
+  the log. The dashboard is long-lived
   *and* spans repos, so it does **not** carry a single `base`/`finish-action`/
   `finish-remote`: **each worktree resolves its own** from config at display and
   action time via `_worktree_config(home, main_root, worktree)` → `load_yolo_config(
@@ -2005,7 +2026,12 @@ window names), the `ps` verb's table from canned `docker ps` output, and the
 `--watch` picker loop via scripted `wait_key` events (selection movement and
 clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
-`wip --_dashboard` seed of window 0 is asserted here too.
+`wip --_dashboard` seed of window 0 is asserted here too. The **startup log**
+is also covered here: the marker+pane-gated `capture-pane` snapshot into the
+run dir (content, 0600 mode, the exact capture argv), the no-marker /
+no-pane / capture-failure skips (failure warns but the launch proceeds),
+`_spawn_session_window` prepending `YOLO_STARTUP_LOG=1`, and the plain
+`--tmux` launch window *not* carrying the marker.
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
 unknown→waiting→working grouping with unknown sorted oldest-`created_at`-first,
 `_draw_wip` rendering the sessions as one SESSIONS table with *no* blank lines
@@ -2026,7 +2052,9 @@ no-op), `R` resume-pick spawning `resume TOPIC -r`/`resume -r`, `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an empty
 topic), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
 there (cancel on empty, reject a non-dir), `S` shell on a session row spawning the
-`docker exec` window (a worktree-row no-op), `b` browse incl. the
+`docker exec` window (a worktree-row no-op), `l` startup-log on a session row
+spawning the `less -R` window (the missing-log footer message and the
+worktree-row no-op), `b` browse incl. the
 multi-port prompt, `s` stop with the working-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), `m` on a worktree *and* a worktree-backed session row

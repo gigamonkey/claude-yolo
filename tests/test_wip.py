@@ -1257,3 +1257,46 @@ def test_dashboard_project_launch_uses_per_project_config(cy, run_cli, repo, tmp
             next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":")) :
         ]
         assert cargs[cargs.index("--add-dir") + 1] == str(ref)  # …and forwarded to claude
+
+
+# --- startup log (`l`) ------------------------------------------------------
+
+
+def test_l_opens_startup_log_window(cy, monkeypatch, tmp_path):
+    # `l` on a session row opens the captured startup log in a `less -R` window.
+    log = tmp_path / "repo-topic" / "startup.log"
+    log.parent.mkdir()
+    log.write_text("build output\n")
+    monkeypatch.setattr(cy, "_run_dir", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_window", lambda cwd, cmd, name, sess, **k: spawned.append((cmd, name))
+    )
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["l"])
+    ((cmd, name),) = spawned
+    assert cmd == ["less", "-R", str(log)]
+    assert name == "log-repo-topic"
+    assert "showing startup log for repo-topic" in frames[-1][1]
+
+
+def test_l_without_log_reports_in_footer(cy, monkeypatch, tmp_path):
+    # No startup.log (session predates the feature, or wasn't yolo-spawned):
+    # footer message, no window.
+    monkeypatch.setattr(cy, "_run_dir", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["l"])
+    assert spawned == []
+    assert "no startup log for repo-topic" in frames[-1][1]
+
+
+def test_l_on_worktree_is_noop(cy, monkeypatch, tmp_path):
+    # `l` is a session-only action — a worktree row does nothing.
+    monkeypatch.setattr(cy, "_run_dir", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    run_loop(cy, monkeypatch, sections, ["l", "q"])
+    assert spawned == []

@@ -471,6 +471,7 @@ the selected row:
 | `n`     | a project                        | prompt for a topic, start a new worktree session there |
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
 | `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
+| `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |
 | `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
@@ -493,6 +494,14 @@ any error, shows in the footer); opening or starting a session **shells out** in
 a new tmux window, where a fresh `yolo` resolves that project's own config.
 Requires tmux. (`wip` replaced the old `ps --watch` dashboard, of which it's a
 superset; `ps`/`ps --watch` remain as standalone verbs, handy outside tmux.)
+
+Sessions the dashboard spawns also keep a **startup log**: everything the launch
+printed into the window (worktree setup, the image build, mount/credential
+messages) is snapshotted just before Claude's TUI takes over, so it isn't lost
+to the pane's scrollback. The launch prints the log's path (it lives in the
+per-session run dir and disappears with the container), and `l` on the session's
+row opens it in a pager window. Sessions started by hand in a regular terminal
+don't get one — there, your own terminal's scrollback already has the output.
 
 ## Authentication modes
 

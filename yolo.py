@@ -3856,7 +3856,49 @@ def _spawn_session_window(
     own config there. `--no-tmux` is part of `argv_tail` so the inner yolo execs
     docker straight into this window instead of opening yet another one.
     """
-    return _spawn_window(repo_dir, [_self_invocation(), *argv_tail], window_name, session)
+    return _spawn_window(
+        repo_dir,
+        [_self_invocation(), *argv_tail],
+        window_name,
+        session,
+        # Mark the window as yolo-spawned so the inner yolo snapshots its startup
+        # output (_snapshot_startup_pane): a fresh window's pane history is exactly
+        # this launch, so the capture can't hoover up unrelated shell scrollback.
+        env={"YOLO_STARTUP_LOG": "1"},
+    )
+
+
+def _snapshot_startup_pane(run_dir: pathlib.Path) -> None:
+    """Snapshot this tmux pane's history to <run_dir>/startup.log, best-effort.
+
+    The startup output (worktree setup, image build, mount/credential messages)
+    prints into the pane and is then buried once the exec'd `docker run` puts up
+    the Claude TUI — whose redraws eventually push it past tmux's history-limit.
+    Called at the last moment before the exec, when the pane's whole history *is*
+    the startup log: nothing has run in the window before yolo, and docker hasn't
+    run yet. A streaming `pipe-pane` can't do this job — yolo execvp's away, so
+    no process survives to turn the pipe off before the TUI floods it.
+
+    Gated on YOLO_STARTUP_LOG (set only by _spawn_session_window, i.e. windows
+    yolo created for a full inner invocation), not just TMUX_PANE: capturing
+    `-S -` from a hand-run yolo in a long-lived shell pane would sweep up the
+    user's unrelated scrollback. The log is host-side only — deliberately never
+    mounted into the container, unlike its run-dir siblings — and the run-dir GC
+    reclaims it with the rest once the container is gone. `-e` keeps colors
+    (view with `less -R`; the wip `l` key does); rendered capture collapses
+    docker build's \\r-progress churn into its final lines.
+    """
+    pane = os.environ.get("TMUX_PANE")
+    if not pane or not os.environ.get("YOLO_STARTUP_LOG"):
+        return
+    log_path = pathlib.Path(run_dir) / "startup.log"
+    # Printed before capturing, so the log's tail names its own location.
+    print(f"Startup log: {log_path}", file=sys.stderr)
+    res = _tmux("capture-pane", "-p", "-e", "-S", "-", "-t", pane)
+    if res.returncode != 0:
+        print("warning: couldn't capture the startup log; continuing.", file=sys.stderr)
+        return
+    _write_run_file(run_dir, "startup.log", (res.stdout.rstrip("\n") + "\n").encode())
 
 
 def _dispatch_launch(
@@ -4312,6 +4354,8 @@ def launch_container(
         print(sep)
         print(" ".join(run_cmd))
         print(sep)
+    # Last moment before the exec: every host-side startup line is in the pane now.
+    _snapshot_startup_pane(run_dir)
     _dispatch_launch(
         run_cmd,
         parsed,
@@ -6006,7 +6050,7 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 
 _WIP_HINTS = {
-    "session": "Enter switch · S shell · b browse · s stop · d diff · m merge · f/r finish/rebase (idle)",
+    "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
     "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
@@ -6177,6 +6221,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return stop_session(p["cid"], f"for '{label}'", home, force=working)
         if key == "S" and kind == "session":
             return _wip_shell(p, session)
+        if key == "l" and kind == "session":
+            return _wip_startup_log(p, session)
         if key == "f":
             return _wip_finish(kind, p, home, term)
         if key == "r":
@@ -6317,6 +6363,28 @@ def _wip_shell(p, session) -> str:
         session,
     )
     return f"opening a shell in {p['name']}…"
+
+
+def _wip_startup_log(p, session) -> str:
+    """`l`: view the session's captured startup output in a `less -R` window.
+
+    The log (<run-dir>/<name>/startup.log, written by _snapshot_startup_pane just
+    before the launch exec'd into docker) exists only for sessions yolo spawned
+    into their own tmux window, and lives — like everything in the run dir — only
+    as long as the container. `-R` renders the colors the capture preserved; `q`
+    closes the window (a clean `less` exit, so the keep-open-on-failure wrapper
+    doesn't hold it).
+    """
+    log = _run_dir() / p["name"] / "startup.log"
+    if not log.is_file():
+        return f"no startup log for {p['name']} (only sessions yolo spawned into tmux have one)."
+    _spawn_window(
+        p.get("cwd") or pathlib.Path.home(),
+        ["less", "-R", str(log)],
+        f"log-{p['name']}",
+        session,
+    )
+    return f"showing startup log for {p['name']}…"
 
 
 def _wip_browse(p, term) -> str:

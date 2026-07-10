@@ -35,6 +35,8 @@ class FakeTmux:
         self.windows = []  # (window_id, window_name[, session_name])
         self.attached = False  # a client is attached to the session
         self.prefix_keys = {}  # key -> its `list-keys` output line
+        self.pane_dump = "build output line\nStartup log: somewhere\n"  # capture-pane content
+        self.capture_rc = 0  # capture-pane exit code (a test can force failure)
         self._next = 10
 
     def __call__(self, *args):
@@ -71,6 +73,8 @@ class FakeTmux:
         if verb == "bind-key":  # bind-key -T <table> <key> <command...>
             self.prefix_keys[args[3]] = " ".join(args)
             return cp(0)
+        if verb == "capture-pane":
+            return cp(self.capture_rc, out=self.pane_dump)
         return cp(0)  # select-window / switch-client
 
     def _session(self, window):
@@ -584,3 +588,74 @@ def test_watch_interactive_in_tmux_is_picker(cy, monkeypatch, tmp_path):
     monkeypatch.setattr(cy.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
     cy.do_ps(tmp_path, watch=True)
     assert called == ["picker"]
+
+
+# --- startup log ------------------------------------------------------------
+
+
+def test_startup_log_captured_for_spawned_window(cy, run_cli, tmux, dirs, monkeypatch):
+    # A yolo-spawned window (YOLO_STARTUP_LOG marker + a tmux pane): the launch
+    # snapshots the pane's history to <run-dir>/<container>/startup.log (0600)
+    # just before exec'ing docker.
+    home, work = dirs
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
+    argv = run_cli([], home=home, cwd=work)
+    assert argv[:2] == ["docker", "run"]  # capture didn't derail the launch
+
+    (capture,) = tmux.named("capture-pane")
+    assert capture == ["capture-pane", "-p", "-e", "-S", "-", "-t", "%3"]
+    log = home / ".claude-yolo-run" / "work" / "startup.log"
+    assert log.read_text() == tmux.pane_dump
+    assert log.stat().st_mode & 0o777 == 0o600
+
+
+def test_startup_log_skipped_without_marker(cy, run_cli, tmux, dirs, monkeypatch):
+    # TMUX_PANE alone isn't enough: a hand-run yolo in someone's long-lived shell
+    # pane must not capture their scrollback.
+    home, work = dirs
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.delenv("YOLO_STARTUP_LOG", raising=False)
+    run_cli([], home=home, cwd=work)
+    assert tmux.named("capture-pane") == []
+    assert not (home / ".claude-yolo-run" / "work" / "startup.log").exists()
+
+
+def test_startup_log_skipped_outside_tmux(cy, run_cli, tmux, dirs, monkeypatch):
+    home, work = dirs
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
+    run_cli([], home=home, cwd=work)
+    assert tmux.named("capture-pane") == []
+
+
+def test_startup_log_capture_failure_is_nonfatal(cy, run_cli, tmux, dirs, monkeypatch, capsys):
+    # A capture-pane failure warns and the launch proceeds; no partial file.
+    home, work = dirs
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
+    tmux.capture_rc = 1
+    argv = run_cli([], home=home, cwd=work)
+    assert argv[:2] == ["docker", "run"]
+    assert not (home / ".claude-yolo-run" / "work" / "startup.log").exists()
+    assert "couldn't capture the startup log" in capsys.readouterr().err
+
+
+def test_spawn_session_window_sets_startup_marker(cy, tmux, dirs):
+    # The dashboard's launch path marks its windows so the inner yolo knows the
+    # pane history is exactly this launch and safe to snapshot.
+    home, work = dirs
+    tmux.has_session = True
+    tmux.attached = True  # focus selects the window in the attached client; no exec
+    cy._spawn_session_window(work, ["resume", "--no-tmux"], "repo-topic", "yolo")
+    (new_window,) = tmux.named("new-window")
+    assert window_command(new_window).startswith("YOLO_STARTUP_LOG=1 ")
+
+
+def test_tmux_launch_window_has_no_startup_marker(cy, run_cli, tmux, dirs):
+    # `yolo --tmux` from a shell puts only the `docker run` in the new window (the
+    # startup output stayed in the invoking terminal), so no marker there.
+    home, work = dirs
+    run_cli(["--tmux"], home=home, cwd=work)
+    (new_window,) = tmux.named("new-window")
+    assert "YOLO_STARTUP_LOG" not in window_command(new_window)

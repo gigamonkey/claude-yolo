@@ -3,6 +3,19 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **Startup output is preserved for tmux-spawned sessions.** When the `wip`
+  dashboard (or any yolo-spawned tmux window) launches a session, everything
+  printed before Claude's TUI takes over — worktree setup, the image build,
+  mount/credential messages — is snapshotted to `startup.log` in the
+  per-session run dir just before yolo execs `docker run`. The launch prints
+  the log's path; a new **`l`** key on a `wip` session row opens it in a
+  `less -R` window. The log is host-side only (never mounted into the
+  container) and is reclaimed with the rest of the run dir when the container
+  is gone. Hand-run sessions in a regular terminal are unaffected (your
+  terminal's scrollback already has that output).
+
 ## v0.26.2 — 2026-07-07
 
 - **`diff` (and the `wip` dashboard's `d`) now includes uncommitted changes.**
