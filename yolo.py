@@ -3914,8 +3914,8 @@ def _snapshot_startup_pane(run_dir: pathlib.Path) -> None:
     the Claude TUI — whose redraws eventually push it past tmux's history-limit.
     Called at the last moment before the exec, when the pane's whole history *is*
     the startup log: nothing has run in the window before yolo, and docker hasn't
-    run yet. A streaming `pipe-pane` can't do this job — yolo execvp's away, so
-    no process survives to turn the pipe off before the TUI floods it.
+    run yet. This snapshot is the *host-side* half of the log; what the container
+    prints after the exec is appended by _stream_startup_pane's pipe.
 
     Gated on YOLO_STARTUP_LOG (set only by _spawn_session_window, i.e. windows
     yolo created for a full inner invocation), not just TMUX_PANE: capturing
@@ -3937,6 +3937,42 @@ def _snapshot_startup_pane(run_dir: pathlib.Path) -> None:
         print("warning: couldn't capture the startup log; continuing.", file=sys.stderr)
         return
     _write_run_file(run_dir, "startup.log", (res.stdout.rstrip("\n") + "\n").encode())
+
+
+# Echoed by the claude-launch wrapper right before it exec's claude; the streaming
+# startup-log pipe (_stream_startup_pane) reads until this line and detaches. Kept
+# short so a narrow pane can't wrap it (a wrapped line would break the match).
+_STARTUP_END_LINE = "yolo: launching claude"
+
+
+def _stream_startup_pane(run_dir: pathlib.Path) -> None:
+    """Append the pane's output to startup.log from here until the launch sentinel.
+
+    _snapshot_startup_pane's capture necessarily stops at the exec: yolo execvp's
+    into docker, so no yolo process survives to see what prints *after* — the
+    docker-side chatter and the in-container wrapper's output (secrets loader,
+    clones, .yolorc), the tail of the startup story. tmux outlives the exec,
+    though: a `pipe-pane` started here streams the raw pane output into the log,
+    and its reader exits at the _STARTUP_END_LINE the wrapper echoes just before
+    exec'ing claude — detaching the pipe before the TUI floods the log. Only
+    called when the launch is wrapped, so the sentinel is guaranteed; a bare
+    docker-run launch would have nothing to stop the pipe. If docker dies before
+    the sentinel, the reader just runs until the pane closes (EOF), so the
+    failure output lands in the log too. Same gate as the snapshot; best-effort
+    (a pipe-pane failure is silent — the snapshot half still exists). The raw
+    stream is CRLF (it's a pty); the sub() strips the \\r so this half matches
+    the capture-pane half.
+    """
+    pane = os.environ.get("TMUX_PANE")
+    if not pane or not os.environ.get("YOLO_STARTUP_LOG"):
+        return
+    log_path = pathlib.Path(run_dir) / "startup.log"
+    reader = (
+        'awk \'{ sub(/\\r$/, ""); print } '
+        f'index($0, "{_STARTUP_END_LINE}") {{ exit }}\' '
+        f">> {shlex.quote(str(log_path))}"
+    )
+    _tmux("pipe-pane", "-t", pane, reader)
 
 
 def _dispatch_launch(
@@ -4354,7 +4390,8 @@ def launch_container(
         return "bash /etc/yolo/clone.sh " + " ".join(shlex.quote(a) for a in args)
 
     clone_cmds = "".join(f"{_clone_cmd(url, dest, depth)}; " for url, dest, depth in clones)
-    if (yolorc_host or have_env_secrets or clones) and entrypoint is None:
+    wrapped = bool(yolorc_host or have_env_secrets or clones) and entrypoint is None
+    if wrapped:
         entrypoint = "/bin/bash"
         command = [
             "-c",
@@ -4362,6 +4399,10 @@ def launch_container(
             f"{clone_cmds}"
             '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '
             'echo "yolo: .yolorc exited nonzero, continuing" >&2; }; '
+            # The sentinel line the streaming startup-log pipe stops at
+            # (_STARTUP_END_LINE / _stream_startup_pane). Unconditional: it's one
+            # honest line the TUI immediately replaces.
+            f"echo {shlex.quote(_STARTUP_END_LINE)}; "
             'exec "$@"',
             "yolo-rc",
             "claude",
@@ -4398,18 +4439,23 @@ def launch_container(
     _snapshot_startup_pane(run_dir)
     if getattr(parsed, "halt_before_exec", False):
         # Temporary startup-log debugging (--_halt-before-exec, wip `!`): freeze
-        # here, after the snapshot and before docker runs. The pane above is
-        # exactly what the capture saw; anything that scrolls by after Enter is
-        # post-exec output the log can never contain.
+        # here, after the snapshot and before docker runs. The pane above is what
+        # the snapshot saw; output after Enter is post-exec, covered by the
+        # streaming pipe (up to the launch sentinel).
         print(
-            "\n[halted before exec — startup.log is written; this pane is what "
-            "the capture saw. Enter launches claude, Ctrl-C aborts]",
+            "\n[halted before exec — startup.log holds the snapshot half; the "
+            "post-exec half streams in after Enter. Enter launches claude, "
+            "Ctrl-C aborts]",
             file=sys.stderr,
         )
         try:
             input()
         except (EOFError, KeyboardInterrupt):
             sys.exit(130)
+    if wrapped:
+        # The post-exec half of the startup log: stream the pane into it until
+        # the wrapper's sentinel says claude is taking over.
+        _stream_startup_pane(run_dir)
     _dispatch_launch(
         run_cmd,
         parsed,

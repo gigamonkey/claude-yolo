@@ -854,8 +854,8 @@ therefore **out-of-band and parallel-safe**:
   written via `_write_run_file` with `O_CREAT|0o600` so they're never briefly
   world-readable). Holds the staged secrets (`secrets/` subdir for env targets), the
   credential snapshot / throwaway mask, and — for tmux-spawned sessions — the
-  `startup.log` pane snapshot (`_snapshot_startup_pane`; host-side only,
-  deliberately **never** mounted into the container).
+  `startup.log` pane capture (`_snapshot_startup_pane` + `_stream_startup_pane`;
+  host-side only, deliberately **never** mounted into the container).
 
 - **Location: a per-user temp subdir** `claude-yolo-run/` (`_run_dir`). On **Linux**
   it prefers `$XDG_RUNTIME_DIR` when set (a per-user, mode-700 tmpfs); otherwise (and
@@ -1423,20 +1423,25 @@ gracefully outside one — there's just no repo slug to label/find by).
   `yolo start/resume … --no-tmux`, so the inner yolo re-resolves that repo's
   config and execs docker straight into the window). `_spawn_session_window`
   also sets **`YOLO_STARTUP_LOG=1`** on the window's command: the marker that
-  tells the inner yolo to snapshot the pane to a **startup log**
-  (`_snapshot_startup_pane`, called at the very end of `launch_container`,
-  after every host-side startup line has printed and just before
-  `_dispatch_launch` execs docker) — `capture-pane -p -e -S -` of its own
-  `$TMUX_PANE` into `<run-dir>/<container>/startup.log` (via `_write_run_file`,
-  so chmod 600; reclaimed by the run-dir GC; never mounted into the container).
-  That's the output the Claude TUI would otherwise bury and eventually push past
-  `history-limit`. A one-shot snapshot rather than `pipe-pane` because yolo
-  execvp's away — no process survives to turn a pipe off before the TUI floods
-  it — and the exec boundary is exactly when the fresh window's whole history
-  *is* the startup output. The gate is the marker *plus* `$TMUX_PANE`, not
-  `$TMUX_PANE` alone, so a hand-run `yolo` in someone's long-lived shell pane
-  never sweeps their unrelated scrollback into a file. The `wip` `l` key views
-  the log. The dashboard is long-lived
+  tells the inner yolo to capture a **startup log** in two halves, both at the
+  very end of `launch_container` after every host-side startup line has printed.
+  The host-side half is a snapshot (`_snapshot_startup_pane`): `capture-pane
+  -p -e -S -` of its own `$TMUX_PANE` into `<run-dir>/<container>/startup.log`
+  (via `_write_run_file`, so chmod 600; reclaimed by the run-dir GC; never
+  mounted into the container) — the exec boundary is exactly when the fresh
+  window's whole history *is* the host-side startup output. The post-exec half
+  (`_stream_startup_pane`) covers what no yolo process survives to see: just
+  before `_dispatch_launch` execs docker, it starts a `pipe-pane` whose reader
+  appends the raw pane stream to the same log and exits at the sentinel line
+  (`_STARTUP_END_LINE`) the claude-launch wrapper echoes right before `exec`'ing
+  claude — detaching the pipe before the TUI floods the log. It's only started
+  for wrapped launches (the sentinel is guaranteed); if docker dies first, the
+  reader runs until the pane closes, so the failure output lands in the log too.
+  Together the halves hold everything the Claude TUI would otherwise bury and
+  eventually push past `history-limit`. The gate is the marker *plus*
+  `$TMUX_PANE`, not `$TMUX_PANE` alone, so a hand-run `yolo` in someone's
+  long-lived shell pane never sweeps their unrelated scrollback into a file. The
+  `wip` `l` key views the log. The dashboard is long-lived
   *and* spans repos, so it does **not** carry a single `base`/`finish-action`/
   `finish-remote`: **each worktree resolves its own** from config at display and
   action time via `_worktree_config(home, main_root, worktree)` → `load_yolo_config(
@@ -2035,7 +2040,9 @@ clamping, Enter→select-window, cross-session switch-client, selection
 surviving a refresh, orphan marking, the picker-vs-passive dispatch); the
 `wip --_dashboard` seed of window 0 is asserted here too. The **startup log**
 is also covered here: the marker+pane-gated `capture-pane` snapshot into the
-run dir (content, 0600 mode, the exact capture argv), the no-marker /
+run dir (content, 0600 mode, the exact capture argv), the post-exec
+`pipe-pane` stream (reader carries the sentinel + log path, the wrapper echoes
+the sentinel before `exec`, unwrapped launches start no pipe), the no-marker /
 no-pane / capture-failure skips (failure warns but the launch proceeds),
 `_spawn_session_window` prepending `YOLO_STARTUP_LOG=1`, and the plain
 `--tmux` launch window *not* carrying the marker.

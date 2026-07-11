@@ -497,11 +497,13 @@ superset; `ps`/`ps --watch` remain as standalone verbs, handy outside tmux.)
 
 Sessions the dashboard spawns also keep a **startup log**: everything the launch
 printed into the window (worktree setup, the image build, mount/credential
-messages) is snapshotted just before Claude's TUI takes over, so it isn't lost
-to the pane's scrollback. The launch prints the log's path (it lives in the
-per-session run dir and disappears with the container), and `l` on the session's
-row opens it in a pager window. Sessions started by hand in a regular terminal
-don't get one — there, your own terminal's scrollback already has the output.
+messages) is snapshotted just before `docker run`, and the container's own
+startup output — the secrets loader, `--clone` clones, `.yolorc` — is streamed
+into the same log until claude takes over, so none of it is lost to the pane's
+scrollback. The launch prints the log's path (it lives in the per-session run
+dir and disappears with the container), and `l` on the session's row opens it
+in a pager window. Sessions started by hand in a regular terminal don't get one
+— there, your own terminal's scrollback already has the output.
 
 ## Authentication modes
 

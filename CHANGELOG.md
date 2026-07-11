@@ -15,9 +15,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   dashboard (or any yolo-spawned tmux window) launches a session, everything
   printed before Claude's TUI takes over — worktree setup, the image build,
   mount/credential messages — is snapshotted to `startup.log` in the
-  per-session run dir just before yolo execs `docker run`. The launch prints
-  the log's path; a new **`l`** key on a `wip` session row opens it in a
-  `less -R` window. The log is host-side only (never mounted into the
+  per-session run dir just before yolo execs `docker run`, and the container's
+  own startup output (docker chatter, the secrets loader, `--clone` clones,
+  `.yolorc`) is streamed into the same log via a `pipe-pane` that detaches at a
+  sentinel line the launch wrapper prints right before starting claude. The
+  launch prints the log's path; a new **`l`** key on a `wip` session row opens
+  it in a `less -R` window. The log is host-side only (never mounted into the
   container) and is reclaimed with the rest of the run dir when the container
   is gone. Hand-run sessions in a regular terminal are unaffected (your
   terminal's scrollback already has that output).

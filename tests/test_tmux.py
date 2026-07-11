@@ -610,6 +610,39 @@ def test_startup_log_captured_for_spawned_window(cy, run_cli, tmux, dirs, monkey
     assert log.stat().st_mode & 0o777 == 0o600
 
 
+def test_startup_log_streams_post_exec_until_sentinel(cy, run_cli, tmux, dirs, monkeypatch):
+    # The snapshot ends where yolo execvp's into docker; a pipe-pane started just
+    # before appends the post-exec pane stream (docker chatter, the wrapper's
+    # secrets/clones/.yolorc output) to the same log. Its reader exits at the
+    # sentinel line the wrapper echoes right before exec'ing claude, so the TUI
+    # never floods the log.
+    home, work = dirs
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
+    argv = run_cli([], home=home, cwd=work)  # oauth-token default -> wrapped
+
+    (pipe,) = tmux.named("pipe-pane")
+    assert pipe[1:3] == ["-t", "%3"]
+    reader = pipe[3]
+    assert cy._STARTUP_END_LINE in reader
+    assert str(home / ".claude-yolo-run" / "work" / "startup.log") in reader
+    # ...and the wrapper really does emit that sentinel just before the exec.
+    script = next(a for a in argv if 'exec "$@"' in a)
+    assert f'echo {shlex.quote(cy._STARTUP_END_LINE)}; exec "$@"' in script
+
+
+def test_startup_log_stream_skipped_for_unwrapped_launch(cy, run_cli, tmux, dirs, monkeypatch):
+    # keychain auth with no secrets/clones/rc launches claude unwrapped: no
+    # sentinel would ever print, so no pipe is started (nothing would stop it
+    # before the TUI floods the log). The snapshot half still happens.
+    home, work = dirs
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
+    run_cli(["--auth", "keychain"], home=home, cwd=work)
+    assert tmux.named("pipe-pane") == []
+    assert len(tmux.named("capture-pane")) == 1
+
+
 def test_startup_log_skipped_without_marker(cy, run_cli, tmux, dirs, monkeypatch):
     # TMUX_PANE alone isn't enough: a hand-run yolo in someone's long-lived shell
     # pane must not capture their scrollback.
@@ -618,6 +651,7 @@ def test_startup_log_skipped_without_marker(cy, run_cli, tmux, dirs, monkeypatch
     monkeypatch.delenv("YOLO_STARTUP_LOG", raising=False)
     run_cli([], home=home, cwd=work)
     assert tmux.named("capture-pane") == []
+    assert tmux.named("pipe-pane") == []
     assert not (home / ".claude-yolo-run" / "work" / "startup.log").exists()
 
 
@@ -627,6 +661,7 @@ def test_startup_log_skipped_outside_tmux(cy, run_cli, tmux, dirs, monkeypatch):
     monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
     run_cli([], home=home, cwd=work)
     assert tmux.named("capture-pane") == []
+    assert tmux.named("pipe-pane") == []
 
 
 def test_startup_log_capture_failure_is_nonfatal(cy, run_cli, tmux, dirs, monkeypatch, capsys):
