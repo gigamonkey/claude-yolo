@@ -17,8 +17,10 @@ again for that topic.
 ## User-visible behavior
 
 ```bash
-# Define the multi-repo project once (name, primary repo, extra repos):
-yolo config --project chat --dir ~/work/app --add-repo ~/work/lib --add-repo ~/work/proto
+# Define the multi-repo project once (from inside the primary repo, whose
+# root is inferred as `dir`; --dir overrides, and is required outside a repo):
+cd ~/work/app
+yolo config --project chat --add-repo ~/work/lib --add-repo ~/work/proto
 
 # Start a worktree session from it (works from any directory):
 yolo start fix-auth --project chat
@@ -188,11 +190,14 @@ stamped for observability (nothing reads it in v1).
    in-repo invocation? No — the cwd is simply ignored in favor of `dir`
    (document it).
 
-7. Creation/editing: `yolo config --project NAME --dir ... --add-repo ...`
+7. Creation/editing: `yolo config --project NAME [--dir PATH] --add-repo ...`
    writes the entry (reusing `_apply_config_edits` with a new
-   `_ConfigScope`); `yolo config --project NAME` alone shows it. Exact
-   surface (e.g. whether `--dir` is a new flag or inferred from cwd) is an
-   open question to settle during implementation.
+   `_ConfigScope`); `yolo config --project NAME` alone shows it. On
+   creation, `dir` is inferred from the cwd's main repo root
+   (`_main_root_or_none`) when run inside a repo; an explicit `--dir`
+   overrides the inference, and is required when run outside a repo (error
+   otherwise, naming the flag). `--dir` is a config-verb-only flag, guarded
+   like the other `--add-*` flags in `_main`'s flag-vs-verb checks.
 
 8. Overlay stamping: extend the start-path snapshot (yolo.py:7544) so a
    saved-config start writes the saved keys merged with explicit CLI flags
