@@ -885,27 +885,6 @@ def test_build_docker_image_passes_uid_build_arg(cy, monkeypatch, tmp_path):
     assert "--build-arg" in cmd and "HOST_UID=4242" in cmd
 
 
-def test_build_uses_plain_progress_in_startup_log_windows(cy, monkeypatch):
-    # In a YOLO_STARTUP_LOG window the pane is snapshotted to startup.log, and
-    # the capture keeps only what BuildKit's tty renderer leaves rendered (it
-    # erases each step's output as the step finishes). Plain progress is what
-    # makes the build output survive into the log.
-    calls = {}
-    monkeypatch.setattr(cy.subprocess, "run", lambda cmd, **k: calls.setdefault("cmd", cmd))
-    monkeypatch.setenv("YOLO_STARTUP_LOG", "1")
-    cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
-    assert "--progress=plain" in calls["cmd"]
-
-
-def test_build_keeps_default_progress_without_startup_log(cy, monkeypatch):
-    # Hand-run launches keep BuildKit's default fancy progress display.
-    calls = {}
-    monkeypatch.setattr(cy.subprocess, "run", lambda cmd, **k: calls.setdefault("cmd", cmd))
-    monkeypatch.delenv("YOLO_STARTUP_LOG", raising=False)
-    cy.build_docker_image("FROM scratch\n", "claude-yolo:abc12345", 4242)
-    assert "--progress=plain" not in calls["cmd"]
-
-
 def test_build_context_contains_only_the_dockerfile(cy, monkeypatch):
     # The empty build context is what stops a custom Dockerfile's COPY/ADD from
     # reaching host files — capture the context dir (last build arg) and assert it

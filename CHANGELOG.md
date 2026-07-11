@@ -17,10 +17,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   mount/credential messages — is snapshotted to `startup.log` in the
   per-session run dir just before yolo execs `docker run`. The launch prints
   the log's path; a new **`l`** key on a `wip` session row opens it in a
-  `less -R` window. Image builds in these sessions run with
-  `--progress=plain` so the full build output (npm/apt warnings and all)
-  survives into the log instead of being erased by BuildKit's collapsing
-  progress display. The log is host-side only (never mounted into the
+  `less -R` window. The log is host-side only (never mounted into the
   container) and is reclaimed with the rest of the run dir when the container
   is gone. Hand-run sessions in a regular terminal are unaffected (your
   terminal's scrollback already has that output).

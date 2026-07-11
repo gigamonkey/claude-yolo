@@ -1435,12 +1435,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   it — and the exec boundary is exactly when the fresh window's whole history
   *is* the startup output. The gate is the marker *plus* `$TMUX_PANE`, not
   `$TMUX_PANE` alone, so a hand-run `yolo` in someone's long-lived shell pane
-  never sweeps their unrelated scrollback into a file. Because the capture is
-  of the *rendered* pane — and BuildKit's tty progress erases each build
-  step's output as the step finishes — `build_docker_image` switches to
-  `--progress=plain` under the same `YOLO_STARTUP_LOG` marker, so the full
-  build output survives into the history the snapshot captures. The `wip` `l`
-  key views the log. The dashboard is long-lived
+  never sweeps their unrelated scrollback into a file. The `wip` `l` key views
+  the log. The dashboard is long-lived
   *and* spans repos, so it does **not** carry a single `base`/`finish-action`/
   `finish-remote`: **each worktree resolves its own** from config at display and
   action time via `_worktree_config(home, main_root, worktree)` → `load_yolo_config(
