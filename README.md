@@ -324,6 +324,74 @@ There are also three token-management verbs — `setup-token`, `tokens`, and
 `forget-token` — described under [Authentication modes](#authentication-modes),
 and a `config` verb described under [Configuration](#configuration).
 
+### Multi-repo projects
+
+A project can span several git repos: a worktree session then gets a same-named
+worktree+branch in *each* repo, every one mounted into the container exactly
+like the single repo above (worktree + shared `.git`, at their identical host
+paths), and the worktree verbs operate across the whole set.
+
+The usual way in is a **saved multi-repo project** — a named config listing the
+primary repo and the extras:
+
+```bash
+cd ~/work/app                          # the primary repo (sessions start here)
+yolo config --multi-repo chat --add-repo ~/work/lib --add-repo ~/work/proto
+yolo start fix-auth --multi-repo chat  # works from any directory
+```
+
+That `start` creates branch `fix-auth` and a worktree in **app**, **lib**, and
+**proto**; the session's working directory is app's worktree, with lib's and
+proto's mounted alongside and announced to Claude as extra working dirs (plus a
+system-prompt note explaining the layout, so it commits in each repo on the
+shared branch). In `yolo wip`, the saved config gets its own row — `n` on it
+starts a multi-repo worktree, `c` edits it, and `a` offers "multi-repo project"
+as one of the things to add.
+
+When creating a saved config, the primary `dir` is inferred from the repo you
+run `yolo config` in; `--dir PATH` overrides it (and is required outside a
+repo). The entry lives in `~/.claude-yolo/multirepos.json` and is **consulted
+only at start**: the effective keys are stamped into the topic's worktree
+overlay, so the topic is self-describing — `resume`/`finish`/`rebase`/`merge`/
+`diff` read the overlay, and editing or deleting the saved config never changes
+a live topic.
+
+Two lower-level entry points feed the same machinery: ad-hoc `--repo PATH`
+flags on `start` (sticky for that topic via the overlay snapshot, like
+`--mount`), and a [`repos`](#repos---repo-path-repeatable) key on a directory's
+own project entry for a project whose *every* worktree session should be
+multi-repo. Defining a saved config does **not** make plain `yolo start` from
+its member repos multi-repo.
+
+Across the set, the verbs behave as you'd hope (run them from the primary
+repo, as usual):
+
+- **`finish TOPIC`** guards first — a dirty worktree in *any* repo aborts the
+  lot (unless `--force`), and with `--finish-action merge` every repo merges
+  before any worktree is removed — then removes each worktree and applies the
+  branch action per repo, reporting `[repo]`-prefixed results.
+
+- **`rebase TOPIC`** dirty-checks every worktree first, then rebases each onto
+  `--base` resolved in its *own* repo (so the default `HEAD` means each repo's
+  tip). A conflict stops at that repo, left in-progress there to resolve.
+
+- **`merge TOPIC`** merges each repo's branch into its own checkout,
+  sequentially, stopping (cleanly, per repo) at the first failure.
+
+- **`diff TOPIC`** prints each repo's diff under a `== repo ==` header
+  (`--stat` runs the interactive picker per repo in turn).
+
+- **`stop` / `ps` / `browse`** are unchanged — it's still one container.
+
+Each extra repo's worktree lives under its own slug in
+`~/.claude-yolo/worktrees/`, so `yolo list --all` and the dashboard's WORKTREES
+section show them as ordinary per-repo rows. A repo whose path has vanished is
+skipped by `finish` with a warning (never stranding the rest); a repo *added*
+to a topic's config mid-flight (`yolo config TOPIC --add-repo …`) gets its
+worktree created on the next `resume`. `repos` is ignored (with a note) for
+current-directory sessions — the feature is about creating worktrees; use
+[`mounts`](#mounts---mount-pathrorw-repeatable) to mount live checkouts.
+
 ### Port forwarding and `yolo browse`
 
 If the project runs a server you want to reach from a host browser, configure
@@ -711,9 +779,10 @@ to highest precedence:
 
 3. **CLI flags** — always win over both files.
 
-Per key, a higher layer overrides a lower one, except `prompts`, `mounts`, and
-`ports`, whose lists *accumulate* across all the layers. A JSON `null`
-leaves a key at its built-in default.
+Per key, a higher layer overrides a lower one, except the list keys —
+`prompts`, `mounts`, `ports`, `secrets`, `plugin-dirs`, `clones`, and `repos` —
+whose lists *accumulate* across all the layers. A JSON `null` leaves a key at
+its built-in default.
 
 Both files live **outside directories a session in a container can write**, and
 that's deliberate. If we allowed, for instance, a `.yolo.json` to live in a
@@ -984,6 +1053,28 @@ yolo config --remove-clone ../lib                            # remove by dir
 
 The `yolo wip` dashboard's `c` config editor edits clones interactively too
 (prompting url, dir, and an optional depth).
+
+### `repos` (`--repo PATH`, repeatable)
+
+Extra git repos that are part of this project — the
+[multi-repo](#multi-repo-projects) key. A worktree session (`yolo start
+TOPIC`) also creates a `TOPIC` worktree+branch in each listed repo and mounts
+it (with its shared `.git`) into the container, and
+`finish`/`rebase`/`merge`/`diff` operate across the whole set:
+
+```bash
+yolo start feat --repo ~/work/lib     # one topic spanning this repo + lib
+yolo config --add-repo ~/work/lib     # ...or pin it for every topic of this project
+```
+
+Each path must exist and be inside a git repo (a path inside one normalizes to
+the repo's root; duplicates and the primary itself dedupe away) — validated at
+config-set time and again at launch. The lists concatenate across the config
+layers and the CLI. Unlike `clones` (which fetches a repo *into the ephemeral
+container*), `repos` is about **host** repos: the worktrees are real host git
+worktrees, so commits persist exactly like the primary's. Ignored (with a
+note) for current-directory sessions. Usually set via a
+[saved multi-repo project](#multi-repo-projects) rather than directly.
 
 ### `yolorc` (`--yolorc PATH`)
 
@@ -1275,6 +1366,11 @@ A few editing flags go beyond whole-key sets:
   likewise for the `ports` list. `--add-port` replaces an existing entry for
   the same container port (so a `HOST:` pin can be added or dropped);
   `--remove-port` matches by container port, ignoring any pin.
+- **`--add-repo PATH` / `--remove-repo PATH`** (repeatable) likewise for the
+  [`repos`](#repos---repo-path-repeatable) list. `--add-repo` validates the
+  path is a git repo and matches by resolved path (a re-add is a no-op);
+  `--remove-repo` doesn't require the path to exist, so a stale repo can be
+  removed.
 
 Contradictory instructions in one call — setting and `--unset`ting the same
 key, or `--mount` alongside `--add-mount`/`--remove-mount` — are errors.
@@ -1292,6 +1388,14 @@ can't be combined with other config flags (an empty entry is the point). One
 subtlety: because only the most specific matching entry applies, an empty entry
 created inside a directory covered by some broader entry *shadows* that entry's
 config for this project — yolo warns when that happens.
+
+With **`--multi-repo NAME`**, the same invocations target the saved
+[multi-repo project](#multi-repo-projects) `NAME` in
+`~/.claude-yolo/multirepos.json` instead — show it bare, or set/edit its keys
+with the same flags (plus `--dir PATH` for its primary repo, inferred from the
+cwd's repo on creation). A saved entry is an ordinary config object with the
+extra required `dir`, so it can also carry `ports`, `prompts`, etc. — it's a
+saved way to launch.
 
 ## Extra `docker run` arguments
 

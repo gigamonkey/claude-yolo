@@ -886,7 +886,10 @@ avoids. *tmpfs / FIFO / stdin* — none can carry a host *value* into a bind mou
 
 Config supplies defaults for most flags; `load_yolo_config` applies them via
 `PARSER.set_defaults` *before* the re-`parse_args`, so explicit CLI flags still
-win. Up to three layers, merged low→high, **all host-side only**:
+win. Up to three layers, merged low→high, **all host-side only** (a fourth,
+`~/.claude-yolo/multirepos.json`, holds saved multi-repo launch templates that
+`start --multi-repo` layers between the project entry and the CLI — see
+"Multi-repo projects"):
 
 1. **`~/.yolo.json`** (global) — a flat JSON object of config keys.
 2. **`~/.claude-yolo/projects.json`** (per-project) — a JSON object mapping a
@@ -1782,6 +1785,76 @@ is named via `claude --name <repo>:<TOPIC>`. Durability is the point: commits la
 host's shared `.git` and uncommitted edits live in the host worktree dir, so a
 container exit loses nothing. Must be run from inside a git repo.
 
+## Multi-repo projects (`repos`, `--multi-repo`, `multirepos.json`)
+
+A worktree session can span several repos: `start` creates a same-named
+worktree+branch in each and the verbs operate across the set. The moving parts:
+
+- **The `repos` config key** (`--repo PATH`, concat across layers) names the
+  *additional* repos; the primary stays implicit (the repo yolo runs from — the
+  same identity as the project key). `_parse_repo_spec` validates at config-set
+  time (must exist + be a git repo, like a mount source); `_resolve_repos`
+  normalizes each spec to its repo's main root via `_repo_root_of` (the
+  explicit-directory sibling of `_repo_paths`), dedupes by root, and drops the
+  primary. It's **strict on the launch paths** (a typo'd path fails before any
+  worktree exists) and **tolerant (`strict=False`) in `_topic_repo_set`** — the
+  verbs must not let a vanished repo strand the removable rest.
+
+- **Saved multi-repo projects** — `~/.claude-yolo/multirepos.json`, `{name:
+  {dir, ...config keys}}`, written only by `yolo config --multi-repo NAME`
+  (`_do_config_multirepo`, which reuses `_apply_config_edits`; `dir` is
+  --dir or inferred from the cwd's main root, and is normalized to a repo
+  root). A saved entry is a **launch template, not an identity**: `start TOPIC
+  --multi-repo NAME` chdirs to `dir` (so every cwd-derived value — repo root,
+  project key, secrets scope — matches a start run from there), layers the
+  entry's keys between the dir's project entry and the CLI
+  (`load_yolo_config(multirepo=…)`), and stamps them into the topic's worktree
+  overlay (`_merge_overlay_layers`: saved under explicit CLI, list keys
+  concatenating). Nothing after `start` consults the entry.
+
+- **The overlay is the per-topic source of truth.** `_topic_repo_set(worktree,
+  main_root, slug, topic, home)` — backing finish/rebase/merge/diff — re-reads
+  the topic's own config (`load_yolo_config(..., worktree_dir=worktree,
+  quiet=True)`, so the overlay is included regardless of which verb runs) and
+  returns `[(worktree, main_root, slug)]`, primary first. Repos with no
+  worktree for the topic are skipped silently; a repo added mid-topic (`yolo
+  config TOPIC --add-repo`) gets its worktree created by the next `resume`
+  (never by `shell`, which only mounts what exists).
+
+- **Start is guard-all-then-create with rollback:** every repo is pre-flighted
+  (worktree dir or branch exists → error naming the repo) before anything is
+  created; a mid-set creation failure force-removes the worktrees *and*
+  branches already created. `finish` mirrors that shape — dirty-check every
+  worktree (any dirty repo aborts, `--force` waives), for `--finish-action
+  merge` merge every repo before removing anything, then per-repo removal +
+  branch action (`_finish_branch`) with `[repo]`-prefixed messages; only the
+  primary's overlay entry is removed (extras never have one).
+
+- **Container wiring:** each extra repo mounts exactly like the primary — the
+  worktree and its shared `.git` at their identical host paths
+  (`launch_container(extra_repos=…)`) — plus `--add-dir` per extra worktree, a
+  system-prompt layout line (`build_claude_args(multi_repo_dirs=…)`), a
+  `yolo.extra-repos=<slugs>` label (observability only), and `--submodules`
+  looping over the extras. Everything else (container name, session name,
+  labels, status file, overlay key) stays keyed to the primary, so
+  `stop`/`ps`/`browse` needed no changes. Extra worktrees live under their
+  *own* repos' slugs in `~/.claude-yolo/worktrees/`, so `list --all`, the
+  dashboard, and orphan recovery see them as ordinary rows.
+
+- **`wip`:** saved configs render as `multirepo` rows in the PROJECTS section
+  (`n` spawns `start TOPIC --multi-repo NAME --no-tmux`; `c` opens the config
+  editor via a `multirepos.json` `_ConfigScope` whose writes go through `yolo
+  config --multi-repo NAME`, with a special `dir` prompt in
+  `_config_edit_key`); `a` is a two-way picker — directory project (the
+  original register flow) or multi-repo project (name + primary path →
+  create via `--dir` → straight into the editor to add `repos`). The dashboard
+  reads `multirepos.json` **leniently** (malformed → `{}`) so the refresh loop
+  keeps drawing; the config verb stays strict.
+
+- `repos` on a cwd session is ignored with a stderr note (the feature is
+  creating worktrees; `mounts` covers live checkouts). `--multi-repo` is named
+  around the existing `--project` flag, which `secret set`/`rm` already own.
+
 ## Resuming a session (`resume`, `--resume [SESSION_ID]` / `-r`)
 
 Resuming is the `resume` verb's job (there is no longer a bare `--continue`/`-c`
@@ -2014,6 +2087,27 @@ concat-key accumulation, `resume` flags *updating* the overlay (lists accumulate
 `--global`/`--init`/missing-worktree errors, and a relative `--dockerfile`
 validated against the worktree dir rather than the cwd), `finish` removing the
 entry, and a malformed-file error.
+`test_multi_repo.py` covers multi-repo projects against **three real throwaway
+repos**: the `repos` key end-to-end (`config --add-repo`/`--remove-repo`
+persist/dedupe/validate, a project-entry `repos` reaching the launch), the
+multi-worktree `start` (worktree+branch per repo, per-repo worktree + `.git`
+mounts with `-w` staying the primary, `--add-dir` + the layout prompt line +
+the `yolo.extra-repos` label, the `--repo`-flags overlay stamp, the untouched
+single-repo path), the guards (bad path / branch-collision errors creating
+nothing, mid-set failure rolling back worktrees and branches, the cwd-session
+ignored-with-a-note case), `resume` (remounting the set from the overlay,
+creating the worktree for a repo added mid-topic), saved multi-repo projects
+(`config --multi-repo` creating with inferred/explicit/normalized `--dir` and
+the outside-a-repo error, `start --multi-repo` launching from the saved `dir`
+regardless of cwd and stamping the overlay, saved-config edits never touching a
+live topic, the saved+CLI overlay merge, the flag guards), the verbs across
+the set (`finish` removing all worktrees with per-repo branch handling, the
+any-repo dirty block + `--force`, the vanished-repo skip; `rebase` and `merge`
+per-repo against each repo's own base/checkout; `diff` with `== repo ==`
+headers), and the `wip` layer (saved-config rows in `_wip_items`, `n` spawning
+`start … --multi-repo`, the `a` picker's multi-repo branch creating the entry
+then opening the editor, the `multirepos.json` `_ConfigScope`, and the editor's
+`dir`-via-`--dir` prompt).
 `test_tokens.py` covers the token registry, the registry-sourced expiry warning
 (`_token_minted`), the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the credential-store wrapping helpers stubbed).

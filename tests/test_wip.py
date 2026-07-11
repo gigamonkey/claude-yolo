@@ -1069,12 +1069,14 @@ def test_action_yolo_error_lands_in_footer(cy, monkeypatch):
 
 
 def test_add_project_prompts_and_registers(cy, monkeypatch, tmp_path):
+    # `a` opens the add picker; Enter on "directory project" (the first option)
+    # is the original register-a-path flow.
     registered = []
     monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
     d = tmp_path / "newproj"
     d.mkdir()
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["a"], lines=[str(d)])
+    run_loop(cy, monkeypatch, sections, ["a", "\r"], lines=[str(d)])
     assert registered == [str(d.resolve())]
 
 
@@ -1102,7 +1104,7 @@ def test_add_project_on_registered_still_prompts(cy, monkeypatch, tmp_path):
         "worktree": [],
         "project": [project_item(cy, path="/work/reg", registered=True)],
     }
-    run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d)])
+    run_loop(cy, monkeypatch, sections, ["a", "\r", "q"], lines=[str(d)])
     assert registered == [str(d.resolve())]
 
 

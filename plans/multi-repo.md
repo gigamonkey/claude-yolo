@@ -1,5 +1,10 @@
 # Multi-repo projects
 
+> **Implemented** (see CHANGELOG "Multi-repo projects"), with one naming
+> deviation: the saved-config selector is **`--multi-repo NAME`**, not
+> `--project NAME` — `--project` was already taken as `secret set`/`rm`'s
+> scope flag. The store is `~/.claude-yolo/multirepos.json`.
+
 Let a project span multiple git repos. When a worktree session starts, yolo
 creates a same-named worktree+branch in *each* of the project's repos and
 mounts every one of them into the container exactly the way the single repo is

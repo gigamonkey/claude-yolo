@@ -5,6 +5,24 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Multi-repo projects.** A project can now span several git repos: a
+  worktree session gets a same-named worktree+branch in *each* repo, every one
+  mounted like the primary (worktree + shared `.git` at their identical host
+  paths) and announced to Claude as a working dir, and
+  `finish`/`rebase`/`merge`/`diff` operate across the whole set (guards run
+  across every repo before anything is touched). Three entry points, all
+  feeding the topic's worktree overlay (the per-topic source of truth): a new
+  `repos` config key / repeatable `--repo PATH` flag (with `--add-repo` /
+  `--remove-repo` config edits), and — the main affordance — **saved
+  multi-repo projects**: `yolo config --multi-repo NAME [--dir PATH]
+  --add-repo …` saves a named launch template in
+  `~/.claude-yolo/multirepos.json` (`dir` inferred from the cwd's repo), and
+  `yolo start TOPIC --multi-repo NAME` starts from it regardless of cwd. The
+  saved entry is consulted only at start, so editing or deleting it never
+  changes a live topic. In `yolo wip`, saved configs get their own PROJECTS
+  rows (`n` starts a worktree from one, `c` edits it) and `a` now offers
+  "multi-repo project" alongside the directory-project register flow.
+
 - **The container's timezone now matches the host's.** Every session forwards
   the host timezone as a `TZ` env var (from the host's `$TZ`, the
   `/etc/localtime` symlink, or Debian's `/etc/timezone`), so timestamps inside

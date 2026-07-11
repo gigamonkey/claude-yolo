@@ -1498,15 +1498,13 @@ def _has_resumable_session(host_claude_dir, cwd) -> bool:
     return proj.is_dir() and any(proj.glob("*.jsonl"))
 
 
-def _branch_exists(name: str) -> bool:
-    return (
-        subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]).returncode
-        == 0
-    )
+def _branch_exists(name: str, repo: pathlib.Path | None = None) -> bool:
+    cmd = ["git", *(["-C", str(repo)] if repo else []), "show-ref", "--verify", "--quiet"]
+    return subprocess.run([*cmd, f"refs/heads/{name}"]).returncode == 0
 
 
 def setup_worktree(
-    name: str, home: pathlib.Path, base: str = "HEAD"
+    name: str, home: pathlib.Path, base: str = "HEAD", repo: pathlib.Path | None = None
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     """Create a host git worktree on a new branch NAME for a parallel session.
 
@@ -1516,15 +1514,26 @@ def setup_worktree(
     dir and the shared .git at their identical host paths, because the worktree
     records an absolute path to the shared .git and vice versa — so same-path
     mounting is what makes git work inside the container. Branch NAME is created off
-    `base` (default the current HEAD) with no upstream (a stray `git push` can't hit
-    main); commits land in the shared .git on the host, so work survives container
-    exit. The sole caller (`start`) guarantees the worktree and branch don't already
-    exist (it errors otherwise), so this always creates fresh.
+    `base` (default the repo's current HEAD) with no upstream (a stray `git push`
+    can't hit main); commits land in the shared .git on the host, so work survives
+    container exit. `repo` targets a repo other than the cwd's (the extra repos of a
+    multi-repo start); default is the repo containing the cwd. The callers (`start`,
+    and `resume` recreating a missing extra worktree) guarantee the worktree and
+    branch don't already exist (they error otherwise), so this always creates fresh.
     """
-    common_git, main_root, slug = _repo_paths()
+    if repo is None:
+        common_git, main_root, slug = _repo_paths()
+    else:
+        ident = _repo_root_of(repo)
+        if ident is None:
+            raise YoloError(f"not a git repository: {repo}")
+        common_git, main_root, slug = ident
     worktree = home / ".claude-yolo" / "worktrees" / slug / name
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "worktree", "add", "-b", name, str(worktree), base], check=True)
+    subprocess.run(
+        ["git", "-C", str(main_root), "worktree", "add", "-b", name, str(worktree), base],
+        check=True,
+    )
     return worktree, common_git, main_root
 
 
@@ -1561,6 +1570,7 @@ YOLO_KEYS = {
     "secrets": ("secrets", "list"),
     "plugin_dirs": ("plugin_dirs", "list"),
     "clones": ("clones", "clones"),
+    "repos": ("repos", "list"),
     "require_project_entry": ("require_project_entry", "bool"),
     "tmux": ("tmux", "bool"),
     "tmux_session": ("tmux_session", "str"),
@@ -1568,7 +1578,7 @@ YOLO_KEYS = {
 
 # dests whose values concatenate across the config layers and the CLI (everything
 # else is overridden by the higher-precedence layer)
-_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets", "plugin_dirs", "clones")
+_CONCAT_DESTS = ("prompts", "mounts", "ports", "secrets", "plugin_dirs", "clones", "repos")
 
 # sentinel default marking "flag not given" in _explicit_config_flags
 _UNSET = object()
@@ -1789,6 +1799,75 @@ def _merge_worktree_overlay(
     _write_worktrees_file(wt_file, worktrees)
 
 
+# Saved multi-repo projects: ~/.claude-yolo/multirepos.json maps a NAME -> a
+# config object with a required "dir" (the primary repo) plus ordinary config
+# keys — typically `repos`, the extra repos. A saved entry is a *launch
+# template*: `yolo start TOPIC --multi-repo NAME` runs as if invoked from `dir`,
+# with the entry's keys layered between the dir's projects.json entry and the
+# CLI flags, and the effective keys stamped into the topic's worktree overlay.
+# Nothing after start consults the entry — the topic is self-describing, so
+# editing or deleting a saved config never changes a live topic. Host-side only
+# and never mounted, like every other config file.
+def _multirepos_file(home: pathlib.Path) -> pathlib.Path:
+    return home / ".claude-yolo" / "multirepos.json"
+
+
+def _read_multirepos_file(home: pathlib.Path, *, lenient: bool = False) -> dict:
+    """~/.claude-yolo/multirepos.json as {name: entry}; {} if absent.
+
+    `lenient` returns {} on a malformed file instead of exiting — for the `wip`
+    dashboard's refresh loop, which must keep drawing; the config verb (run to
+    fix the file) stays strict and pointed.
+    """
+    path = _multirepos_file(home)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        if lenient:
+            return {}
+        sys.exit(f"{path}: cannot read multi-repo config: {e}")
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        if lenient:
+            return {}
+        sys.exit(f"{path}: must be a JSON object mapping names to config objects")
+    return raw
+
+
+def _write_multirepos_file(home: pathlib.Path, data: dict) -> None:
+    path = _multirepos_file(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _multirepo_entry(home: pathlib.Path, name: str) -> tuple[pathlib.Path, dict]:
+    """(primary dir, raw config keys) of saved multi-repo project `name`.
+
+    Validated for launch: exits if the entry is missing, its `dir` is unusable,
+    or its config keys don't parse — the callers (`start --multi-repo`, spawned
+    by the dashboard's `n`) are about to launch from it, so a broken entry must
+    fail loudly here, before anything is created. The config keys are returned
+    *raw* (dashed, unexpanded), the form the overlay stamp persists; callers
+    parse them via `_parse_yolo_dict` where they need argparse dests.
+    """
+    entry = _read_multirepos_file(home).get(name)
+    if entry is None:
+        sys.exit(
+            f"no multi-repo project '{name}'; create one with "
+            f"`yolo config --multi-repo {name} --dir DIR --add-repo PATH`."
+        )
+    raw_dir = entry.get("dir")
+    if not isinstance(raw_dir, str) or not raw_dir:
+        sys.exit(f"multirepos.json [{name}]: entry needs a 'dir' (the primary repo).")
+    primary = pathlib.Path(os.path.expanduser(raw_dir))
+    if not primary.is_dir():
+        sys.exit(f"multirepos.json [{name}]: dir does not exist: {raw_dir}")
+    cfg = {k: v for k, v in entry.items() if k != "dir"}
+    _parse_yolo_dict(cfg, f"multirepos.json [{name}]")  # reject an unloadable entry now
+    return primary, cfg
+
+
 def _match_project_entry(projects: dict, start: pathlib.Path) -> tuple[str | None, dict | None]:
     """The (key, raw entry) whose directory contains `start`; longest key wins.
 
@@ -1836,6 +1915,7 @@ def load_yolo_config(
     home: pathlib.Path,
     *,
     worktree_dir: pathlib.Path | None = None,
+    multirepo: tuple[str, dict] | None = None,
     quiet: bool = False,
 ) -> tuple[dict, str | None]:
     """Merge ~/.yolo.json with the matching ~/.claude-yolo/projects.json entry.
@@ -1845,7 +1925,11 @@ def load_yolo_config(
     applies the dict via PARSER.set_defaults, so explicit flags still win). When
     `worktree_dir` is given (the launch verbs in worktree mode), that worktree's
     ~/.claude-yolo/worktrees.json entry is layered on as the most specific
-    persisted layer. prompts/mounts/ports concatenate across the layers; every
+    persisted layer. `multirepo` — a `(name, raw config keys)` pair from a saved
+    multi-repo project (`start --multi-repo`) — layers between the project entry
+    and the overlay: the saved entry is a launch template refining the primary
+    dir's own config (and never coexists with an overlay — start creates the
+    overlay *from* it). prompts/mounts/ports concatenate across the layers; every
     other key is overridden by the higher layer. All three files are host-side
     only — outside every container mount — so nothing Claude writes inside a
     container can change what the next launch mounts or which credentials it uses.
@@ -1877,6 +1961,13 @@ def load_yolo_config(
     if matched_key is not None:
         merge(_parse_yolo_dict(entry, f"{projects_file} [{matched_key}]"))
         layers.append(f"projects.json[{matched_key}]")
+
+    # Saved multi-repo project (start --multi-repo NAME): its keys refine the
+    # primary dir's own config, under the CLI flags.
+    if multirepo is not None:
+        mr_name, mr_raw = multirepo
+        merge(_parse_yolo_dict(mr_raw, f"multirepos.json [{mr_name}]"))
+        layers.append(f"multirepos.json[{mr_name}]")
 
     # Worktree overlay (when launching in worktree mode): the most specific
     # persisted layer, beating the project entry but still under the CLI flags.
@@ -2007,6 +2098,89 @@ def _resolve_clones(specs: list, cwd: pathlib.Path) -> list[tuple[str, str, int 
     return [(url, dest, depth) for dest, (url, depth) in out.items()]
 
 
+def _repo_root_of(path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str] | None:
+    """(common_git, main_root, slug) for the repo containing `path`, or None.
+
+    The multi-repo counterpart of `_repo_paths`, keyed off an explicit directory
+    instead of the process cwd. Same scheme: the shared .git's parent is the main
+    repo root, slugified the way ~/.claude-yolo/worktrees/ keys repos.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    common_git = pathlib.Path(out.stdout.strip())
+    main_root = common_git.parent
+    return common_git, main_root, re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
+
+
+def _parse_repo_spec(spec: str) -> pathlib.Path:
+    """One --repo / `repos` value -> its repo's main root.
+
+    Errors unless the path exists and is inside a git repository — the same
+    must-exist rule as `_parse_mount_spec`, applied at config-set time as well as
+    launch time, so a typo'd repo path can't be pinned. A path *inside* a repo
+    normalizes to the repo's main root (like `_project_key` does for the cwd).
+    """
+    path = pathlib.Path(os.path.expanduser(spec))
+    if not path.is_dir():
+        sys.exit(f"repo: no such directory: {spec}")
+    ident = _repo_root_of(path)
+    if ident is None:
+        sys.exit(f"repo: not a git repository: {spec}")
+    return ident[1]
+
+
+def _normalize_repo_specs(flags: dict) -> dict:
+    """Return `flags` with any `repos` values normalized to absolute repo roots.
+
+    Relative `--repo`/`--add-repo` paths are natural to type (`../lib`) but
+    meaningless once stored: config entries and worktree overlays are read back
+    from arbitrary cwds (verbs run from anywhere in the repo; an overlay outlives
+    its invocation). So every storage point normalizes through `_parse_repo_spec`
+    — which also validates (the path must exist and be a git repo).
+    """
+    if flags.get("repos"):
+        flags = {**flags, "repos": [str(_parse_repo_spec(s)) for s in flags["repos"]]}
+    return flags
+
+
+def _resolve_repos(
+    specs: list, primary_root: pathlib.Path, *, strict: bool = True
+) -> list[tuple[pathlib.Path, pathlib.Path, str]]:
+    """Parse + dedupe the merged `repos` specs into (common_git, main_root, slug).
+
+    Each spec names a directory in one of the project's *additional* repos,
+    normalized to that repo's main root — so two specs into the same repo, or one
+    naming the primary itself, dedupe away. `strict` (the launch paths) exits on a
+    missing/non-repo path, before any worktree is created; non-strict (the
+    worktree verbs, via `_topic_repo_set`) skips it with a stderr warning instead,
+    so a vanished repo can't strand the removable rest. Order preserved.
+    """
+    out: list[tuple[pathlib.Path, pathlib.Path, str]] = []
+    seen = {primary_root.resolve()}
+    for spec in specs:
+        path = pathlib.Path(os.path.expanduser(spec))
+        ident = _repo_root_of(path) if path.is_dir() else None
+        if ident is None:
+            if strict:
+                what = "no such directory" if not path.is_dir() else "not a git repository"
+                sys.exit(f"repo: {what}: {spec}")
+            print(
+                f"warning: skipping repo {spec}: not a git repository (moved or deleted?).",
+                file=sys.stderr,
+            )
+            continue
+        if ident[1].resolve() in seen:
+            continue
+        seen.add(ident[1].resolve())
+        out.append(ident)
+    return out
+
+
 def _parse_port_spec(spec: str) -> tuple[int | None, int]:
     """One --port / `ports` value, `[HOST:]CONTAINER` -> (host or None, container).
 
@@ -2101,11 +2275,41 @@ _OVERLAY_SKIP_KEYS = ("tmux", "tmux-session")
 def _overlay_flags(script_argv: list[str]) -> dict:
     """Explicit config flags to auto-persist into a worktree overlay (start/resume).
 
-    `_explicit_config_flags` minus `_OVERLAY_SKIP_KEYS` (see that constant).
+    `_explicit_config_flags` minus `_OVERLAY_SKIP_KEYS` (see that constant), with
+    `repos` normalized to absolute roots (the overlay outlives this cwd).
     """
-    return {
-        k: v for k, v in _explicit_config_flags(script_argv).items() if k not in _OVERLAY_SKIP_KEYS
-    }
+    return _normalize_repo_specs(
+        {
+            k: v
+            for k, v in _explicit_config_flags(script_argv).items()
+            if k not in _OVERLAY_SKIP_KEYS
+        }
+    )
+
+
+def _merge_overlay_layers(saved: dict, explicit: dict) -> dict:
+    """Merge a saved multi-repo config under the explicit CLI flags, for the
+    overlay stamp a `start --multi-repo` writes.
+
+    The topic must be self-describing (resume/finish read only the overlay), so
+    the saved keys are persisted alongside the explicit flags. Keys normalize to
+    their dashed spelling; `_OVERLAY_SKIP_KEYS` are dropped from the saved side
+    just as `_overlay_flags` drops them from the CLI side. Same merge rule as the
+    config layers: list keys concatenate (saved first, CLI appended, exact dups
+    dropped), everything else is overridden by the CLI value.
+    """
+    out = {}
+    for k, v in saved.items():
+        key = k.replace("_", "-")
+        if key not in _OVERLAY_SKIP_KEYS:
+            out[key] = v
+    for k, v in explicit.items():
+        if k.replace("-", "_") in _CONCAT_DESTS and k in out:
+            base = out[k] if isinstance(out[k], list) else [out[k]]
+            out[k] = base + [item for item in v if item not in base]
+        else:
+            out[k] = v
+    return out
 
 
 def _spec_path(spec: str) -> pathlib.Path:
@@ -2183,6 +2387,11 @@ def _apply_config_edits(
             "--clone replaces the whole `clones` list; "
             "don't combine it with --add-clone/--remove-clone."
         )
+    if "repos" in explicit and (parsed.add_repos or parsed.remove_repos):
+        sys.exit(
+            "--repo replaces the whole `repos` list; "
+            "don't combine it with --add-repo/--remove-repo."
+        )
     unsets = [u.replace("_", "-") for u in parsed.unsets]
     for u in unsets:
         if u in explicit:
@@ -2199,6 +2408,8 @@ def _apply_config_edits(
         sys.exit("can't combine --unset plugin-dirs with --add-plugin-dir/--remove-plugin-dir.")
     if "clones" in unsets and (parsed.add_clones or parsed.remove_clones):
         sys.exit("can't combine --unset clones with --add-clone/--remove-clone.")
+    if "repos" in unsets and (parsed.add_repos or parsed.remove_repos):
+        sys.exit("can't combine --unset repos with --add-repo/--remove-repo.")
 
     for spec in [*explicit.get("mounts", []), *parsed.add_mounts]:
         _parse_mount_spec(spec)  # validate now, so a typo'd path can't be pinned
@@ -2208,6 +2419,9 @@ def _apply_config_edits(
         _parse_secret_spec(spec)  # likewise: a malformed secret spec can't be pinned
     for spec in [*explicit.get("plugin-dirs", []), *parsed.add_plugin_dirs]:
         _parse_plugin_dir_spec(spec)  # likewise: a missing plugin path can't be pinned
+    # repos: validated *and* normalized to absolute repo roots — a stored relative
+    # path would later resolve against whatever cwd the reader happens to have.
+    explicit = _normalize_repo_specs(explicit)
     df = explicit.get("dockerfile")
     if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
         sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
@@ -2303,6 +2517,22 @@ def _apply_config_edits(
         if plugin_dirs:
             entry["plugin-dirs"] = plugin_dirs
 
+    if parsed.add_repos or parsed.remove_repos:
+        # Match by resolved path (like mounts); adds are validated and stored as
+        # the repo's absolute main root (see _normalize_repo_specs).
+        repos = _take_list_key(entry, "repos", where)
+        for rm in parsed.remove_repos:
+            kept = [s for s in repos if _spec_path(s) != _spec_path(rm)]
+            if len(kept) == len(repos):
+                sys.exit(f"--remove-repo {rm}: no such repo in {where}.")
+            repos = kept
+        for add in parsed.add_repos:
+            add = str(_parse_repo_spec(add))  # validate + normalize to the repo root
+            if not any(_spec_path(s) == _spec_path(add) for s in repos):
+                repos.append(add)  # already-listed path -> no-op (idempotent)
+        if repos:
+            entry["repos"] = repos
+
     if parsed.add_clones or parsed.remove_clones:
         # Clones are {url, dir[, depth]} dicts, not spec strings, so they get their
         # own take/match logic. Identity is the `dir` field (the dest), like a port
@@ -2385,6 +2615,65 @@ def _do_config_worktree(
     _write_worktrees_file(wt_file, worktrees)
     print(f"Updated {wt_file}:")
     print(json.dumps({topic: entry}, indent=2))
+
+
+def _do_config_multirepo(
+    home: pathlib.Path, name: str, explicit: dict, editing: bool, parsed
+) -> None:
+    """`yolo config --multi-repo NAME`: show or update a saved multi-repo project.
+
+    The saved entry (multirepos.json) is `dir` — the primary repo — plus ordinary
+    config keys, usually `repos`. On creation, `dir` comes from --dir or is
+    inferred from the cwd's main repo root (error when neither applies); --dir
+    also (re)points an existing entry. Everything else reuses
+    `_apply_config_edits`, so the same flags and validation as a project entry
+    apply. Either way the stored `dir` is normalized to the repo's main root.
+    """
+    if parsed.cfg_global:
+        sys.exit("--global edits ~/.yolo.json; it can't combine with --multi-repo.")
+    if parsed.init:
+        sys.exit("--init registers a project entry; it can't combine with --multi-repo.")
+    if not name or "/" in name or name.startswith("."):
+        sys.exit(f"--multi-repo: invalid name {name!r} (a short label, not a path).")
+
+    mr_file = _multirepos_file(home)
+    data = _read_multirepos_file(home)
+    entry = dict(data.get(name, {}))
+
+    if not explicit and not editing and not parsed.mr_dir:
+        print(f"multi-repo projects file: {mr_file}")
+        if name in data:
+            print(json.dumps({name: data[name]}, indent=2))
+        else:
+            print(f"no multi-repo project '{name}'")
+        return
+
+    if parsed.mr_dir:
+        p = pathlib.Path(os.path.expanduser(parsed.mr_dir))
+        if not p.is_dir():
+            sys.exit(f"--dir: no such directory: {parsed.mr_dir}")
+        ident = _repo_root_of(p)
+        if ident is None:
+            sys.exit(f"--dir: not a git repository: {parsed.mr_dir}")
+        entry["dir"] = str(ident[1])
+    elif "dir" not in entry:
+        root = _main_root_or_none()
+        if root is None:
+            sys.exit(
+                "--multi-repo: run this inside the primary repo (its root becomes "
+                "`dir`), or pass --dir PATH explicitly."
+            )
+        entry["dir"] = str(root)
+
+    where = f"{mr_file} [{name}]"
+    dir_val = entry.pop("dir")
+    base_dir = pathlib.Path(os.path.expanduser(dir_val))
+    entry = _apply_config_edits(entry, explicit, parsed, where, base_dir)
+    _parse_yolo_dict(entry, where)  # never write an unloadable entry
+    data[name] = {"dir": dir_val, **entry}
+    _write_multirepos_file(home, data)
+    print(f"Updated {mr_file}:")
+    print(json.dumps({name: data[name]}, indent=2))
 
 
 def _effective_config(
@@ -2505,8 +2794,21 @@ def do_config(
         or parsed.remove_plugin_dirs
         or parsed.add_clones
         or parsed.remove_clones
+        or parsed.add_repos
+        or parsed.remove_repos
         or parsed.unsets
     )
+
+    if parsed.multi_repo:
+        if topic:
+            sys.exit(
+                "--multi-repo edits a saved multi-repo project; it can't combine "
+                "with a worktree TOPIC (use `yolo config TOPIC` for the overlay)."
+            )
+        _do_config_multirepo(home, parsed.multi_repo, explicit, editing, parsed)
+        return
+    if parsed.mr_dir:
+        sys.exit("--dir only applies with `config --multi-repo NAME`.")
 
     if topic:
         _do_config_worktree(home, topic, explicit, editing, parsed)
@@ -2979,6 +3281,26 @@ PARSER.add_argument(
     "list. Errors if no clone has that DIR. Repeatable.",
 )
 PARSER.add_argument(
+    "--add-repo",
+    dest="add_repos",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="For `config`: add one repo path to the stored `repos` list (no-op if "
+    "already listed, matched by resolved path), leaving the rest alone — unlike "
+    "--repo, which replaces the whole list. Repeatable.",
+)
+PARSER.add_argument(
+    "--remove-repo",
+    dest="remove_repos",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="For `config`: remove PATH's entry from the stored `repos` list (the "
+    "path needn't exist, so a stale repo can be removed). Errors if not listed. "
+    "Repeatable.",
+)
+PARSER.add_argument(
     "--add-prompt",
     dest="add_prompts",
     action="append",
@@ -3239,6 +3561,40 @@ PARSER.add_argument(
     "lists concatenate across the layers and the CLI. Public HTTPS URLs need no auth.",
 )
 PARSER.add_argument(
+    "--repo",
+    dest="repos",
+    action="append",
+    default=[],
+    metavar="PATH",
+    help="Extra git repo that is part of this project: `yolo start TOPIC` also "
+    "creates a TOPIC worktree+branch in it and mounts that worktree (plus its "
+    "shared .git) into the container alongside the primary's, and finish/rebase/"
+    "merge/diff then operate across the whole set. Repeatable; also settable as "
+    "`repos` in config, where the lists concatenate across the layers and the "
+    "CLI. Ignored (with a note) for current-directory sessions.",
+)
+PARSER.add_argument(
+    "--multi-repo",
+    dest="multi_repo",
+    metavar="NAME",
+    help="For `start`: launch from the saved multi-repo project NAME — as if run "
+    "from its `dir`, with the saved keys (its `repos`, ports, …) layered between "
+    "that dir's project config and the CLI flags; requires a TOPIC. For `config`: "
+    "show or edit the saved entry (see --dir / --add-repo). Saved entries live in "
+    "~/.claude-yolo/multirepos.json and are consulted only at start: the topic's "
+    "worktree overlay carries the effective keys afterwards, so editing or "
+    "deleting the entry never changes a live topic.",
+)
+PARSER.add_argument(
+    "--dir",
+    dest="mr_dir",
+    metavar="PATH",
+    help="For `config --multi-repo NAME`: the primary repo of the saved "
+    "multi-repo project (sessions start from it; its own project config still "
+    "applies underneath). Defaults to the current repo's root when run inside "
+    "one; required otherwise.",
+)
+PARSER.add_argument(
     "--project",
     action="store_true",
     help="For `secret set`/`secret rm`: act on this project's scope (keyed to the "
@@ -3404,6 +3760,7 @@ def build_claude_args(
     add_dirs=(),
     plugin_dirs=(),
     forwarded_ports=(),
+    multi_repo_dirs=(),
     cwd_mode: bool = False,
     status_state_path: str | None = None,
     extra_hooks: dict | None = None,
@@ -3418,7 +3775,9 @@ def build_claude_args(
     forwarded container ports get a prompt line telling Claude servers must bind
     0.0.0.0 — the single most common reason a forwarded port "doesn't work" is a
     dev server defaulting to loopback inside the container, where docker's
-    forward can't reach it. In `cwd_mode` (a current-directory session, not an
+    forward can't reach it. `multi_repo_dirs` (the extra repos' worktrees of a
+    multi-repo topic; also passed in `add_dirs`) adds a prompt line explaining
+    the layout — same task, same-named branch in each, commit in each repo. In `cwd_mode` (a current-directory session, not an
     isolated worktree) a line cautions that the working dir is the user's live
     host checkout — don't make destructive in-place changes to artifacts like
     `.venv` that host tools may depend on. Optionally adds --continue / --resume
@@ -3456,6 +3815,20 @@ def build_claude_args(
                 "stomps the TTY); put temp files in /tmp or the scratchpad, not the project dir.",
             ]
             if cwd_mode
+            else []
+        ),
+        *(
+            [
+                "This session spans multiple repositories. Besides the working "
+                "directory, these sibling worktrees of the project's other repos are "
+                "mounted read-write and are part of the same task: "
+                + ", ".join(str(d) for d in multi_repo_dirs)
+                + ". Each is a git worktree checked out on the same-named branch as "
+                "the working directory's; commit in each repo on its current branch "
+                "(never switch branches), and those commits persist on the host just "
+                "like the working directory's."
+            ]
+            if multi_repo_dirs
             else []
         ),
         *(
@@ -4041,6 +4414,7 @@ def launch_container(
     mounts=(),
     ports=(),
     plugin_dirs=(),
+    extra_repos=(),
 ) -> None:
     """Assemble the `docker run` argv from the credential/config flags and exec it.
 
@@ -4051,7 +4425,9 @@ def launch_container(
     overrides the image ENTRYPOINT (used to drop into bash for `shell`); `mounts`
     is the resolved (dir, mode) list from --mount / the `mounts` config key;
     `ports` the resolved (host-or-None, container) pairs from --port / `ports`;
-    `plugin_dirs` the resolved local-plugin dirs from --plugin-dir / `plugin-dirs`.
+    `plugin_dirs` the resolved local-plugin dirs from --plugin-dir / `plugin-dirs`;
+    `extra_repos` the (worktree, common_git, slug) triples of a multi-repo topic's
+    extra repos — each mounted like the primary worktree.
     """
     # Stamp this project as recently opened so `wip` can list it even without a
     # projects.json entry (recorded here, the single launch path, so it covers
@@ -4236,6 +4612,12 @@ def launch_container(
     if common_git:
         args += ["-v", f"{common_git}:{common_git}"]
 
+    # Multi-repo topic: mount each extra repo's worktree and its shared .git at
+    # their identical host paths — the same same-path contract as the primary
+    # worktree — so git works in each and commits persist on the host.
+    for extra_wt, extra_git, _ in extra_repos:
+        args += ["-v", f"{extra_wt}:{extra_wt}", "-v", f"{extra_git}:{extra_git}"]
+
     # Credential/config assembly. The config axes (a, b) are independent of the
     # auth mechanism (c), which is a single mutually-exclusive choice (--auth):
     #   (a) which config dir to mount        -- --config-dir
@@ -4337,6 +4719,10 @@ def launch_container(
         args += ["--label", f"yolo.repo={slug}"]
     if worktree_name:
         args += ["--label", f"yolo.worktree={worktree_name}"]
+    if extra_repos:
+        # Observability only (nothing reads it yet): which other repos' worktrees
+        # this session spans, by slug.
+        args += ["--label", "yolo.extra-repos=" + ",".join(s for _, _, s in extra_repos)]
     args += ["--label", f"yolo.cwd={cwd}"]
     # yolo.config-dir tells the cross-repo `ps` where to find this session's
     # activity status file (under <config-dir>/.yolo-status/), since containers
@@ -4361,6 +4747,8 @@ def launch_container(
 
     if parsed.submodules:
         _init_submodules(cwd)
+        for extra_wt, _, _ in extra_repos:
+            _init_submodules(extra_wt)
 
     image_tag = _build_image(parsed, cwd)
 
@@ -4541,14 +4929,20 @@ def finish_worktree(
     """Remove `worktree` and handle its branch per `action`; return a result message.
 
     The in-process core behind the `finish` verb and the dashboard's `f` action.
-    All git runs against the explicit `main_root` (`-C`), so the caller need not be
-    cd'd into the repo (the `wip` dashboard isn't). Raises `YoloError` on the
-    refusal/failure paths (active session, dirty tree, removal failure) instead of
-    exiting, and returns the (possibly multi-line) outcome rather than printing it,
-    so the dashboard can show it in its footer.
+    All git runs against each repo's explicit main root (`-C`), so the caller need
+    not be cd'd into the repo (the `wip` dashboard isn't). For a multi-repo topic
+    (see `_topic_repo_set`) this finishes the *whole set*: guards run across every
+    repo before anything is removed — a dirty worktree in any of them aborts the
+    lot (unless --force), and for `--finish-action merge` every repo merges before
+    any worktree is removed, so a failed merge leaves everything intact. Raises
+    `YoloError` on the refusal/failure paths (active session, dirty tree, removal
+    failure) instead of exiting, and returns the (possibly multi-line) outcome
+    rather than printing it, so the dashboard can show it in its footer.
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; nothing to finish.")
+    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    multi = len(repo_set) > 1
     msgs = []
     cid = running_container_for(slug, topic)
     if cid:
@@ -4557,57 +4951,88 @@ def finish_worktree(
         # session is stopped through; an actively `working` one is refused unless
         # --force (so finish can't cut off a running task).
         msgs.append(stop_session(cid, f"for '{topic}'", home, force=force))
-    dirty = subprocess.run(
-        ["git", "-C", str(worktree), "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if dirty and not force:
-        raise YoloError(
-            f"worktree '{topic}' has uncommitted changes; commit them or re-run with --force."
-        )
 
-    # For the `merge` action, merge *before* removing the worktree so a failed
-    # merge (conflicts, dirty tree, no common history) leaves the worktree intact
-    # to retry from. The merge runs against `main_root`, independent of whether the
-    # worktree dir exists, so ordering it first costs nothing on the success path.
+    # Guard phase, across the whole set before touching anything: a dirty worktree
+    # anywhere aborts the lot, so a multi-repo finish can't remove half the set
+    # and strand the rest.
+    for wt, root, _ in repo_set:
+        dirty = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty and not force:
+            where = f" in {root.name}" if multi else ""
+            raise YoloError(
+                f"worktree '{topic}'{where} has uncommitted changes; "
+                "commit them or re-run with --force."
+            )
+
+    # For the `merge` action, merge every repo *before* removing any worktree so a
+    # failed merge (conflicts, dirty tree, no common history) leaves the whole set
+    # intact to retry from — repos already merged when one fails stay merged, so
+    # say which.
     if action == "merge":
-        _finish_merge_or_raise(topic, main_root)
+        merged = []
+        for _, root, _ in repo_set:
+            try:
+                _finish_merge_or_raise(topic, root)
+            except YoloError as e:
+                if merged:
+                    raise YoloError(
+                        f"{e}\nAlready merged in: {', '.join(merged)}; no worktree was removed."
+                    ) from e
+                raise
+            merged.append(root.name)
 
-    _remove_worktree(worktree, topic, force, main_root)
+    for wt, root, _ in repo_set:
+        _remove_worktree(wt, topic, force, root)
+        prefix = (
+            f"[{root.name}] Removed worktree for '{topic}'."
+            if multi
+            else f"Removed worktree for '{topic}'."
+        )
+        msgs.append(_finish_branch(topic, root, base, action=action, remote=remote, prefix=prefix))
 
-    # The worktree is gone, so its overlay config goes too (only finish removes it;
-    # a manual `git worktree remove` would leave a stale entry that the next `start`
-    # of the same topic overwrites).
+    # The worktrees are gone, so the primary's overlay config goes too (only finish
+    # removes it; a manual `git worktree remove` would leave a stale entry that the
+    # next `start` of the same topic overwrites). Extra worktrees have no overlay.
     wt_file = _worktrees_file(home)
     worktrees = _read_worktrees_file(wt_file)
     if worktrees.pop(_worktree_overlay_key(worktree), None) is not None:
         _write_worktrees_file(wt_file, worktrees)
 
-    prefix = f"Removed worktree for '{topic}'."
+    return "\n".join(msgs)
 
+
+def _finish_branch(
+    topic: str, root: pathlib.Path, base: str, *, action: str, remote: str, prefix: str
+) -> str:
+    """One repo's branch handling after its worktree is removed; returns the message.
+
+    The per-repo half of `finish_worktree`'s actions: `base` and the branch state
+    are judged in `root` (each repo of a multi-repo set judges its own).
+    """
     if action == "merge":
-        # The merge already succeeded above (a failure would have raised), so the
-        # branch is integrated — delete it.
-        subprocess.run(["git", "-C", str(main_root), "branch", "-d", topic], check=True)
-        target = _current_branch(main_root) or "the current branch"
-        msgs.append(f"{prefix} Merged '{topic}' into {target} and deleted the branch.")
-    elif action == "push":
-        msgs.append(_finish_push(topic, remote, prefix, main_root))
-    elif action == "keep":
-        msgs.append(f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic, main_root)}).")
+        # The merge already succeeded (a failure would have raised before any
+        # removal), so the branch is integrated — delete it.
+        subprocess.run(["git", "-C", str(root), "branch", "-d", topic], check=True)
+        target = _current_branch(root) or "the current branch"
+        return f"{prefix} Merged '{topic}' into {target} and deleted the branch."
+    if action == "push":
+        return _finish_push(topic, remote, prefix, root)
+    if action == "keep":
+        return f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic, root)})."
     # delete-if-merged (default): if the branch is already integrated into `base`,
     # there's nothing left to preserve — delete it. (-d is the safe form: it
     # refuses an unmerged branch, but _branch_merged has confirmed reachability.)
-    elif _branch_merged(topic, base, main_root):
-        subprocess.run(["git", "-C", str(main_root), "branch", "-d", topic], check=True)
-        msgs.append(f"{prefix} Branch '{topic}' was merged; deleted it.")
-    else:
-        msgs.append(
-            f"{prefix} Branch '{topic}' still exists and needs to be merged or pushed "
-            f"({_branch_status_note(topic, main_root)})."
-        )
-    return "\n".join(msgs)
+    if _branch_merged(topic, base, root):
+        subprocess.run(["git", "-C", str(root), "branch", "-d", topic], check=True)
+        return f"{prefix} Branch '{topic}' was merged; deleted it."
+    return (
+        f"{prefix} Branch '{topic}' still exists and needs to be merged or pushed "
+        f"({_branch_status_note(topic, root)})."
+    )
 
 
 def _branch_status_note(branch: str, repo: pathlib.Path) -> str:
@@ -4781,14 +5206,20 @@ def rebase_worktree(
     session from two places at once, so in practice it's a non-issue.
 
     A dirty worktree is always refused (no `force` bypass): `git rebase` needs a
-    clean tree regardless. Raises `YoloError` on those refusals, an unresolvable
-    base, or conflicts (leaving the rebase in-progress to resolve/abort). With
-    `capture=True` git's output is captured (and folded into the conflict error)
-    rather than streamed — for the dashboard, which can't let git scribble over its
-    frame.
+    clean tree regardless. For a multi-repo topic (see `_topic_repo_set`) the
+    whole set rebases: the dirty guard runs across every repo first, then each
+    worktree rebases onto `base` resolved in its *own* main repo; a conflict
+    stops at that repo (the earlier repos stay rebased — each rebase is
+    per-repo-atomic, so there's nothing to unwind). Raises `YoloError` on those
+    refusals, an unresolvable base, or conflicts (leaving that repo's rebase
+    in-progress to resolve/abort). With `capture=True` git's output is captured
+    (and folded into the conflict error) rather than streamed — for the
+    dashboard, which can't let git scribble over its frame.
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    multi = len(repo_set) > 1
     msgs = []
     cid = running_container_for(slug, topic)
     if cid:
@@ -4808,36 +5239,46 @@ def rebase_worktree(
                 f"a container is running for '{topic}' and {detail}; wait for it "
                 "to finish or re-run with --force."
             )
-    dirty = subprocess.run(
-        ["git", "-C", str(worktree), "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if dirty:
-        raise YoloError(
-            f"worktree '{topic}' has uncommitted changes; commit or stash them "
-            "first (git rebase requires a clean tree)."
+    # Dirty guard across the whole set first, so a multi-repo rebase never stops
+    # halfway on a refusal it could have raised up front.
+    for wt, root, _ in repo_set:
+        dirty = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            where = f" in {root.name}" if multi else ""
+            raise YoloError(
+                f"worktree '{topic}'{where} has uncommitted changes; commit or stash "
+                "them first (git rebase requires a clean tree)."
+            )
+    for wt, root, _ in repo_set:
+        rev = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", base],
+            capture_output=True,
+            text=True,
         )
-    rev = subprocess.run(
-        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
-        capture_output=True,
-        text=True,
-    )
-    target = rev.stdout.strip()
-    if rev.returncode != 0 or not target:
-        raise YoloError(f"can't resolve base ref '{base}'.")
-    kw = {"capture_output": True, "text": True} if capture else {}
-    rebase = subprocess.run(["git", "-C", str(worktree), "rebase", target], **kw)
-    if rebase.returncode != 0:
-        detail = ""
-        if capture:
-            detail = "\n" + (rebase.stderr.strip() or rebase.stdout.strip())
-        raise YoloError(
-            f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
-            f"{worktree} and run `git rebase --continue`, or `git rebase --abort` "
-            f"there to back out.{detail}"
+        target = rev.stdout.strip()
+        if rev.returncode != 0 or not target:
+            where = f" in {root.name}" if multi else ""
+            raise YoloError(f"can't resolve base ref '{base}'{where}.")
+        kw = {"capture_output": True, "text": True} if capture else {}
+        rebase = subprocess.run(["git", "-C", str(wt), "rebase", target], **kw)
+        if rebase.returncode != 0:
+            detail = ""
+            if capture:
+                detail = "\n" + (rebase.stderr.strip() or rebase.stdout.strip())
+            raise YoloError(
+                f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
+                f"{wt} and run `git rebase --continue`, or `git rebase --abort` "
+                f"there to back out.{detail}"
+            )
+        msgs.append(
+            f"[{root.name}] Rebased '{topic}' onto '{base}'."
+            if multi
+            else f"Rebased '{topic}' onto '{base}'."
         )
-    msgs.append(f"Rebased '{topic}' onto '{base}'.")
     return "\n".join(msgs)
 
 
@@ -4880,6 +5321,11 @@ def merge_worktree(
     committed tip is read), so a running session in it is not a hazard — hence no
     session guard, unlike `rebase`/`finish`.
 
+    For a multi-repo topic (see `_topic_repo_set`) each repo of the set merges its
+    own branch into its own checkout, sequentially, stopping at the first failure
+    (each repo's merge is atomic — aborted on conflict — so earlier successes
+    stand and are reported in the error).
+
     On a merge failure (conflicts, or a main checkout too dirty to merge into) the
     merge is aborted and a `YoloError` is raised, so nothing is left half-merged.
     With `capture=True` git's output is captured (and folded into the error) rather
@@ -4887,41 +5333,57 @@ def merge_worktree(
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    # The merge lands in main_root's checkout, so base must BE that checkout. base
-    # defaults to HEAD (always the checkout); a base naming the checked-out branch
-    # resolves to the same commit. Anything else (an unchecked-out branch, a remote
-    # ref) would merge into the wrong place, so refuse it.
-    head = subprocess.run(
-        ["git", "-C", str(main_root), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    base_rev = subprocess.run(
-        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
-        capture_output=True,
-        text=True,
-    )
-    if base_rev.returncode != 0 or not base_rev.stdout.strip():
-        raise YoloError(f"can't resolve base ref '{base}'.")
-    target = _current_branch(main_root) or "the current checkout"
-    if base_rev.stdout.strip() != head:
-        raise YoloError(
-            f"base '{base}' isn't what the main repo has checked out ({target}); "
-            f"`merge` only lands in the checkout, so check out '{base}' in {main_root} first."
+    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    multi = len(repo_set) > 1
+    msgs = []
+    for _, root, _ in repo_set:
+        # The merge lands in root's checkout, so base must BE that checkout. base
+        # defaults to HEAD (always the checkout); a base naming the checked-out
+        # branch resolves to the same commit. Anything else (an unchecked-out
+        # branch, a remote ref) would merge into the wrong place, so refuse it.
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        base_rev = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", base],
+            capture_output=True,
+            text=True,
         )
-    kw = {"capture_output": True, "text": True} if capture else {}
-    merge = subprocess.run(["git", "-C", str(main_root), "merge", topic], **kw)
-    if merge.returncode != 0:
-        subprocess.run(["git", "-C", str(main_root), "merge", "--abort"], capture_output=True)
-        detail = "\n" + (merge.stderr.strip() or merge.stdout.strip()) if capture else ""
-        raise YoloError(
-            f"merging '{topic}' into {target} failed (nothing was merged); resolve it "
-            f"manually in {main_root}.{detail}"
+        prior = f"\nAlready merged: {'; '.join(msgs)}" if msgs else ""
+        if base_rev.returncode != 0 or not base_rev.stdout.strip():
+            where = f" in {root.name}" if multi else ""
+            raise YoloError(f"can't resolve base ref '{base}'{where}.{prior}")
+        target = _current_branch(root) or "the current checkout"
+        if base_rev.stdout.strip() != head:
+            raise YoloError(
+                f"base '{base}' isn't what the main repo has checked out ({target}); "
+                f"`merge` only lands in the checkout, so check out '{base}' in {root} "
+                f"first.{prior}"
+            )
+        kw = {"capture_output": True, "text": True} if capture else {}
+        merge = subprocess.run(["git", "-C", str(root), "merge", topic], **kw)
+        if merge.returncode != 0:
+            subprocess.run(["git", "-C", str(root), "merge", "--abort"], capture_output=True)
+            detail = "\n" + (merge.stderr.strip() or merge.stdout.strip()) if capture else ""
+            raise YoloError(
+                f"merging '{topic}' into {target} failed (nothing was merged); resolve "
+                f"it manually in {root}.{detail}{prior}"
+            )
+        note = (
+            " (already up to date)"
+            if capture and "Already up to date" in (merge.stdout or "")
+            else ""
         )
-    note = (
-        " (already up to date)" if capture and "Already up to date" in (merge.stdout or "") else ""
-    )
-    return f"Merged '{topic}' into {target}{note}; the worktree and branch are kept."
+        msgs.append(
+            f"[{root.name}] Merged '{topic}' into {target}{note}."
+            if multi
+            else f"Merged '{topic}' into {target}{note}; the worktree and branch are kept."
+        )
+    if multi:
+        msgs.append("The worktrees and branches are kept.")
+    return "\n".join(msgs)
 
 
 def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) -> None:
@@ -4943,34 +5405,45 @@ def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) ->
     (`_diff_stat_picker`): `git diff --stat`, navigable, where Enter/Space on a file
     opens *that file's* diff in a new tmux window. This is what the `wip` dashboard's
     `d` spawns.
+
+    A multi-repo topic (see `_topic_repo_set`) diffs each repo of the set in turn
+    under a `== <repo> ==` header, `base` resolved per repo; with `--stat` the
+    interactive picker runs per repo sequentially (quit one to reach the next).
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    rev = subprocess.run(
-        ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", base],
-        capture_output=True,
-        text=True,
-    )
-    target = rev.stdout.strip()
-    if rev.returncode != 0 or not target:
-        raise YoloError(f"can't resolve base ref '{base}'.")
-    # Diff from where the branch diverged (merge-base) so base-only commits don't
-    # show, but keep the working tree as the right-hand side so dirty changes do.
-    # `git diff A...B` is sugar for `git diff $(merge-base A B) B`; using the
-    # merge-base as a two-dot origin swaps B (=HEAD) for the working tree. Falls
-    # back to `target` when there's no common history (an unrelated base).
-    mb = subprocess.run(
-        ["git", "-C", str(worktree), "merge-base", target, "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    diff_from = mb.stdout.strip() or target
-    if stat:
-        _diff_stat_picker(worktree, diff_from, base, topic)
-        return
-    subprocess.run(["git", "-C", str(worktree), "diff", diff_from])
+    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    multi = len(repo_set) > 1
+    for wt, root, _ in repo_set:
+        rev = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", base],
+            capture_output=True,
+            text=True,
+        )
+        target = rev.stdout.strip()
+        if rev.returncode != 0 or not target:
+            where = f" in {root.name}" if multi else ""
+            raise YoloError(f"can't resolve base ref '{base}'{where}.")
+        # Diff from where the branch diverged (merge-base) so base-only commits
+        # don't show, but keep the working tree as the right-hand side so dirty
+        # changes do. `git diff A...B` is sugar for `git diff $(merge-base A B) B`;
+        # using the merge-base as a two-dot origin swaps B (=HEAD) for the working
+        # tree. Falls back to `target` when there's no common history (an
+        # unrelated base).
+        mb = subprocess.run(
+            ["git", "-C", str(wt), "merge-base", target, "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        diff_from = mb.stdout.strip() or target
+        if multi:
+            print(f"== {root.name} ==", flush=True)
+        if stat:
+            _diff_stat_picker(wt, diff_from, base, topic)
+            continue
+        subprocess.run(["git", "-C", str(wt), "diff", diff_from])
 
 
 def _diff_stat_picker(worktree: pathlib.Path, diff_from: str, base: str, topic: str) -> None:
@@ -6048,6 +6521,27 @@ def _wip_items(home: pathlib.Path) -> dict:
                 },
             )
         )
+    # Saved multi-repo projects (multirepos.json): one row each, in the PROJECTS
+    # section — `n` starts a worktree from the saved config, `c` edits it. Read
+    # leniently: the dashboard's refresh loop must keep drawing on a malformed
+    # file (`yolo config --multi-repo` is where it gets fixed, strictly).
+    for name, entry in sorted(_read_multirepos_file(home, lenient=True).items()):
+        raw_dir = entry.get("dir")
+        path = pathlib.Path(os.path.expanduser(raw_dir)) if isinstance(raw_dir, str) else None
+        try:
+            directory = "~/" + str(path.relative_to(home)) if path else "?"
+        except ValueError:
+            directory = str(path)
+        repos = entry.get("repos", [])
+        n = 1 if isinstance(repos, str) else len(repos) if isinstance(repos, list) else 0
+        project_items.append(
+            WipItem(
+                "multirepo",
+                f"multirepo:{name}",
+                (name, f"{directory} +{n} repo{'' if n == 1 else 's'}"),
+                {"name": name, "path": path},
+            )
+        )
     # A trailing `+` row: Enter on it prompts for a directory and opens a session
     # there (see _wip_enter), so you can launch in a dir that isn't listed yet.
     project_items.append(WipItem("newsession", "newsession:+", ("+", ""), {}))
@@ -6153,6 +6647,7 @@ _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · ! halt-launch · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
     "project": "Enter open · N new · ! halt-launch · R resume-pick · n new worktree · c config · a register",
+    "multirepo": "n new multi-repo worktree · c config",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -6333,7 +6828,7 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_diff(kind, p, home, session)
         if key == "c":
             return _wip_config(kind, p, home, term)
-        if key == "n" and kind == "project":
+        if key == "n" and kind in ("project", "multirepo"):
             return _wip_new_worktree(p, session, term)
         if key == "N":
             return _wip_new_session(kind, p, session)
@@ -6380,6 +6875,9 @@ def _wip_enter(item, session, term) -> str:
             return f"switched to session in {name}."
         _spawn_session_window(path, ["resume", "--no-tmux"], name, session)
         return f"opening a session in {name}…"
+    if kind == "multirepo":
+        # A saved config isn't a running thing to open; its verb is `n`.
+        return f"'{p['name']}' is a saved multi-repo config — n starts a worktree from it."
     if kind == "newsession":
         # The trailing `+`: prompt for any directory (Tab-completed, ~-aware) and
         # start a fresh session there, like a project Enter for a dir not yet listed.
@@ -6600,6 +7098,7 @@ _LIST_FLAG = {
     "secrets": "secret",
     "plugin-dirs": "plugin-dir",
     "prompts": "prompt",
+    "repos": "repo",
 }
 
 
@@ -6625,6 +7124,8 @@ class _ConfigScope:
     def read(self) -> dict:
         if self.store == "worktrees.json":
             data = _read_worktrees_file(_worktrees_file(self.home))
+        elif self.store == "multirepos.json":
+            data = _read_multirepos_file(self.home, lenient=True)
         else:
             data = _read_projects_file(self.home / ".claude-yolo" / "projects.json")
         return data.get(self._entry_key, {})
@@ -6661,6 +7162,21 @@ def _config_scope(kind, payload, home):
             cwd=str(path),
             entry_key=str(path),
             base_cwd=path,
+        )
+    if kind == "multirepo":
+        # Writes go through `yolo config --multi-repo NAME`; the inherited pane
+        # shows the global + primary-dir layers the saved config sits on. The cwd
+        # only needs to be a valid directory (the verb targets the entry by NAME).
+        path = payload.get("path")
+        base = pathlib.Path(path) if path else home
+        return _ConfigScope(
+            home,
+            label=f"multi-repo {payload['name']}",
+            store="multirepos.json",
+            config_args=["config", "--multi-repo", payload["name"]],
+            cwd=str(base if base.is_dir() else home),
+            entry_key=payload["name"],
+            base_cwd=base,
         )
     return None
 
@@ -6749,10 +7265,10 @@ def _config_value_flags(key, value) -> list:
 def _prompt_list_element(term, key):
     """Prompt for one element of a list-valued key; None on cancel.
 
-    mounts/plugin-dirs take a Tab-completed directory (mounts then a ro/rw pick);
-    ports/secrets/prompts a plain spec line.
+    mounts/plugin-dirs/repos take a Tab-completed directory (mounts then a ro/rw
+    pick); ports/secrets/prompts a plain spec line.
     """
-    if key in ("mounts", "plugin-dirs"):
+    if key in ("mounts", "plugin-dirs", "repos"):
         path = term.prompt_path(f"{key} path: ")
         if not path:
             return None
@@ -6907,6 +7423,10 @@ def _config_editor_loop(scope, term) -> str:
 
 def _config_edit_key(scope, key, term) -> str:
     """Edit one key: list keys open the element view, scalars re-prompt a value."""
+    if key == "dir" and scope.store == "multirepos.json":
+        # The saved entry's primary repo — not a YOLO_KEYS key; set via --dir.
+        path = term.prompt_path("dir = ")
+        return _config_apply(scope, ["--dir", path])[1] if path else "cancelled."
     if key.replace("-", "_") not in YOLO_KEYS:
         return f"unknown key {key!r} — 'x' to remove or 'e' for raw flags."
     if key == "clones":  # dict-valued list — its own add/remove loop (url+dir+depth)
@@ -6932,13 +7452,25 @@ def _wip_new_worktree(p, session, term) -> str:
 
     Shells out (like Enter's launches) into a fresh tmux window running `yolo start
     <topic> --no-tmux` in the project dir, so the inner yolo creates the worktree +
-    branch and execs docker into the window. Topic validation (existing worktree/
-    branch, bad branch name) is left to that spawned `yolo start`, surfacing in the
-    window — the same place Enter's launch errors land.
+    branch and execs docker into the window. On a saved multi-repo row the spawn is
+    `yolo start <topic> --multi-repo <name> --no-tmux` instead — the inner yolo
+    retargets to the saved `dir` itself, so the window's cwd only needs to be valid.
+    Topic validation (existing worktree/branch, bad branch name) is left to that
+    spawned `yolo start`, surfacing in the window — the same place Enter's launch
+    errors land.
     """
     topic = term.prompt_line("New worktree topic: ")
     if not topic:
         return "cancelled."
+    if "name" in p:  # a saved multi-repo project row
+        cwd = p.get("path") or pathlib.Path.home()
+        _spawn_session_window(
+            cwd,
+            ["start", topic, "--multi-repo", p["name"], "--no-tmux"],
+            f"{p['name']}-{topic}",
+            session,
+        )
+        return f"starting multi-repo worktree '{topic}'…"
     path = p["path"]
     name = f"{pathlib.Path(path).name}-{topic}"
     _spawn_session_window(path, ["start", topic, "--no-tmux"], name, session)
@@ -6946,8 +7478,18 @@ def _wip_new_worktree(p, session, term) -> str:
 
 
 def _wip_add_project(home, term) -> str:
-    """`a`: register a project. Prompts for a path (Tab-completes dirs); uses its git
-    root if it has one."""
+    """`a`: add a project — a two-way pick.
+
+    "directory project" registers a directory in projects.json (the original
+    flow: prompts for a path, Tab-completing; uses its git root if it has one).
+    "multi-repo project" creates a saved multi-repo config instead
+    (`_wip_add_multirepo`).
+    """
+    choice = _pick_one(term, "Add:", ["directory project", "multi-repo project"])
+    if choice is None:
+        return "cancelled."
+    if choice == "multi-repo project":
+        return _wip_add_multirepo(home, term)
     raw = term.prompt_path("Project path to add: ")
     if not raw:
         return "cancelled."
@@ -6962,6 +7504,28 @@ def _wip_add_project(home, term) -> str:
         return register_project(home, key)
     except YoloError as e:
         return str(e)
+
+
+def _wip_add_multirepo(home, term) -> str:
+    """Create a saved multi-repo project: name + primary repo, then straight into
+    the config editor so its extra repos are added right there (the `repos`
+    list-edit loop). The create shells out to `yolo config --multi-repo NAME
+    --dir PATH`, reusing all of that path's validation (name shape, dir must be a
+    git repo)."""
+    name = term.prompt_line("Multi-repo project name: ")
+    if not name:
+        return "cancelled."
+    raw = term.prompt_path("Primary repo path: ")
+    if not raw:
+        return "cancelled."
+    primary = pathlib.Path(raw).expanduser()
+    if not primary.is_dir():
+        return f"not a directory: {primary}"
+    scope = _config_scope("multirepo", {"name": name, "path": primary}, home)
+    ok, msg = _config_apply(scope, ["--dir", str(primary)])
+    if not ok:
+        return msg
+    return _config_editor_loop(scope, term)
 
 
 def do_wip(home, *, dashboard, tmux_session) -> None:
@@ -7221,6 +7785,37 @@ def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib
     return home / ".claude-yolo" / "worktrees" / slug / topic, main_root, slug
 
 
+def _topic_repo_set(
+    worktree: pathlib.Path,
+    main_root: pathlib.Path,
+    slug: str,
+    topic: str,
+    home: pathlib.Path,
+) -> list[tuple[pathlib.Path, pathlib.Path, str]]:
+    """[(worktree, main_root, slug)] for a topic — the primary plus its extra repos.
+
+    Backs the multi-repo behavior of finish/rebase/merge/diff. The extras come
+    from the `repos` the topic's own config layers resolve — crucially including
+    its worktree overlay, which `start` stamped: the overlay is the per-topic
+    source of truth, so a saved multi-repo entry (or a later config edit) never
+    has to be consulted or reconciled here. Tolerant by design: a vanished repo
+    path is skipped (with `_resolve_repos`' stderr warning) and a repo with no
+    worktree for this topic is skipped silently — neither may strand the
+    removable rest of the set. A single-repo topic yields just the primary.
+    """
+    # The dashboard hands paths through payload dicts, sometimes as strings.
+    worktree, main_root = pathlib.Path(worktree), pathlib.Path(main_root)
+    out = [(worktree, main_root, slug)]
+    cfg, _ = load_yolo_config(main_root, home, worktree_dir=worktree, quiet=True)
+    for _extra_git, extra_root, extra_slug in _resolve_repos(
+        cfg.get("repos", []), main_root, strict=False
+    ):
+        extra_wt = home / ".claude-yolo" / "worktrees" / extra_slug / topic
+        if extra_wt.is_dir():
+            out.append((extra_wt, extra_root, extra_slug))
+    return out
+
+
 def main():
     """CLI entry point: run the dispatcher, translating YoloError to a clean exit.
 
@@ -7335,9 +7930,19 @@ def _main():
         ("--remove-plugin-dir", parsed.remove_plugin_dirs),
         ("--add-clone", parsed.add_clones),
         ("--remove-clone", parsed.remove_clones),
+        ("--add-repo", parsed.add_repos),
+        ("--remove-repo", parsed.remove_repos),
+        ("--dir", parsed.mr_dir),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
+    if parsed.multi_repo and verb not in ("config", "start", None):
+        sys.exit("--multi-repo only applies to `start` and `config`.")
+    if parsed.multi_repo and verb != "config" and not topic:
+        sys.exit(
+            "--multi-repo starts a worktree session, so it needs a topic: "
+            "`yolo start TOPIC --multi-repo NAME`."
+        )
 
     if verb == "config":
         do_config(script_argv, home, cwd, parsed, topic)
@@ -7374,10 +7979,24 @@ def _main():
     # worktree mode also layer that worktree's overlay on top of the project entry;
     # `start` is excluded — it *creates* the overlay from the CLI flags (below), so
     # it must not also consume a stale same-path entry left by a manual removal.
+    # A saved multi-repo project (start --multi-repo NAME) retargets the launch to
+    # its primary repo: chdir there so every cwd-derived value (repo root, project
+    # key, secrets scope, project-entry match) is exactly what a start run from
+    # that repo would see, and remember the saved keys — layered into the config
+    # below and stamped into the worktree overlay at start.
+    multirepo_cfg = None
+    if parsed.multi_repo:
+        mr_dir, mr_raw = _multirepo_entry(home, parsed.multi_repo)
+        os.chdir(mr_dir)
+        cwd = mr_dir
+        multirepo_cfg = (parsed.multi_repo, mr_raw)
+
     overlay_dir = None
     if topic and verb in ("resume", "shell"):
         overlay_dir, _, _ = _worktree_dir(topic, home)
-    config_defaults, matched_project_key = load_yolo_config(cwd, home, worktree_dir=overlay_dir)
+    config_defaults, matched_project_key = load_yolo_config(
+        cwd, home, worktree_dir=overlay_dir, multirepo=multirepo_cfg
+    )
     PARSER.set_defaults(**config_defaults)
     parsed = PARSER.parse_args(script_argv)
 
@@ -7522,6 +8141,7 @@ def _main():
     slug = None
     worktree_name = None
     entrypoint = None
+    extra_repos: list = []  # (worktree, common_git, slug) per extra repo of the set
 
     # A bare `yolo` (no verb) is equivalent to `yolo start` in the current directory.
     if verb is None:
@@ -7532,16 +8152,50 @@ def _main():
     if topic:
         worktree, main_root, slug = _worktree_dir(topic, home)
         if verb == "start":
+            # The project's extra repos (`repos` config / --repo / a saved
+            # multi-repo entry): resolved strictly — a typo'd path must fail here,
+            # before any worktree exists.
+            extras = _resolve_repos(parsed.repos, main_root)
+            # Pre-flight every repo — primary and extras — before creating
+            # anything, so a collision in one repo can't leave a half-created set.
             if worktree.exists() or _branch_exists(topic):
                 sys.exit(f"'{topic}' already exists; resume it with `yolo resume {topic}`.")
+            for _, extra_root, extra_slug in extras:
+                extra_wt = home / ".claude-yolo" / "worktrees" / extra_slug / topic
+                if extra_wt.exists() or _branch_exists(topic, extra_root):
+                    sys.exit(
+                        f"'{topic}' already exists in {extra_root} (worktree or "
+                        "branch); pick another topic or clean it up there first."
+                    )
             cwd, common_git, main_root = setup_worktree(topic, home, base=parsed.base)
+            try:
+                for extra_git, extra_root, extra_slug in extras:
+                    wt = setup_worktree(topic, home, base=parsed.base, repo=extra_root)[0]
+                    extra_repos.append((wt, extra_git, extra_slug))
+            except (subprocess.CalledProcessError, YoloError) as e:
+                # Roll back everything this start created (worktrees *and*
+                # branches), so a failed multi-repo start leaves no repo dirty.
+                for wt, eg, _ in [*extra_repos, (cwd, common_git, slug)]:
+                    root = eg.parent
+                    try:
+                        _remove_worktree(wt, topic, True, root)
+                    except (YoloError, OSError):
+                        pass  # best-effort: keep rolling the rest back
+                    subprocess.run(
+                        ["git", "-C", str(root), "branch", "-D", topic], capture_output=True
+                    )
+                sys.exit(f"creating the '{topic}' worktrees failed; rolled back. ({e})")
             # Snapshot the explicit CLI config flags into the worktree overlay so a
             # later `yolo resume {topic}` relaunches with the same config (and `yolo
             # config {topic}` can edit it). Always written, even {} — symmetric with
             # the worktree lifecycle (created here, removed by `finish`). `tmux` is
             # excluded (see _overlay_flags): the dashboard's --no-tmux mechanic must
-            # not pin tmux:false here.
+            # not pin tmux:false here. A saved multi-repo config is folded in under
+            # the CLI flags (see _merge_overlay_layers): the overlay is the topic's
+            # source of truth — resume/finish never consult the saved entry.
             wt_overlay = _overlay_flags(script_argv)
+            if multirepo_cfg is not None:
+                wt_overlay = _merge_overlay_layers(multirepo_cfg[1], wt_overlay)
             _parse_yolo_dict(wt_overlay, f"worktrees.json [{topic}]")  # never persist unloadable
             wt_file = _worktrees_file(home)
             worktrees = _read_worktrees_file(wt_file)
@@ -7557,6 +8211,32 @@ def _main():
             # change its mounts, so persisting there would mislead.
             if verb == "resume":
                 _merge_worktree_overlay(home, cwd, _overlay_flags(script_argv))
+            # The topic's extra repos, from its overlay/config (the re-parse above
+            # already folded the overlay in for resume/shell). Strict resolve: a
+            # broken repo path should fail the relaunch loudly, like a bad mount.
+            for extra_git, extra_root, extra_slug in _resolve_repos(parsed.repos, main_root):
+                extra_wt = home / ".claude-yolo" / "worktrees" / extra_slug / topic
+                if not extra_wt.is_dir():
+                    if verb != "resume":
+                        # A fresh `shell` container mounts what exists; it mustn't
+                        # create worktrees.
+                        print(
+                            f"warning: no worktree for '{topic}' in {extra_root}; "
+                            "skipping its mount.",
+                            file=sys.stderr,
+                        )
+                        continue
+                    # A repo added to the topic's config after start: bring its
+                    # worktree into existence now, as start would have.
+                    if _branch_exists(topic, extra_root):
+                        sys.exit(
+                            f"branch '{topic}' already exists in {extra_root} but has "
+                            "no yolo worktree; resolve it there first (delete the "
+                            "branch, or remove the repo from this topic's `repos`)."
+                        )
+                    print(f"Creating the '{topic}' worktree in {extra_root}.", file=sys.stderr)
+                    extra_wt = setup_worktree(topic, home, base=parsed.base, repo=extra_root)[0]
+                extra_repos.append((extra_wt, extra_git, extra_slug))
         worktree_name = topic
         container_base = f"{main_root.name}-{topic}"
         # Name the Claude session `<repo>:<topic>` — distinguishing it both from a
@@ -7571,6 +8251,21 @@ def _main():
         # is identifiable in the resume picker. Only one yolo session runs per
         # directory anyway (the already-running guard), so the shared name is fine.
         session_name = cwd.name
+        if parsed.repos:
+            # Multi-repo is a worktree-session feature — the point is *creating*
+            # per-repo worktrees. Don't silently half-apply it here.
+            print(
+                "warning: `repos` is configured but ignored for current-directory "
+                "sessions — it applies to worktree sessions (`yolo start TOPIC`). "
+                "To mount the live checkouts instead, use `mounts`.",
+                file=sys.stderr,
+            )
+
+    # The extra repos' worktrees ride along as first-class working dirs: mounted
+    # rw (launch_container), announced to claude as --add-dir, and described in
+    # the system prompt (build_claude_args) so Claude treats them as one task.
+    extra_worktree_dirs = [wt for wt, _, _ in extra_repos]
+    mount_dirs = mount_dirs + extra_worktree_dirs
 
     # A custom Dockerfile must exist and be a readable file. Checked here on the
     # launch paths only (like the mount/port resolution above), so a stale
@@ -7621,6 +8316,7 @@ def _main():
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
+            multi_repo_dirs=extra_worktree_dirs,
             cwd_mode=worktree_name is None,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
@@ -7668,6 +8364,7 @@ def _main():
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
             forwarded_ports=container_ports,
+            multi_repo_dirs=extra_worktree_dirs,
             cwd_mode=worktree_name is None,
             status_state_path=session_status_path,
             extra_hooks=session_hooks,
@@ -7687,6 +8384,7 @@ def _main():
         mounts=mounts,
         ports=ports,
         plugin_dirs=plugin_dirs,
+        extra_repos=extra_repos,
     )
 
 
