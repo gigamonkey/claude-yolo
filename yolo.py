@@ -3101,6 +3101,17 @@ PARSER.add_argument(
     help=argparse.SUPPRESS,
 )
 PARSER.add_argument(
+    # Temporary debugging aid for the startup-log capture: pause after
+    # _snapshot_startup_pane writes startup.log, before exec'ing docker, so the
+    # frozen pane can be compared against the captured log. Spawned into session
+    # windows by the wip dashboard's `!` key. Hidden; remove once the capture
+    # gap is diagnosed.
+    "--_halt-before-exec",
+    dest="halt_before_exec",
+    action="store_true",
+    help=argparse.SUPPRESS,
+)
+PARSER.add_argument(
     "--ssh-agent",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -4396,6 +4407,20 @@ def launch_container(
         print(sep)
     # Last moment before the exec: every host-side startup line is in the pane now.
     _snapshot_startup_pane(run_dir)
+    if getattr(parsed, "halt_before_exec", False):
+        # Temporary startup-log debugging (--_halt-before-exec, wip `!`): freeze
+        # here, after the snapshot and before docker runs. The pane above is
+        # exactly what the capture saw; anything that scrolls by after Enter is
+        # post-exec output the log can never contain.
+        print(
+            "\n[halted before exec — startup.log is written; this pane is what "
+            "the capture saw. Enter launches claude, Ctrl-C aborts]",
+            file=sys.stderr,
+        )
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(130)
     _dispatch_launch(
         run_cmd,
         parsed,
@@ -6091,8 +6116,8 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
-    "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
-    "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
+    "worktree": "Enter open · N new · ! halt-launch · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
+    "project": "Enter open · N new · ! halt-launch · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -6277,6 +6302,10 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_new_worktree(p, session, term)
         if key == "N":
             return _wip_new_session(kind, p, session)
+        if key == "!":
+            # Temporary startup-log debugging: `N` plus --_halt-before-exec, so
+            # the spawned window pauses (log written, pane frozen) before docker.
+            return _wip_new_session(kind, p, session, halt=True)
         if key == "R":
             return _wip_resume_pick(kind, p, session)
     except YoloError as e:
@@ -6346,13 +6375,15 @@ def _wip_spawn_target(kind, p):
     return None
 
 
-def _wip_new_session(kind, p, session) -> str:
+def _wip_new_session(kind, p, session, halt: bool = False) -> str:
     """`N`: start a *fresh* session here (vs Enter, which resumes the latest).
 
     A project gets a plain `start` in its dir; a worktree gets `resume TOPIC --new`
     (a new named session on the existing worktree). Only one session runs per
     dir/worktree (the already-running guard), so this refuses when one is live —
-    Enter switches to it instead.
+    Enter switches to it instead. `halt` is the temporary `!` key: same launch,
+    plus --_halt-before-exec so the window pauses after the startup.log snapshot
+    and before docker runs.
     """
     target = _wip_spawn_target(kind, p)
     if target is None:
@@ -6365,6 +6396,8 @@ def _wip_new_session(kind, p, session) -> str:
         if kind == "worktree"
         else ["start", "--no-tmux"]
     )
+    if halt:
+        argv_tail.append("--_halt-before-exec")
     _spawn_session_window(cwd, argv_tail, window_name, session)
     return f"starting a new session in {label}…"
 
