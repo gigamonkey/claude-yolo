@@ -1363,6 +1363,9 @@ It assembles the `docker run` arguments:
   so SSH host-key verification works.
 - Forwards your git identity (`user.name`/`user.email`) so commits made in the
   container are attributed to you (see below).
+- Forwards your timezone as a `TZ` environment variable (read from the host's
+  `$TZ` or `/etc/localtime`), so timestamps inside the container — commit dates,
+  log lines — match your clock instead of UTC.
 - Mounts your config/credentials according to the mode (see above).
 - Sets the container hostname to the project directory name, so Claude Code's
   status line shows it.

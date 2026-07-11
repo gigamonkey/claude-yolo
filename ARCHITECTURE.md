@@ -1869,6 +1869,12 @@ request shouldn't silently become a fresh session).
   Mounting `~/.gitconfig` instead would drag in macOS-only bits (osxkeychain
   credential helper, GPG signing) that break commits in the Linux container. Note
   these env vars override any repo-local identity set *inside* the container.
+- **The host timezone is forwarded as a `TZ` env var** (`timezone_args`): an
+  explicit host `$TZ` wins, else the IANA zone name is read off the
+  `/etc/localtime` symlink (macOS and Linux point it into a `zoneinfo/` tree),
+  else Debian-style `/etc/timezone`. If none resolves, nothing is forwarded and
+  the container stays on UTC. A `TZ` env var is sufficient because glibc, git,
+  Python, and Node all honor it and the Ubuntu base image ships tzdata.
 - **`YOLO_SESSION` is exported into every container** (in `launch_container`'s
   shared arg list, so it covers claude sessions and `yolo shell` alike; a `docker
   exec`-ed shell inherits it too). It's a deterministic marker that code running
@@ -2010,7 +2016,8 @@ entry, and a malformed-file error.
 helpers, `_open_url` routing through `webbrowser`, the credential store
 (file-fallback round-trip get/set/delete/exists + a faked keyring backend), the
 per-host `_ssh_agent_sock_source` selection, the cross-platform `_read_clipboard`
-command choice, and the `_run_dir` `$XDG_RUNTIME_DIR`/`$TMPDIR` location. A
+command choice, the `_run_dir` `$XDG_RUNTIME_DIR`/`$TMPDIR` location, and the
+`timezone_args` host-zone detection ($TZ / localtime symlink / /etc/timezone). A
 conftest autouse fixture forces `YOLO_CREDENTIAL_STORE=file` so no test ever
 touches a real keyring.
 `test_tmux.py` covers tmux mode end-to-end against an in-memory fake tmux

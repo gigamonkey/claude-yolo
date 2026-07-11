@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The container's timezone now matches the host's.** Every session forwards
+  the host timezone as a `TZ` env var (from the host's `$TZ`, the
+  `/etc/localtime` symlink, or Debian's `/etc/timezone`), so timestamps inside
+  the container — commit dates, log lines — match your clock instead of UTC.
+  If the host zone can't be determined, the container stays on UTC as before.
+
 - **Startup output is preserved for tmux-spawned sessions.** When the `wip`
   dashboard (or any yolo-spawned tmux window) launches a session, everything
   printed before Claude's TUI takes over — worktree setup, the image build,

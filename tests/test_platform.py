@@ -204,3 +204,58 @@ def test_run_dir_falls_back_to_tmpdir(cy, monkeypatch, tmp_path):
     # and on macOS, always $TMPDIR
     monkeypatch.setattr(cy, "_HOST", "darwin")
     assert cy._run_dir() == pathlib.Path(tmp_path) / cy._RUN_DIR_NAME
+
+
+# --- host timezone forwarding ---------------------------------------------------
+
+
+def _stub_localtime(cy, monkeypatch, *, link=None, etc_timezone=None):
+    """Point timezone_args at a fake host: /etc/localtime link and /etc/timezone."""
+
+    def readlink(path):
+        if link is None:
+            raise OSError("not a symlink")
+        return link
+
+    monkeypatch.setattr(cy.os, "readlink", readlink)
+    real_read_text = cy.pathlib.Path.read_text
+
+    def read_text(self, *a, **k):
+        if str(self) == "/etc/timezone":
+            if etc_timezone is None:
+                raise OSError("no such file")
+            return etc_timezone
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(cy.pathlib.Path, "read_text", read_text)
+
+
+def test_timezone_host_tz_env_wins(cy, monkeypatch):
+    _stub_localtime(cy, monkeypatch, link="/usr/share/zoneinfo/Europe/Berlin")
+    monkeypatch.setenv("TZ", "America/New_York")
+    assert cy.timezone_args() == ["-e", "TZ=America/New_York"]
+
+
+def test_timezone_from_macos_localtime_symlink(cy, monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    _stub_localtime(cy, monkeypatch, link="/var/db/timezone/zoneinfo/America/Chicago")
+    assert cy.timezone_args() == ["-e", "TZ=America/Chicago"]
+
+
+def test_timezone_from_linux_localtime_symlink(cy, monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    _stub_localtime(cy, monkeypatch, link="../usr/share/zoneinfo/Europe/Berlin")
+    assert cy.timezone_args() == ["-e", "TZ=Europe/Berlin"]
+
+
+def test_timezone_falls_back_to_etc_timezone(cy, monkeypatch):
+    # /etc/localtime is a plain file copy (readlink fails) -> Debian /etc/timezone
+    monkeypatch.delenv("TZ", raising=False)
+    _stub_localtime(cy, monkeypatch, etc_timezone="Europe/Paris\n")
+    assert cy.timezone_args() == ["-e", "TZ=Europe/Paris"]
+
+
+def test_timezone_undeterminable_forwards_nothing(cy, monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    _stub_localtime(cy, monkeypatch)
+    assert cy.timezone_args() == []

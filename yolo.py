@@ -1375,6 +1375,33 @@ def git_identity_args() -> list[str]:
     return env_args
 
 
+def timezone_args() -> list[str]:
+    """Forward the host's timezone into the container as a docker `-e TZ=...` arg.
+
+    The container image is otherwise UTC, so timestamps Claude produces (commit
+    dates, log lines, "what time is it") drift from the user's clock. A TZ env
+    var is enough: glibc, git, Python, and Node all honor it, and the Ubuntu base
+    image ships tzdata. Host detection: an explicit host $TZ wins; otherwise the
+    IANA zone name is read off the /etc/localtime symlink (macOS points it into
+    /var/db/timezone/zoneinfo/, Linux into /usr/share/zoneinfo/), falling back to
+    Debian-style /etc/timezone when /etc/localtime is a plain file copy. Returns
+    [] when the zone can't be determined — the container just stays on UTC.
+    """
+    tz = os.environ.get("TZ", "")
+    if not tz:
+        try:
+            link = os.readlink("/etc/localtime")
+        except OSError:
+            link = ""
+        tz = link.rpartition("zoneinfo/")[2] if "zoneinfo/" in link else ""
+    if not tz:
+        try:
+            tz = pathlib.Path("/etc/timezone").read_text().strip()
+        except OSError:
+            tz = ""
+    return ["-e", f"TZ={tz}"] if tz else []
+
+
 def _repo_paths() -> tuple[pathlib.Path, pathlib.Path, str]:
     """Return (common_git, main_root, slug) for the repo containing the cwd.
 
@@ -4072,6 +4099,8 @@ def launch_container(
         *_ps1_env_args(cwd, worktree_name),
         # Forward the host git identity so commits made in the container are attributed correctly
         *git_identity_args(),
+        # Match the container's clock display to the host (the image is otherwise UTC)
+        *timezone_args(),
     ]
 
     # Redirect per-OS / build dirs off the bind mount (cwd sessions only, opt-out).

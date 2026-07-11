@@ -74,6 +74,7 @@ def run_cli(cy, monkeypatch):
         monkeypatch.setattr(cy, "_masking_credfile", lambda d: MASK_CREDFILE)
         monkeypatch.setattr(cy, "ensure_oauth_token", lambda c: "sk-ant-oat-TESTTOKEN")
         monkeypatch.setattr(cy, "git_identity_args", lambda: [])
+        monkeypatch.setattr(cy, "timezone_args", lambda: [])
         if cy.running_container_for is original_rcf:
             monkeypatch.setattr(cy, "running_container_for", lambda *a, **k: None)
         if cy._running_container_name is original_rcn:
