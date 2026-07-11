@@ -75,6 +75,8 @@ def test_start_creates_worktree_branch_and_names_session(cy, run_cli, repo, flag
     wt = home / ".claude-yolo" / "worktrees"
     created = list(wt.rglob("auth-fix"))
     assert created and created[0].is_dir()
+    # YOLO_WORKDIR names the worktree dir, not the launch cwd
+    assert f"YOLO_WORKDIR={created[0]}" in flag_values(argv, "-e")
     assert "auth-fix" in git(r, "branch", "--list", "auth-fix").stdout
     # labelled and named `<repo>:<topic>`
     assert worktree_label(argv) == "auth-fix"

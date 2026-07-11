@@ -23,6 +23,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   rows (`n` starts a worktree from one, `c` edits it) and `a` now offers
   "multi-repo project" alongside the directory-project register flow.
 
+- **`YOLO_WORKDIR` is exported into every container** — the session working
+  dir (the worktree dir in worktree mode, else the launch cwd). Sessions
+  already start there; the var gives scripts — a `.yolorc` especially — a way
+  back after `cd`ing elsewhere. Relatedly, the README now documents that a
+  `.yolorc` is sourced with the working dir as its cwd and must not derive the
+  repo location from `BASH_SOURCE` (the rc is mounted at a fixed path under
+  `/home/claude`, so `dirname` points at the home dir, not the repo).
+
 - **The container's timezone now matches the host's.** Every session forwards
   the host timezone as a `TZ` env var (from the host's `$TZ`, the
   `/etc/localtime` symlink, or Debian's `/etc/timezone`), so timestamps inside

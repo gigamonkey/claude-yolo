@@ -4518,6 +4518,12 @@ def launch_container(
         # for a worktree session, `cwd` for a current-directory one).
         "-e",
         f"YOLO_SESSION={'worktree' if worktree_name else 'cwd'}",
+        # The session working dir (mounted at its host path), for scripts — a
+        # .yolorc especially — that cd elsewhere and need a way back. Sessions
+        # already *start* there (the -w above), and a sourced .yolorc must not
+        # derive it from BASH_SOURCE (the rc is mounted at a fixed home path).
+        "-e",
+        f"YOLO_WORKDIR={cwd}",
         # A yolo-flagged bash prompt for `yolo shell` (fresh or exec'd into this container)
         *_ps1_env_args(cwd, worktree_name),
         # Forward the host git identity so commits made in the container are attributed correctly

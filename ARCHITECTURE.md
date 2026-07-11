@@ -1965,6 +1965,14 @@ request shouldn't silently become a fresh session).
   be the literal `1`; presence-based checks are unaffected, an exact `= 1` check
   would need updating.) Distinct from `YOLO_PS1` (a *presentation* var the
   `.bashrc` adopts for the prompt); `YOLO_SESSION` is the semantic flag.
+- **`YOLO_WORKDIR` is exported alongside it** — the session working dir (the
+  worktree dir in worktree mode, else the launch cwd), which is also the
+  container's `docker run -w` starting directory. Every entrypoint that
+  sources a `--yolorc` therefore already *starts* there; the var exists for
+  scripts that `cd` elsewhere and need a way back, and because an rc can't
+  locate the repo via `BASH_SOURCE` (it's bind-mounted at the fixed
+  `/home/claude/.yolorc`, so `dirname` resolves to the home dir, not the
+  repo).
 - **Container naming (`launch_container`).** The base is the cwd basename (or
   `{main_repo_name}-{TOPIC}` for a worktree), suffixed with `-{config-dir-basename}`
   when `--config-dir` is set and `-{aws-profile-or-"bedrock"}` under `--auth bedrock`

@@ -1119,6 +1119,13 @@ so the rc can use injected secrets and rely on cloned repos being present. A
 `.bashrc` instead, once per shell tree. Either way, an rc that exits nonzero
 **warns but doesn't block** the session.
 
+**The rc is sourced with the session working dir as its cwd** (the worktree
+dir in worktree mode, else the launch cwd) — commands like `npm install` run
+in the right place with no `cd` needed. Don't derive the repo location from
+`BASH_SOURCE`: it points at the fixed mount path under `/home/claude`, not
+wherever the rc lives on the host. If the rc needs to `cd` around and come
+back, `$YOLO_WORKDIR` holds the session working dir.
+
 Like an in-tree `dockerfile`, an rc **inside the working tree** is editable by
 Claude between runs (the read-only mount is of the same file the rw cwd mount
 exposes) — an accepted trade-off for an opt-in feature, but prefer an

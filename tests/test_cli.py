@@ -588,6 +588,8 @@ def test_every_launch_sets_yolo_session_marker(cy, run_cli, flag_values, dirs):
     argv = run_cli([], home=home, cwd=work)
     # presence marks a yolo session; the value names the kind (cwd vs worktree)
     assert "YOLO_SESSION=cwd" in flag_values(argv, "-e")  # a plain run is cwd mode
+    # the session working dir rides along, for scripts (.yolorc) that cd away
+    assert f"YOLO_WORKDIR={work}" in flag_values(argv, "-e")
 
 
 # --- PS1 (yolo shell prompt) ------------------------------------------------
