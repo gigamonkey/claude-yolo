@@ -206,6 +206,15 @@ def build_docker_image(
         if extra:
             sys.exit(f"refusing to build: unexpected files in Docker build context: {extra}")
         cmd = ["docker", "build", "-t", tag, "--build-arg", f"HOST_UID={uid}"]
+        if os.environ.get("YOLO_STARTUP_LOG"):
+            # This launch will snapshot its pane to startup.log
+            # (_snapshot_startup_pane). BuildKit's tty renderer erases each
+            # step's output as the step finishes, so a rendered capture keeps
+            # only the collapsed `=> [n/m] RUN …` summary lines — warnings that
+            # scrolled by mid-step would be lost. Plain progress keeps every
+            # build line in the pane history, at the cost of the fancy live
+            # progress display in that window.
+            cmd.append("--progress=plain")
         for k, v in (build_args or {}).items():
             cmd += ["--build-arg", f"{k}={v}"]
         if no_cache:
@@ -3912,8 +3921,10 @@ def _snapshot_startup_pane(run_dir: pathlib.Path) -> None:
     user's unrelated scrollback. The log is host-side only — deliberately never
     mounted into the container, unlike its run-dir siblings — and the run-dir GC
     reclaims it with the rest once the container is gone. `-e` keeps colors
-    (view with `less -R`; the wip `l` key does); rendered capture collapses
-    docker build's \\r-progress churn into its final lines.
+    (view with `less -R`; the wip `l` key does). The capture is of the
+    *rendered* pane, which would keep only what BuildKit's tty progress leaves
+    on screen — so in these windows `build_docker_image` uses plain progress,
+    keeping every build line (npm/apt warnings and all) in the history.
     """
     pane = os.environ.get("TMUX_PANE")
     if not pane or not os.environ.get("YOLO_STARTUP_LOG"):
