@@ -294,11 +294,27 @@ stamped for observability (nothing reads it in v1).
     multi-repo project — NAME plus the primary dir and repo count (e.g.
     `chat  ~/work/app +2 repos`). Its `n` action spawns
     `yolo start TOPIC --project NAME` (via the same `_wip_new_worktree`
-    prompt flow); `c` opens the config editor on the saved entry (a new
-    `_ConfigScope` kind); the add-project flow (`a`) gains a path to create
-    one.
+    prompt flow).
 
-23. Worktree rows: extra repos' worktrees already appear as ordinary rows
+23. Creating one from the dashboard: `a` becomes a two-way `_pick_one`
+    (yolo.py:6699) — "directory project" (the existing `_wip_add_project`
+    prompt, unchanged) or "multi-repo project", which prompts for a name
+    (`prompt_line`) and the primary repo path (`prompt_path`,
+    Tab-completing; git root inferred as `_wip_add_project` does), creates
+    the entry by shelling out to `yolo config --project NAME --dir PATH`
+    (reusing all of Phase 2's validation), then drops straight into the
+    config editor on the new entry so the extra repos are added right there
+    via the existing list-edit loop (`repos` is in `_LIST_FLAG` from
+    Phase 1). Update the PROJECTS `_WIP_HINTS` line accordingly.
+
+24. Editing one: `c` on a saved-config row opens the same editor — a new
+    `_ConfigScope` kind (yolo.py:6606) with `store="multirepos.json"`,
+    `config_args=["config", "--project", NAME]`, `entry_key=NAME`, and
+    `base_cwd=dir` so the inherited pane shows the global + primary-dir
+    layers the saved config sits on. `read()` gains a branch for the new
+    store file.
+
+25. Worktree rows: extra repos' worktrees already appear as ordinary rows
     under their own repos. The **primary** row's `f` routes through the new
     topic-level finish core (reads the overlay, cleans up the whole set); an
     extra-repo row's `f` finishes just that worktree. A grouped per-topic
@@ -306,7 +322,7 @@ stamped for observability (nothing reads it in v1).
 
 ### Phase 7 — tests and docs
 
-24. New `tests/test_multi_repo.py` (conftest's `run_cli` fixture + tmp git
+26. New `tests/test_multi_repo.py` (conftest's `run_cli` fixture + tmp git
     repos):
 
     - config: `repos` parses (string or list), concatenates across layers,
@@ -336,7 +352,12 @@ stamped for observability (nothing reads it in v1).
 
     - cwd session with `repos` configured: warning, no repo mounts.
 
-25. Docs: README feature section (saved-config example + verb behavior),
+    - wip (in `tests/test_wip.py`'s existing stub style): saved-config rows
+      render in PROJECTS; `n` on one spawns `start TOPIC --project NAME`;
+      the `a` picker's multi-repo branch creates the entry and opens the
+      editor on it.
+
+27. Docs: README feature section (saved-config example + verb behavior),
     ARCHITECTURE.md subsection under the worktree machinery (the
     template-not-identity rule, overlay-as-source-of-truth,
     strict/tolerant resolution), CHANGELOG `## Unreleased` entry, and the
