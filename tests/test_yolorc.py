@@ -7,6 +7,7 @@ config key (parse + the `config` verb persist/validate).
 """
 
 import json
+import pathlib
 
 import pytest
 
@@ -14,11 +15,14 @@ import pytest
 def write_projects(home, mapping):
     d = home / ".claude-yolo"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "projects.json").write_text(json.dumps(mapping))
+    data = {pathlib.Path(k).name: {"dir": str(k), **v} for k, v in mapping.items()}
+    (d / "projects.json").write_text(json.dumps(data))
 
 
 def read_projects(home):
-    return json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    """The entries re-keyed by their dir, config keys only (the v1-shaped view)."""
+    raw = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    return {e["dir"]: {k: v for k, v in e.items() if k != "dir"} for e in raw.values()}
 
 
 @pytest.fixture

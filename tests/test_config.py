@@ -1,6 +1,7 @@
 """Tests for config parsing/merging (~/.yolo.json + projects.json) and `yolo config`."""
 
 import json
+import pathlib
 
 import pytest
 
@@ -11,13 +12,23 @@ def write(path, obj):
 
 
 def write_projects(home, mapping):
+    """Write a v2 projects.json from a path-keyed mapping (named by basename)."""
     d = home / ".claude-yolo"
     d.mkdir(parents=True, exist_ok=True)
-    return write(d / "projects.json", mapping)
+    data = {pathlib.Path(k).name: {"dir": str(k), **v} for k, v in mapping.items()}
+    return write(d / "projects.json", data)
 
 
 def read_projects(home):
     return json.loads((home / ".claude-yolo" / "projects.json").read_text())
+
+
+def read_projects_by_dir(home):
+    """The entries re-keyed by their dir, config keys only — the v1-shaped view
+    most assertions here use (names are covered by the project-verb tests)."""
+    return {
+        e["dir"]: {k: v for k, v in e.items() if k != "dir"} for e in read_projects(home).values()
+    }
 
 
 # --- _parse_yolo_file -------------------------------------------------------
@@ -179,7 +190,7 @@ def test_load_merges_home_and_project_entry(cy, tmp_path):
         },
     )
     merged, key = cy.load_yolo_config(proj, home)
-    assert key == str(proj)
+    assert key == proj.name
     assert merged["ssh_agent"] is True  # project entry overrides home
     assert merged["auth"] == "bedrock"  # only in home
     assert merged["prompts"] == ["home", "proj"]  # concatenated
@@ -194,7 +205,7 @@ def test_load_entry_matches_from_subdirectory(cy, tmp_path):
     home.mkdir()
     write_projects(home, {str(proj): {"aws-region": "eu-west-1"}})
     merged, key = cy.load_yolo_config(sub, home)
-    assert key == str(proj)
+    assert key == proj.name
     assert merged == {"aws_region": "eu-west-1"}
 
 
@@ -213,7 +224,7 @@ def test_load_longest_matching_key_wins(cy, tmp_path):
     )
     merged, key = cy.load_yolo_config(inner, home)
     # only the most specific entry applies; the outer one is not consulted at all
-    assert key == str(inner)
+    assert key == inner.name
     assert merged == {"aws_region": "from-inner"}
 
 
@@ -271,7 +282,7 @@ def test_load_no_rename_hint_when_entry_matches(cy, tmp_path, capsys):
     gone = tmp_path / "renamed-away"
     write_projects(home, {str(gone): {}, str(work): {"auth": "bedrock"}})
     merged, key = cy.load_yolo_config(work, home)
-    assert key == str(work) and merged == {"auth": "bedrock"}
+    assert key == "work" and merged == {"auth": "bedrock"}
     err = capsys.readouterr().err
     assert "no longer exists" in err  # the dangling key still warns
     assert "used to be one of those" not in err  # but this cwd is accounted for
@@ -292,7 +303,7 @@ def test_load_prints_provenance_line(cy, tmp_path, capsys):
 
     write_projects(home, {str(work): {}})
     cy.load_yolo_config(work, home)
-    assert f"config: ~/.yolo.json + projects.json[{work}]" in capsys.readouterr().err
+    assert f"config: ~/.yolo.json + projects.json[{work.name}]" in capsys.readouterr().err
 
 
 def test_load_rejects_malformed_projects_file(cy, tmp_path):
@@ -364,7 +375,7 @@ def test_config_verb_writes_only_explicit_flags(cy, run_cli, dirs):
     argv = run_cli(["config", "--auth", "bedrock", "--aws-profile", "prod"], home=home, cwd=work)
     assert argv is None  # terminal verb: no container launched
     # only the explicitly-passed flags are persisted — no defaulted keys
-    assert read_projects(home) == {str(work): {"auth": "bedrock", "aws-profile": "prod"}}
+    assert read_projects_by_dir(home) == {str(work): {"auth": "bedrock", "aws-profile": "prod"}}
 
 
 def test_config_verb_persists_finish_action_and_remote(cy, run_cli, dirs):
@@ -374,7 +385,7 @@ def test_config_verb_persists_finish_action_and_remote(cy, run_cli, dirs):
         home=home,
         cwd=work,
     )
-    assert read_projects(home) == {
+    assert read_projects_by_dir(home) == {
         str(work): {"finish-action": "push", "finish-remote": "upstream"}
     }
 
@@ -383,7 +394,7 @@ def test_config_verb_persists_explicit_default_value(cy, run_cli, dirs):
     home, work = dirs
     # oauth-token is the built-in default, but explicitly passing it must still persist
     run_cli(["config", "--auth", "oauth-token"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"auth": "oauth-token"}}
+    assert read_projects_by_dir(home) == {str(work): {"auth": "oauth-token"}}
 
 
 def test_config_verb_persists_bools_lists_and_mounts(cy, run_cli, dirs, tmp_path):
@@ -395,7 +406,7 @@ def test_config_verb_persists_bools_lists_and_mounts(cy, run_cli, dirs, tmp_path
         home=home,
         cwd=work,
     )
-    assert read_projects(home) == {
+    assert read_projects_by_dir(home) == {
         str(work): {
             "ssh-agent": False,
             "prompts": ["EXTRA"],
@@ -408,7 +419,7 @@ def test_config_verb_persists_redirect_build_dirs_opt_out(cy, run_cli, dirs):
     # default is on, so the meaningful thing to persist is the opt-out
     home, work = dirs
     run_cli(["config", "--no-redirect-build-dirs"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"redirect-build-dirs": False}}
+    assert read_projects_by_dir(home) == {str(work): {"redirect-build-dirs": False}}
 
 
 def test_config_verb_updates_existing_entry_per_key(cy, run_cli, dirs):
@@ -416,7 +427,7 @@ def test_config_verb_updates_existing_entry_per_key(cy, run_cli, dirs):
     write_projects(home, {str(work): {"auth": "bedrock", "mounts": ["/kept"]}})
     run_cli(["config", "--auth", "keychain"], home=home, cwd=work)
     # auth replaced, other keys untouched
-    assert read_projects(home) == {str(work): {"auth": "keychain", "mounts": ["/kept"]}}
+    assert read_projects_by_dir(home) == {str(work): {"auth": "keychain", "mounts": ["/kept"]}}
 
 
 def test_config_verb_validates_mount_paths(cy, run_cli, dirs):
@@ -431,7 +442,7 @@ def test_config_verb_persists_dockerfile(cy, run_cli, dirs, tmp_path):
     df = tmp_path / "Dockerfile.yolo"
     df.write_text("FROM ubuntu:24.04\n")
     run_cli(["config", "--dockerfile", str(df)], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"dockerfile": str(df)}}
+    assert read_projects_by_dir(home) == {str(work): {"dockerfile": str(df)}}
 
 
 def test_config_verb_validates_dockerfile_path(cy, run_cli, dirs, tmp_path):
@@ -497,7 +508,7 @@ def test_config_init_writes_empty_entry(cy, run_cli, dirs, capsys):
     home, work = dirs
     argv = run_cli(["config", "--init"], home=home, cwd=work)
     assert argv is None  # terminal verb
-    assert read_projects(home) == {str(work): {}}
+    assert read_projects_by_dir(home) == {str(work): {}}
     assert "Registered" in capsys.readouterr().out
 
 
@@ -513,8 +524,8 @@ def test_config_init_errors_if_entry_exists(cy, run_cli, dirs):
     write_projects(home, {str(work): {"auth": "bedrock"}})
     with pytest.raises(SystemExit) as exc:
         run_cli(["config", "--init"], home=home, cwd=work)
-    assert "already has" in str(exc.value)
-    assert read_projects(home) == {str(work): {"auth": "bedrock"}}  # untouched
+    assert "already project" in str(exc.value)
+    assert read_projects_by_dir(home) == {str(work): {"auth": "bedrock"}}  # untouched
 
 
 def test_config_init_rejects_config_flags(cy, run_cli, dirs):
@@ -532,7 +543,7 @@ def test_config_init_warns_when_shadowing_ancestor_entry(cy, run_cli, dirs, caps
     write_projects(home, {str(work): {"auth": "bedrock"}})
     run_cli(["config", "--init"], home=home, cwd=sub)
     assert "shadows" in capsys.readouterr().err
-    projects = read_projects(home)
+    projects = read_projects_by_dir(home)
     assert projects[str(sub)] == {}
     assert projects[str(work)] == {"auth": "bedrock"}  # ancestor entry kept
 
@@ -553,7 +564,9 @@ def test_config_add_mount_appends_to_existing_list(cy, run_cli, dirs, tmp_path):
     ref.mkdir()
     write_projects(home, {str(work): {"mounts": ["/kept"], "auth": "bedrock"}})
     run_cli(["config", "--add-mount", str(ref)], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"mounts": ["/kept", str(ref)], "auth": "bedrock"}}
+    assert read_projects_by_dir(home) == {
+        str(work): {"mounts": ["/kept", str(ref)], "auth": "bedrock"}
+    }
 
 
 def test_config_add_mount_updates_mode_for_same_path(cy, run_cli, dirs, tmp_path):
@@ -562,7 +575,7 @@ def test_config_add_mount_updates_mode_for_same_path(cy, run_cli, dirs, tmp_path
     ref.mkdir()
     write_projects(home, {str(work): {"mounts": [str(ref), "/kept"]}})
     run_cli(["config", "--add-mount", f"{ref}:rw"], home=home, cwd=work)
-    assert read_projects(home)[str(work)]["mounts"] == ["/kept", f"{ref}:rw"]
+    assert read_projects_by_dir(home)[str(work)]["mounts"] == ["/kept", f"{ref}:rw"]
 
 
 def test_config_add_mount_validates_path(cy, run_cli, dirs):
@@ -577,14 +590,14 @@ def test_config_remove_mount_removes_without_requiring_dir(cy, run_cli, dirs):
     # /gone:rw doesn't exist on disk — removal must still work (that's the point)
     write_projects(home, {str(work): {"mounts": ["/gone:rw", "/kept"]}})
     run_cli(["config", "--remove-mount", "/gone"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}
+    assert read_projects_by_dir(home) == {str(work): {"mounts": ["/kept"]}}
 
 
 def test_config_remove_mount_drops_emptied_key(cy, run_cli, dirs):
     home, work = dirs
     write_projects(home, {str(work): {"mounts": "/only", "auth": "bedrock"}})
     run_cli(["config", "--remove-mount", "/only"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"auth": "bedrock"}}
+    assert read_projects_by_dir(home) == {str(work): {"auth": "bedrock"}}
 
 
 def test_config_remove_mount_errors_when_absent(cy, run_cli, dirs):
@@ -593,7 +606,7 @@ def test_config_remove_mount_errors_when_absent(cy, run_cli, dirs):
     with pytest.raises(SystemExit) as exc:
         run_cli(["config", "--remove-mount", "/nope"], home=home, cwd=work)
     assert "no such mount" in str(exc.value)
-    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}  # untouched
+    assert read_projects_by_dir(home) == {str(work): {"mounts": ["/kept"]}}  # untouched
 
 
 def test_config_mount_conflicts_with_add_remove_mount(cy, run_cli, dirs, tmp_path):
@@ -614,7 +627,7 @@ def test_config_add_and_remove_prompt(cy, run_cli, dirs):
         cwd=work,
     )
     # OLD removed, NEW appended, KEPT not duplicated
-    assert read_projects(home) == {str(work): {"prompts": ["KEPT", "NEW"]}}
+    assert read_projects_by_dir(home) == {str(work): {"prompts": ["KEPT", "NEW"]}}
 
 
 def test_config_remove_prompt_errors_when_absent(cy, run_cli, dirs):
@@ -632,14 +645,14 @@ def test_config_unset_removes_key(cy, run_cli, dirs):
     home, work = dirs
     write_projects(home, {str(work): {"auth": "bedrock", "mounts": ["/kept"]}})
     run_cli(["config", "--unset", "auth"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"mounts": ["/kept"]}}
+    assert read_projects_by_dir(home) == {str(work): {"mounts": ["/kept"]}}
 
 
 def test_config_unset_accepts_either_spelling(cy, run_cli, dirs):
     home, work = dirs
     write_projects(home, {str(work): {"aws-profile": "prod"}})
     run_cli(["config", "--unset", "aws_profile"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {}}
+    assert read_projects_by_dir(home) == {str(work): {}}
 
 
 def test_config_unset_errors_when_not_set(cy, run_cli, dirs):
@@ -663,7 +676,7 @@ def test_config_unset_repairs_unknown_key(cy, run_cli, dirs):
     # an unknown key makes every launch fail; --unset must be able to remove it
     write_projects(home, {str(work): {"bogus-key": 1, "auth": "bedrock"}})
     run_cli(["config", "--unset", "bogus-key"], home=home, cwd=work)
-    assert read_projects(home) == {str(work): {"auth": "bedrock"}}
+    assert read_projects_by_dir(home) == {str(work): {"auth": "bedrock"}}
 
 
 def test_config_migrates_renamed_prompt_key(cy, run_cli, dirs):
@@ -676,7 +689,109 @@ def test_config_migrates_renamed_prompt_key(cy, run_cli, dirs):
         home=home,
         cwd=work,
     )
-    assert read_projects(home) == {str(work): {"prompts": ["OLD"]}}
+    assert read_projects_by_dir(home) == {str(work): {"prompts": ["OLD"]}}
+
+
+# --- migration to named projects & the global-repos guard ----------------------
+
+
+def test_v1_projects_file_migrates_to_named_entries(cy, tmp_path, capsys):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    other = tmp_path / "deep" / "work"  # same basename: collision → parent appended
+    home.mkdir()
+    work.mkdir()
+    other.mkdir(parents=True)
+    (home / ".claude-yolo").mkdir()
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({str(work): {"auth": "bedrock"}, str(other): {}})
+    )
+    projects = cy._read_projects_file(home)
+    assert projects == {
+        "work": {"dir": str(work), "auth": "bedrock"},
+        "work-deep": {"dir": str(other)},
+    }
+    assert "migrated" in capsys.readouterr().err
+    assert (home / ".claude-yolo" / "projects.json.bak").is_file()
+    # idempotent: the rewritten file reads back with no further migration
+    assert cy._read_projects_file(home) == projects
+
+
+def test_multirepos_file_migrates_in_and_wins_name_collisions(cy, tmp_path):
+    home = tmp_path / "home"
+    chat = tmp_path / "chat"  # dir whose basename collides with the saved name
+    app = tmp_path / "app"
+    home.mkdir()
+    chat.mkdir()
+    app.mkdir()
+    (home / ".claude-yolo").mkdir()
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({str(chat): {}}))
+    (home / ".claude-yolo" / "multirepos.json").write_text(
+        json.dumps({"chat": {"dir": str(app), "repos": []}})
+    )
+    projects = cy._read_projects_file(home)
+    # the explicit multirepo name keeps 'chat'; the basename-derived entry moved
+    assert projects["chat"] == {"dir": str(app), "repos": []}
+    moved = next(n for n, e in projects.items() if e["dir"] == str(chat))
+    assert moved != "chat"
+    assert not (home / ".claude-yolo" / "multirepos.json").exists()
+    assert (home / ".claude-yolo" / "multirepos.json.bak").is_file()
+
+
+def test_multirepos_same_dir_entry_absorbs_v1_entry(cy, tmp_path):
+    # A v1 path entry and a saved multi-repo config over the same dir become ONE
+    # project (saved keys over the v1 keys) — not two ambiguous ones.
+    home = tmp_path / "home"
+    app = tmp_path / "app"
+    lib = tmp_path / "lib"
+    home.mkdir()
+    app.mkdir()
+    lib.mkdir()
+    (home / ".claude-yolo").mkdir()
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({str(app): {"auth": "bedrock", "mounts": ["/v1"]}})
+    )
+    (home / ".claude-yolo" / "multirepos.json").write_text(
+        json.dumps({"chat": {"dir": str(app), "repos": [str(lib)], "mounts": ["/mr"]}})
+    )
+    projects = cy._read_projects_file(home)
+    assert projects == {
+        "chat": {
+            "dir": str(app),
+            "auth": "bedrock",
+            "mounts": ["/v1", "/mr"],  # concat keys combine, v1 first
+            "repos": [str(lib)],
+        }
+    }
+
+
+def test_global_repos_is_rejected(cy, run_cli, dirs, tmp_path):
+    import subprocess
+
+    home, work = dirs
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    subprocess.run(["git", "-C", str(lib), "init", "-q"], check=True)
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["config", "--global", "--add-repo", str(lib)], home=home, cwd=work)
+    assert "can't be set globally" in str(exc.value)
+    write(home / ".yolo.json", {"repos": [str(lib)]})
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["start"], home=home, cwd=work)
+    assert "can't be set globally" in str(exc.value)
+
+
+def test_config_init_names_the_project(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--init", "--name", "myproj"], home=home, cwd=work)
+    assert read_projects(home) == {"myproj": {"dir": str(work)}}
+
+
+def test_config_name_renames_cwd_project(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--auth", "bedrock"], home=home, cwd=work)
+    run_cli(["config", "--name", "renamed"], home=home, cwd=work)
+    assert read_projects(home) == {"renamed": {"dir": str(work), "auth": "bedrock"}}
 
 
 # --- `config --global` (~/.yolo.json) ------------------------------------------

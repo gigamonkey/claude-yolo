@@ -474,11 +474,26 @@ def test_secret_replace_conflicts_with_add(cy, run_cli, dirs):
 # --- verb gating --------------------------------------------------------------
 
 
-def test_project_flag_only_for_secret(cy, run_cli, dirs):
+def test_project_scope_flag_only_for_secret(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit) as exc:
-        run_cli(["start", "--project"], home=home, cwd=work)
-    assert "--project" in str(exc.value)
+        run_cli(["start", "--project-scope"], home=home, cwd=work)
+    assert "--project-scope" in str(exc.value)
+
+
+def test_secret_project_spelling_translates_to_project_scope(
+    cy, run_cli, monkeypatch, dirs, capsys
+):
+    # the pre-unification spelling: `secret set NAME --project` still selects the
+    # project scope, with a deprecation note (--project now names a project).
+    home, work = dirs
+    calls = []
+    monkeypatch.setattr(
+        cy, "do_secret_set", lambda name, proj, clip, cwd: calls.append((name, proj))
+    )
+    run_cli(["secret", "set", "FOO", "--project"], home=home, cwd=work)
+    assert calls == [("FOO", True)]
+    assert "--project-scope" in capsys.readouterr().err
 
 
 def test_clipboard_flag_only_for_secret(cy, run_cli, dirs):

@@ -28,7 +28,9 @@ def wrapper_script(cy, argv):
 
 
 def entry(home, work):
-    return json.loads((home / ".claude-yolo" / "projects.json").read_text())[str(work)]
+    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    e = next(v for v in projects.values() if v.get("dir") == str(work))
+    return {k: v for k, v in e.items() if k != "dir"}
 
 
 # --- resolution -------------------------------------------------------------

@@ -1270,11 +1270,11 @@ def do_secret(parsed, home: pathlib.Path, cwd: pathlib.Path) -> None:
     if sub == "set":
         if len(names) != 1:
             sys.exit("usage: yolo secret set NAME [--project] [--clipboard]")
-        do_secret_set(names[0], parsed.project, parsed.clipboard, cwd)
+        do_secret_set(names[0], parsed.project_scope, parsed.clipboard, cwd)
     elif sub == "rm":
         if len(names) != 1:
             sys.exit("usage: yolo secret rm NAME [--project]")
-        do_secret_rm(names[0], parsed.project, cwd)
+        do_secret_rm(names[0], parsed.project_scope, cwd)
     elif sub == "list":
         if names:
             sys.exit("usage: yolo secret list [--all]")
@@ -1550,7 +1550,7 @@ def setup_worktree(
 # .yolo.json committed in a cloned repo would apply someone else's config the
 # first time yolo ran there. A leftover file draws a warning in load_yolo_config.
 YOLO_KEYS = {
-    "name": ("project_name", "str"),
+    "project": ("project", "str"),
     "config_dir": ("config_dir", "path"),
     "dockerfile": ("dockerfile", "path"),
     "yolorc": ("yolorc", "path"),
@@ -1669,17 +1669,135 @@ def _parse_yolo_file(path: pathlib.Path) -> dict:
     return _parse_yolo_dict(raw, str(path))
 
 
-def _read_projects_file(path: pathlib.Path) -> dict:
-    """~/.claude-yolo/projects.json as {directory: config object}; {} if absent."""
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        sys.exit(f"{path}: cannot read projects config: {e}")
-    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
-        sys.exit(f"{path}: must be a JSON object mapping directory paths to config objects")
+def _projects_file(home: pathlib.Path) -> pathlib.Path:
+    return home / ".claude-yolo" / "projects.json"
+
+
+def _read_projects_file(home: pathlib.Path, *, lenient: bool = False) -> dict:
+    """~/.claude-yolo/projects.json as {name: entry}; {} if absent.
+
+    Every entry carries a `dir` (the primary directory) plus ordinary config
+    keys. A v1-format file (directory-keyed entries) — or a leftover
+    multirepos.json — is migrated in place on first read (`_migrate_projects_file`).
+    `lenient` returns {} on a malformed file instead of exiting — for the `wip`
+    dashboard's refresh loop, which must keep drawing; the config verb (run to
+    fix the file) stays strict and pointed.
+    """
+    path = _projects_file(home)
+    raw = {}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            if lenient:
+                return {}
+            sys.exit(f"{path}: cannot read projects config: {e}")
+        if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+            if lenient:
+                return {}
+            sys.exit(f"{path}: must be a JSON object mapping project names to config objects")
+    v1_keys = [k for k in raw if k.startswith(("/", "~"))]
+    if v1_keys or (home / ".claude-yolo" / "multirepos.json").is_file():
+        return _migrate_projects_file(home, raw, v1_keys)
     return raw
+
+
+def _write_projects_file(home: pathlib.Path, data: dict) -> None:
+    path = _projects_file(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _unique_project_name(base: str, taken, parent: str) -> str:
+    """A project name derived from a directory basename, dodging collisions.
+
+    Leading dots are dropped (hidden dirs; a name can't start with one), then a
+    taken name gets the parent dir's basename appended, then a counter.
+    """
+    base = base.lstrip(".") or "project"
+    if base not in taken:
+        return base
+    if parent and f"{base}-{parent}" not in taken:
+        return f"{base}-{parent}"
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+def _migrate_projects_file(home: pathlib.Path, raw: dict, v1_keys: list) -> dict:
+    """One-time migration to name-keyed projects.json; returns the new dict.
+
+    v1 directory-keyed entries become named entries (`name` from the dir's
+    basename, disambiguated by parent dir then a counter) with the path moved
+    into `dir`; saved multi-repo entries (multirepos.json) merge in under their
+    existing names — those were user-chosen, so on a collision the
+    basename-derived name yields. A saved entry over the *same dir* as a v1
+    entry absorbs it (v1 keys under the saved keys, list keys concatenating —
+    the layering launches used before), so a dir that worked plain keeps
+    working instead of newly erroring as ambiguous. The old files are kept as
+    `.bak` siblings.
+    """
+
+    def resolved_dir(entry):
+        d = entry.get("dir")
+        return pathlib.Path(os.path.expanduser(d)).resolve() if isinstance(d, str) and d else None
+
+    projects: dict = {k: dict(v) for k, v in raw.items() if k not in v1_keys}
+    for key in v1_keys:
+        parent = pathlib.Path(os.path.expanduser(key)).parent.name
+        name = _unique_project_name(pathlib.Path(key).name, projects, parent)
+        projects[name] = {"dir": key, **raw[key]}
+    mr_path = home / ".claude-yolo" / "multirepos.json"
+    if mr_path.is_file():
+        try:
+            mr = json.loads(mr_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            sys.exit(f"{mr_path}: cannot read multi-repo config to migrate it: {e}")
+        if not isinstance(mr, dict) or not all(isinstance(v, dict) for v in mr.values()):
+            sys.exit(f"{mr_path}: must be a JSON object mapping names to config objects")
+        for name, entry in mr.items():
+            entry = dict(entry)
+            same = next(
+                (n for n, e in projects.items() if resolved_dir(e) == resolved_dir(entry)), None
+            )
+            if same is not None:  # same dir: one project, saved keys over the v1 keys
+                base = projects.pop(same)
+                for k, v in entry.items():
+                    if k.replace("-", "_") in _CONCAT_DESTS and k in base:
+                        bl = base[k] if isinstance(base[k], list) else [base[k]]
+                        vl = v if isinstance(v, list) else [v]
+                        base[k] = bl + [x for x in vl if x not in bl]
+                    else:
+                        base[k] = v
+                entry = base
+                print(
+                    f"note: merged the entry for {entry.get('dir')} into project '{name}'.",
+                    file=sys.stderr,
+                )
+            if name in projects:  # the multirepo name was chosen; the derived one yields
+                old = projects.pop(name)
+                old_dir = pathlib.Path(os.path.expanduser(str(old.get("dir", "")))).parent.name
+                moved = _unique_project_name(name, set(projects) | {name}, old_dir)
+                projects[moved] = old
+                print(
+                    f"note: migrated project '{name}' (from {old.get('dir')}) renamed "
+                    f"to '{moved}'; the saved multi-repo name '{name}' takes precedence.",
+                    file=sys.stderr,
+                )
+            projects[name] = entry
+        mr_path.rename(mr_path.with_suffix(".json.bak"))
+    path = _projects_file(home)
+    if path.is_file():
+        path.replace(path.with_suffix(".json.bak"))
+    _write_projects_file(home, projects)
+    print(
+        f"note: migrated {path} to named-project format"
+        + (f" (folding in {mr_path.name})" if mr_path.with_suffix(".json.bak").is_file() else "")
+        + "; the old files are kept as .bak.",
+        file=sys.stderr,
+    )
+    return projects
 
 
 # Recent-projects registry: ~/.claude-yolo/recent-projects.json maps a project key
@@ -1800,113 +1918,101 @@ def _merge_worktree_overlay(
     _write_worktrees_file(wt_file, worktrees)
 
 
-# Saved multi-repo projects: ~/.claude-yolo/multirepos.json maps a NAME -> a
-# config object with a required "dir" (the primary repo) plus ordinary config
-# keys — typically `repos`, the extra repos. A saved entry is a *launch
-# template*: `yolo start TOPIC --multi-repo NAME` runs as if invoked from `dir`,
-# with the entry's keys layered between the dir's projects.json entry and the
-# CLI flags, and the effective keys stamped into the topic's worktree overlay.
-# Nothing after start consults the entry — the topic is self-describing, so
-# editing or deleting a saved config never changes a live topic. Host-side only
+# Projects are *named*: projects.json maps a NAME -> a config object with a
+# required "dir" (the primary directory; sessions start there and container
+# identity stays keyed to it) plus ordinary config keys — `repos` for the extra
+# repos of a multi-repo project. A project is found two ways: by cwd (the entry
+# whose `dir` contains it — extras never claim a cwd) or by name
+# (`--project NAME`, which also makes it launchable from anywhere). The entry is
+# a live config layer for every session and topic of the project. Host-side only
 # and never mounted, like every other config file.
-def _multirepos_file(home: pathlib.Path) -> pathlib.Path:
-    return home / ".claude-yolo" / "multirepos.json"
+def _valid_project_name(name: str) -> bool:
+    """A project name is a short label, not a path (and can't hide as a dotfile)."""
+    return bool(name) and "/" not in name and not name.startswith(".")
 
 
-def _read_multirepos_file(home: pathlib.Path, *, lenient: bool = False) -> dict:
-    """~/.claude-yolo/multirepos.json as {name: entry}; {} if absent.
-
-    `lenient` returns {} on a malformed file instead of exiting — for the `wip`
-    dashboard's refresh loop, which must keep drawing; the config verb (run to
-    fix the file) stays strict and pointed.
-    """
-    path = _multirepos_file(home)
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        if lenient:
-            return {}
-        sys.exit(f"{path}: cannot read multi-repo config: {e}")
-    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
-        if lenient:
-            return {}
-        sys.exit(f"{path}: must be a JSON object mapping names to config objects")
-    return raw
-
-
-def _write_multirepos_file(home: pathlib.Path, data: dict) -> None:
-    path = _multirepos_file(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
-
-
-def _multirepo_entry(home: pathlib.Path, name: str) -> tuple[pathlib.Path, dict]:
-    """(primary dir, raw config keys) of saved multi-repo project `name`.
-
-    Validated for launch: exits if the entry is missing, its `dir` is unusable,
-    or its config keys don't parse — the callers (`start --multi-repo`, spawned
-    by the dashboard's `n`) are about to launch from it, so a broken entry must
-    fail loudly here, before anything is created. The config keys are returned
-    *raw* (dashed, unexpanded), the form the overlay stamp persists; callers
-    parse them via `_parse_yolo_dict` where they need argparse dests.
-    """
-    entry = _read_multirepos_file(home).get(name)
-    if entry is None:
-        sys.exit(
-            f"no multi-repo project '{name}'; create one with "
-            f"`yolo config --multi-repo {name} --dir DIR --add-repo PATH`."
-        )
+def _project_dir_of(entry: dict, name: str, *, must_exist: bool = True) -> pathlib.Path:
+    """The (expanded) primary dir of a project entry; exits if missing/unusable."""
     raw_dir = entry.get("dir")
     if not isinstance(raw_dir, str) or not raw_dir:
-        sys.exit(f"multirepos.json [{name}]: entry needs a 'dir' (the primary repo).")
+        sys.exit(f"projects.json [{name}]: entry needs a 'dir' (the primary directory).")
     primary = pathlib.Path(os.path.expanduser(raw_dir))
-    if not primary.is_dir():
-        sys.exit(f"multirepos.json [{name}]: dir does not exist: {raw_dir}")
+    if must_exist and not primary.is_dir():
+        sys.exit(f"projects.json [{name}]: dir does not exist: {raw_dir}")
+    return primary
+
+
+def _project_entry_by_name(home: pathlib.Path, name: str) -> tuple[pathlib.Path, dict]:
+    """(primary dir, raw config keys) of project `name`, validated for launch.
+
+    Exits if the entry is missing, its `dir` is unusable, or its config keys
+    don't parse — the callers (`start --project`, spawned by the dashboard's
+    `n`) are about to launch from it, so a broken entry must fail loudly here,
+    before anything is created. The config keys are returned *raw* (dashed,
+    unexpanded); callers parse them via `_parse_yolo_dict` where they need
+    argparse dests.
+    """
+    entry = _read_projects_file(home).get(name)
+    if entry is None:
+        sys.exit(f"no project '{name}'; create one with `yolo config --project {name} --dir DIR`.")
+    primary = _project_dir_of(entry, name)
     cfg = {k: v for k, v in entry.items() if k != "dir"}
-    _parse_yolo_dict(cfg, f"multirepos.json [{name}]")  # reject an unloadable entry now
+    _parse_yolo_dict(cfg, f"projects.json [{name}]")  # reject an unloadable entry now
     return primary, cfg
 
 
-def _match_project_entry(projects: dict, start: pathlib.Path) -> tuple[str | None, dict | None]:
-    """The (key, raw entry) whose directory contains `start`; longest key wins.
+def _match_project_entries(projects: dict, start: pathlib.Path) -> list[tuple[str, dict]]:
+    """Every (name, raw entry) whose `dir` contains `start`, most specific only.
 
-    An entry applies when `start` is at or under its key path, and only the most
-    specific match is used — the same nearest-wins rule the retired in-directory
-    .yolo.json search had, so running from a subdirectory picks up the project's
-    entry.
+    An entry applies when `start` is at or under its `dir`, and only the
+    deepest-matching `dir` is considered — the same nearest-wins rule the
+    retired in-directory .yolo.json search had, so running from a subdirectory
+    picks up the project's entry. Several projects may share that best `dir`
+    (distinct repo sets over one primary); all are returned, sorted by name,
+    and the caller decides how to disambiguate.
     """
     start_res = start.resolve()
-    best_key, best_entry, best_depth = None, None, -1
-    for key, entry in projects.items():
-        key_path = pathlib.Path(os.path.expanduser(key)).resolve()
-        if start_res.is_relative_to(key_path) and len(key_path.parts) > best_depth:
-            best_key, best_entry, best_depth = key, entry, len(key_path.parts)
-    return best_key, best_entry
+    best: list[tuple[str, dict]] = []
+    best_depth = -1
+    for name, entry in projects.items():
+        raw_dir = entry.get("dir")
+        if not isinstance(raw_dir, str) or not raw_dir:
+            continue  # unusable entry; the strict readers/writers police shape
+        dir_path = pathlib.Path(os.path.expanduser(raw_dir)).resolve()
+        if start_res.is_relative_to(dir_path):
+            if len(dir_path.parts) > best_depth:
+                best, best_depth = [(name, entry)], len(dir_path.parts)
+            elif len(dir_path.parts) == best_depth:
+                best.append((name, entry))
+    return sorted(best, key=lambda p: p[0])
 
 
 def _warn_dangling_keys(projects: dict, *, no_entry: bool) -> None:
-    """Warn about projects.json keys whose directory no longer exists.
+    """Warn about project entries whose `dir` no longer exists.
 
-    A dangling key is the signature of a moved/renamed/deleted project: its entry
-    silently stops matching, so a renamed project would otherwise fall back to the
-    global defaults — exactly the account/profile mix-up per-project config exists
-    to prevent. Entries are only ever created deliberately (`yolo config`), so a
-    dangling key is always actionable, never noise. The rename case produces a
-    dangling key *and* a no-entry cwd at once, in the renamed directory itself —
-    when both hold, connect the dots explicitly.
+    A dangling dir is the signature of a moved/renamed/deleted directory: its
+    entry silently stops matching, so a renamed directory would otherwise fall
+    back to the global defaults — exactly the account/profile mix-up per-project
+    config exists to prevent. Entries are only ever created deliberately
+    (`yolo config`), so a dangling dir is always actionable, never noise. The
+    rename case produces a dangling dir *and* a no-entry cwd at once, in the
+    renamed directory itself — when both hold, connect the dots explicitly.
     """
-    dangling = [k for k in projects if not pathlib.Path(os.path.expanduser(k)).is_dir()]
-    for k in dangling:
+    dangling = [
+        (name, entry.get("dir"))
+        for name, entry in projects.items()
+        if not isinstance(entry.get("dir"), str)
+        or not pathlib.Path(os.path.expanduser(entry["dir"])).is_dir()
+    ]
+    for name, d in dangling:
         print(
-            f"warning: projects.json entry {k}: directory no longer exists (moved or renamed?)",
+            f"warning: project '{name}': dir no longer exists (moved or renamed?): {d}",
             file=sys.stderr,
         )
     if dangling and no_entry:
         print(
-            "warning: if this directory used to be one of those, re-run `yolo config` "
-            "here and remove the stale entry.",
+            "warning: if this directory used to be one of those, update the project's "
+            "dir with `yolo config --project NAME --dir .` run from here.",
             file=sys.stderr,
         )
 
@@ -1916,28 +2022,38 @@ def load_yolo_config(
     home: pathlib.Path,
     *,
     worktree_dir: pathlib.Path | None = None,
-    multirepo: tuple[str, dict] | None = None,
+    project: str | None = None,
     quiet: bool = False,
 ) -> tuple[dict, str | None]:
-    """Merge ~/.yolo.json with the matching ~/.claude-yolo/projects.json entry.
+    """Merge ~/.yolo.json with the applicable ~/.claude-yolo/projects.json entry.
 
-    Returns (merged_defaults, matched_project_key). Precedence low->high:
+    Returns (merged_defaults, matched_project_name). Precedence low->high:
     ~/.yolo.json < projects.json entry < worktree overlay < CLI args (the caller
     applies the dict via PARSER.set_defaults, so explicit flags still win). When
-    `worktree_dir` is given (the launch verbs in worktree mode), that worktree's
-    ~/.claude-yolo/worktrees.json entry is layered on as the most specific
-    persisted layer. `multirepo` — a `(name, raw config keys)` pair from a saved
-    multi-repo project (`start --multi-repo`) — layers between the project entry
-    and the overlay: the saved entry is a launch template refining the primary
-    dir's own config (and never coexists with an overlay — start creates the
-    overlay *from* it). prompts/mounts/ports concatenate across the layers; every
-    other key is overridden by the higher layer. All three files are host-side
-    only — outside every container mount — so nothing Claude writes inside a
-    container can change what the next launch mounts or which credentials it uses.
-    Also prints the config provenance line and the stale-state warnings (dangling
-    project keys, leftover in-directory .yolo.json files) to stderr — unless
-    `quiet` (the `wip` dashboard re-reads config on a loop and mustn't scribble
-    the provenance over its frame, nor re-warn every 2s).
+    `worktree_dir` is given (the launch verbs in worktree mode and the topic
+    verbs' repo-set resolution), that worktree's ~/.claude-yolo/worktrees.json
+    entry is layered on as the most specific persisted layer.
+
+    Which project entry applies, in order: `project` (an explicit
+    `--project NAME`, a hard error if unknown) > the overlay's stamped `project`
+    pointer (how a topic started by name stays bound to its project; a dangling
+    pointer warns and falls through) > the entry whose `dir` contains `start`
+    (several projects may share a dir — ambiguity is a hard error naming them,
+    except under `quiet`, where the first by name is used so the dashboard's
+    read-only loops keep drawing). The entry is a *live* layer: it's re-read
+    here on every launch, so config edits reach existing topics at their next
+    container start.
+
+    prompts/mounts/ports/… (`_CONCAT_DESTS`) concatenate across the layers;
+    every other key is overridden by the higher layer. `repos` is rejected in
+    ~/.yolo.json — a global extras list would add worktrees to every project.
+    All the files are host-side only — outside every container mount — so
+    nothing Claude writes inside a container can change what the next launch
+    mounts or which credentials it uses. Also prints the config provenance line
+    and the stale-state warnings (dangling project dirs, leftover in-directory
+    .yolo.json files) to stderr — unless `quiet` (the `wip` dashboard re-reads
+    config on a loop and mustn't scribble the provenance over its frame, nor
+    re-warn every 2s).
     """
     merged = {}
     layers = []
@@ -1951,34 +2067,61 @@ def load_yolo_config(
 
     home_file = home / ".yolo.json"
     if home_file.is_file():
-        merge(_parse_yolo_file(home_file))
+        parsed_global = _parse_yolo_file(home_file)
+        if "repos" in parsed_global:
+            sys.exit(
+                f"{home_file}: `repos` can't be set globally — it would add "
+                "worktrees to every project; set it on a project entry."
+            )
+        merge(parsed_global)
         layers.append("~/.yolo.json")
 
-    projects_file = home / ".claude-yolo" / "projects.json"
-    projects = _read_projects_file(projects_file)
-    matched_key, entry = _match_project_entry(projects, start)
-    if not quiet:
-        _warn_dangling_keys(projects, no_entry=matched_key is None)
-    if matched_key is not None:
-        merge(_parse_yolo_dict(entry, f"{projects_file} [{matched_key}]"))
-        layers.append(f"projects.json[{matched_key}]")
-
-    # Saved multi-repo project (start --multi-repo NAME): its keys refine the
-    # primary dir's own config, under the CLI flags.
-    if multirepo is not None:
-        mr_name, mr_raw = multirepo
-        merge(_parse_yolo_dict(mr_raw, f"multirepos.json [{mr_name}]"))
-        layers.append(f"multirepos.json[{mr_name}]")
-
-    # Worktree overlay (when launching in worktree mode): the most specific
-    # persisted layer, beating the project entry but still under the CLI flags.
+    # The worktree overlay is read up front: its stamped `project` pointer picks
+    # the entry (it's still *merged* last, as the most specific layer).
+    wt_entry = None
     if worktree_dir is not None:
         wt_entry = _read_worktrees_file(_worktrees_file(home)).get(
             _worktree_overlay_key(worktree_dir)
         )
-        if wt_entry:
-            merge(_parse_yolo_dict(wt_entry, f"worktrees.json [{worktree_dir.name}]"))
-            layers.append(f"worktrees.json[{worktree_dir.name}]")
+
+    projects_file = _projects_file(home)
+    projects = _read_projects_file(home, lenient=quiet)
+    matched_key, entry = None, None
+    pointer = (wt_entry or {}).get("project")
+    if project is not None:
+        if project not in projects:
+            sys.exit(f"no project '{project}'; create one with `yolo config --project {project}`.")
+        matched_key, entry = project, projects[project]
+    elif isinstance(pointer, str) and pointer:
+        if pointer in projects:
+            matched_key, entry = pointer, projects[pointer]
+        elif not quiet:
+            print(
+                f"warning: this topic points at project '{pointer}', which no longer "
+                "exists; falling back to directory matching.",
+                file=sys.stderr,
+            )
+    if matched_key is None:
+        candidates = _match_project_entries(projects, start)
+        if len(candidates) > 1 and not quiet:
+            names = ", ".join(n for n, _ in candidates)
+            sys.exit(
+                f"several projects share this directory ({names}); pick one with `--project NAME`."
+            )
+        if candidates:
+            matched_key, entry = candidates[0]
+    if not quiet:
+        _warn_dangling_keys(projects, no_entry=matched_key is None)
+    if matched_key is not None:
+        cfg = {k: v for k, v in entry.items() if k != "dir"}
+        merge(_parse_yolo_dict(cfg, f"{projects_file} [{matched_key}]"))
+        layers.append(f"projects.json[{matched_key}]")
+
+    # Worktree overlay (when launching in worktree mode): the most specific
+    # persisted layer, beating the project entry but still under the CLI flags.
+    if wt_entry:
+        merge(_parse_yolo_dict(wt_entry, f"worktrees.json [{worktree_dir.name}]"))
+        layers.append(f"worktrees.json[{worktree_dir.name}]")
 
     if quiet:
         return merged, matched_key
@@ -2288,31 +2431,6 @@ def _overlay_flags(script_argv: list[str]) -> dict:
     )
 
 
-def _merge_overlay_layers(saved: dict, explicit: dict) -> dict:
-    """Merge a saved multi-repo config under the explicit CLI flags, for the
-    overlay stamp a `start --multi-repo` writes.
-
-    The topic must be self-describing (resume/finish read only the overlay), so
-    the saved keys are persisted alongside the explicit flags. Keys normalize to
-    their dashed spelling; `_OVERLAY_SKIP_KEYS` are dropped from the saved side
-    just as `_overlay_flags` drops them from the CLI side. Same merge rule as the
-    config layers: list keys concatenate (saved first, CLI appended, exact dups
-    dropped), everything else is overridden by the CLI value.
-    """
-    out = {}
-    for k, v in saved.items():
-        key = k.replace("_", "-")
-        if key not in _OVERLAY_SKIP_KEYS:
-            out[key] = v
-    for k, v in explicit.items():
-        if k.replace("-", "_") in _CONCAT_DESTS and k in out:
-            base = out[k] if isinstance(out[k], list) else [out[k]]
-            out[k] = base + [item for item in v if item not in base]
-        else:
-            out[k] = v
-    return out
-
-
 def _spec_path(spec: str) -> pathlib.Path:
     """The (expanded, resolved) directory a PATH[:ro|:rw] mount spec names.
 
@@ -2618,67 +2736,161 @@ def _do_config_worktree(
     print(json.dumps({topic: entry}, indent=2))
 
 
-def _do_config_multirepo(
+def _normalize_project_dir(raw: str) -> str:
+    """A --dir value normalized for storage: a repo path becomes its main root
+    (subdirectory runs and worktree sessions share the entry), a plain directory
+    stays itself (cwd-session projects need no git). Exits if it doesn't exist."""
+    p = pathlib.Path(os.path.expanduser(raw))
+    if not p.is_dir():
+        sys.exit(f"--dir: no such directory: {raw}")
+    ident = _repo_root_of(p)
+    return str(ident[1]) if ident is not None else str(p.resolve())
+
+
+def _project_live_topics(home: pathlib.Path, name: str, projects: dict) -> list[str]:
+    """Topics whose worktree overlays resolve to project `name`.
+
+    A topic resolves to the project when its overlay's `project` pointer names
+    it, or — with no pointer — when directory matching from the topic's main
+    repo would pick it (any best-dir candidate counts, conservatively). Backs
+    the delete guard: these are the topics that would silently lose their
+    config if the entry vanished.
+    """
+    live = []
+    for wt_key, overlay in _read_worktrees_file(_worktrees_file(home)).items():
+        pointer = overlay.get("project") if isinstance(overlay, dict) else None
+        if pointer == name:
+            live.append(pathlib.Path(wt_key).name)
+            continue
+        if pointer:
+            continue
+        main = _worktree_main_repo(pathlib.Path(wt_key))
+        if main and name in (n for n, _ in _match_project_entries(projects, pathlib.Path(main))):
+            live.append(pathlib.Path(wt_key).name)
+    return live
+
+
+def _rewrite_project_pointers(home: pathlib.Path, old: str, new: str) -> int:
+    """Re-point worktree overlays from project `old` to `new` (rename); count them."""
+    wt_file = _worktrees_file(home)
+    worktrees = _read_worktrees_file(wt_file)
+    hits = [k for k, v in worktrees.items() if isinstance(v, dict) and v.get("project") == old]
+    for k in hits:
+        worktrees[k]["project"] = new
+    if hits:
+        _write_worktrees_file(wt_file, worktrees)
+    return len(hits)
+
+
+def _delete_project(home: pathlib.Path, name: str, projects: dict, *, force: bool) -> None:
+    """Delete project `name`, guarding topics that still resolve to it."""
+    live = _project_live_topics(home, name, projects)
+    if live and not force:
+        sys.exit(
+            f"project '{name}' still has live worktrees ({', '.join(sorted(set(live)))}); "
+            "finish them first, or --force to delete anyway (those topics fall back "
+            "to directory matching plus their own overlays)."
+        )
+    del projects[name]
+    _write_projects_file(home, projects)
+    print(f"Deleted project '{name}' from {_projects_file(home)}.")
+
+
+def _write_project_entry(home: pathlib.Path, projects: dict, name: str, entry: dict) -> None:
+    """Validate and persist one project entry, then show it."""
+    where = f"{_projects_file(home)} [{name}]"
+    cfg = {k: v for k, v in entry.items() if k != "dir"}
+    _parse_yolo_dict(cfg, where)  # never write an unloadable entry
+    projects[name] = entry
+    _write_projects_file(home, projects)
+    print(f"Updated {_projects_file(home)}:")
+    print(json.dumps({name: entry}, indent=2))
+
+
+def _rename_project(home: pathlib.Path, projects: dict, old: str, new: str) -> dict:
+    """Rename a project in `projects` (returned mutated), re-pointing overlays.
+
+    No guard needed: the dir doesn't change, so cwd-matched topics are
+    unaffected; pointers are rewritten; session names change at each topic's
+    next relaunch (containers are found by labels, so nothing strands).
+    """
+    if not _valid_project_name(new):
+        sys.exit(f"--name: invalid name {new!r} (a short label, not a path).")
+    if new in projects:
+        sys.exit(f"--name: a project named '{new}' already exists.")
+    projects[new] = projects.pop(old)
+    _write_projects_file(home, projects)  # persist before touching overlays: no torn rename
+    moved = _rewrite_project_pointers(home, old, new)
+    note = f" ({moved} topic{'s' if moved != 1 else ''} re-pointed)" if moved else ""
+    print(f"Renamed project '{old}' to '{new}'{note}.")
+    return projects
+
+
+def _do_config_project(
     home: pathlib.Path, name: str, explicit: dict, editing: bool, parsed
 ) -> None:
-    """`yolo config --multi-repo NAME`: show or update a saved multi-repo project.
+    """`yolo config --project NAME`: show, create, update, rename, or delete a
+    project entry by name.
 
-    The saved entry (multirepos.json) is `dir` — the primary repo — plus ordinary
-    config keys, usually `repos`. On creation, `dir` comes from --dir or is
-    inferred from the cwd's main repo root (error when neither applies); --dir
-    also (re)points an existing entry. Everything else reuses
-    `_apply_config_edits`, so the same flags and validation as a project entry
-    apply. Either way the stored `dir` is normalized to the repo's main root.
+    The entry is `dir` — the primary directory — plus ordinary config keys
+    (`repos` for a multi-repo project). On creation, `dir` comes from --dir or
+    is inferred from the cwd's main repo root (error when neither applies);
+    --dir also (re)points an existing entry, normalized via
+    `_normalize_project_dir`. Everything else reuses `_apply_config_edits`, so
+    the same flags and validation as the in-dir path apply.
     """
     if parsed.cfg_global:
-        sys.exit("--global edits ~/.yolo.json; it can't combine with --multi-repo.")
+        sys.exit("--global edits ~/.yolo.json; it can't combine with --project.")
     if parsed.init:
-        sys.exit("--init registers a project entry; it can't combine with --multi-repo.")
-    if not name or "/" in name or name.startswith("."):
-        sys.exit(f"--multi-repo: invalid name {name!r} (a short label, not a path).")
-    if "name" in explicit:
-        # NAME itself is the project's name (start injects it as the `name` key),
-        # so a divergent stored `name` could never take effect — refuse it.
-        sys.exit("--name can't combine with --multi-repo: the project's name is NAME itself.")
+        sys.exit("--init creates the cwd's project; it can't combine with --project.")
+    if not _valid_project_name(name):
+        sys.exit(f"--project: invalid name {name!r} (a short label, not a path).")
 
-    mr_file = _multirepos_file(home)
-    data = _read_multirepos_file(home)
-    entry = dict(data.get(name, {}))
+    projects = _read_projects_file(home)
+    exists = name in projects
+    entry = dict(projects.get(name, {}))
 
-    if not explicit and not editing and not parsed.mr_dir:
-        print(f"multi-repo projects file: {mr_file}")
-        if name in data:
-            print(json.dumps({name: data[name]}, indent=2))
-        else:
-            print(f"no multi-repo project '{name}'")
+    if parsed.cfg_delete:
+        if explicit or editing or parsed.mr_dir or parsed.project_name:
+            sys.exit("--delete can't combine with other config edits.")
+        if not exists:
+            sys.exit(f"no project '{name}'.")
+        _delete_project(home, name, projects, force=parsed.force)
+        return
+
+    if parsed.project_name:
+        if not exists:
+            sys.exit(f"no project '{name}' to rename; --project NAME creates it as NAME.")
+        projects = _rename_project(home, projects, name, parsed.project_name)
+        name, entry = parsed.project_name, dict(projects[parsed.project_name])
+        if not (explicit or editing or parsed.mr_dir):
+            return
+
+    if not exists and not explicit and not editing and not parsed.mr_dir:
+        print(f"projects file: {_projects_file(home)}")
+        print(f"no project '{name}'")
+        return
+    if exists and not explicit and not editing and not parsed.mr_dir and not parsed.project_name:
+        print(f"projects file: {_projects_file(home)}")
+        print(json.dumps({name: projects[name]}, indent=2))
         return
 
     if parsed.mr_dir:
-        p = pathlib.Path(os.path.expanduser(parsed.mr_dir))
-        if not p.is_dir():
-            sys.exit(f"--dir: no such directory: {parsed.mr_dir}")
-        ident = _repo_root_of(p)
-        if ident is None:
-            sys.exit(f"--dir: not a git repository: {parsed.mr_dir}")
-        entry["dir"] = str(ident[1])
+        entry["dir"] = _normalize_project_dir(parsed.mr_dir)
     elif "dir" not in entry:
         root = _main_root_or_none()
         if root is None:
             sys.exit(
-                "--multi-repo: run this inside the primary repo (its root becomes "
+                "--project: run this inside the primary repo (its root becomes "
                 "`dir`), or pass --dir PATH explicitly."
             )
         entry["dir"] = str(root)
 
-    where = f"{mr_file} [{name}]"
+    where = f"{_projects_file(home)} [{name}]"
     dir_val = entry.pop("dir")
     base_dir = pathlib.Path(os.path.expanduser(dir_val))
     entry = _apply_config_edits(entry, explicit, parsed, where, base_dir)
-    _parse_yolo_dict(entry, where)  # never write an unloadable entry
-    data[name] = {"dir": dir_val, **entry}
-    _write_multirepos_file(home, data)
-    print(f"Updated {mr_file}:")
-    print(json.dumps({name: data[name]}, indent=2))
+    _write_project_entry(home, projects, name, {"dir": dir_val, **entry})
 
 
 def _effective_config(
@@ -2713,10 +2925,14 @@ def _effective_config(
             sys.exit(f"{global_file}: must contain a JSON object")
         raw_layers.append(("~/.yolo.json", g))
 
-    projects = _read_projects_file(home / ".claude-yolo" / "projects.json")
-    matched_key, entry = _match_project_entry(projects, cwd)
+    projects = _read_projects_file(home, lenient=True)
+    candidates = _match_project_entries(projects, cwd)
+    matched_key, entry = candidates[0] if candidates else (None, None)
     if matched_key is not None:
-        raw_layers.append(("projects.json", entry))
+        # `dir` is the entry's identity, not a config key — the display skips it.
+        raw_layers.append(
+            (f"projects.json[{matched_key}]", {k: v for k, v in entry.items() if k != "dir"})
+        )
 
     values: dict[str, object] = {}
     sources: dict[str, list[str]] = {}
@@ -2743,21 +2959,32 @@ def _effective_config(
     return items, matched_key
 
 
-def register_project(home: pathlib.Path, project_key: str) -> str:
-    """Register `project_key` in projects.json with an empty entry; return a message.
+def register_project(home: pathlib.Path, project_dir: str, name: str | None = None) -> str:
+    """Register a project for `project_dir` (no config overrides); return a message.
 
     The in-process core behind `config --init` and the dashboard's add-project
-    (`a`) action — "yolo knows about this project", no overrides. Raises
-    `YoloError` if an entry for the key already exists.
+    (`a`) action — "yolo knows about this project". The name defaults to the
+    directory's basename. Raises `YoloError` if the name is taken or the dir is
+    already some project's primary (a second project over the same dir is
+    created deliberately, via `yolo config --project NAME --dir PATH`).
     """
-    projects_file = home / ".claude-yolo" / "projects.json"
-    projects = _read_projects_file(projects_file)
-    if project_key in projects:
-        raise YoloError(f"{project_key} already has a projects.json entry.")
-    projects[project_key] = {}
-    projects_file.parent.mkdir(parents=True, exist_ok=True)
-    projects_file.write_text(json.dumps(projects, indent=2) + "\n")
-    return f"Registered {project_key} (no overrides)."
+    projects = _read_projects_file(home)
+    resolved = str(pathlib.Path(os.path.expanduser(project_dir)).resolve())
+    for existing, entry in projects.items():
+        d = entry.get("dir")
+        if isinstance(d, str) and str(pathlib.Path(os.path.expanduser(d)).resolve()) == resolved:
+            raise YoloError(f"{project_dir} is already project '{existing}'.")
+    name = name or pathlib.Path(resolved).name.lstrip(".") or "project"
+    if not _valid_project_name(name):
+        raise YoloError(f"invalid project name {name!r} (a short label, not a path).")
+    if name in projects:
+        raise YoloError(
+            f"a project named '{name}' already exists; pick another with --name "
+            f"(or `yolo config --project OTHER --dir {project_dir}`)."
+        )
+    projects[name] = {"dir": project_dir}
+    _write_projects_file(home, projects)
+    return f"Registered project '{name}' ({project_dir}, no overrides)."
 
 
 def do_config(
@@ -2779,13 +3006,17 @@ def do_config(
     validated on set/add so a typo can't be pinned.
 
     `--init` registers the project with an *empty* entry — no overrides, just
-    "yolo knows about this project". That's all `require-project-entry` needs,
-    and the alternative (pinning some explicitly-defaulted flag) would record a
+    "yolo knows about this project" (named via --name, defaulting to the
+    directory basename). That's all `require-project-entry` needs, and the
+    alternative (pinning some explicitly-defaulted flag) would record a
     customization the user never meant. Bare `yolo config` stays read-only, so
-    an explicit flag is the only way to create an empty entry.
+    an explicit flag is the only way to create an empty entry. `--name` renames
+    an existing project; `--delete` removes one (guarded while it has live
+    worktrees); `--project NAME` addresses an entry by name instead of by cwd.
     """
-    projects_file = home / ".claude-yolo" / "projects.json"
+    projects_file = _projects_file(home)
     explicit = _explicit_config_flags(script_argv)
+    explicit.pop("project", None)  # the scope selector, never a stored key
     editing = bool(
         parsed.add_mounts
         or parsed.remove_mounts
@@ -2804,18 +3035,20 @@ def do_config(
         or parsed.unsets
     )
 
-    if parsed.multi_repo:
+    if parsed.project:
         if topic:
             sys.exit(
-                "--multi-repo edits a saved multi-repo project; it can't combine "
+                "--project edits a project entry by name; it can't combine "
                 "with a worktree TOPIC (use `yolo config TOPIC` for the overlay)."
             )
-        _do_config_multirepo(home, parsed.multi_repo, explicit, editing, parsed)
+        _do_config_project(home, parsed.project, explicit, editing, parsed)
         return
     if parsed.mr_dir:
-        sys.exit("--dir only applies with `config --multi-repo NAME`.")
+        sys.exit("--dir only applies with `config --project NAME`.")
 
     if topic:
+        if parsed.project_name or parsed.cfg_delete:
+            sys.exit("--name/--delete apply to project entries, not worktree overlays.")
         _do_config_worktree(home, topic, explicit, editing, parsed)
         return
 
@@ -2827,24 +3060,27 @@ def do_config(
             )
         if parsed.cfg_global:
             sys.exit("--init registers a project entry; it can't combine with --global.")
-        projects = _read_projects_file(projects_file)
+        projects = _read_projects_file(home)
         key = _project_key(cwd)
-        if key in projects:
-            sys.exit(f"{key} already has a projects.json entry; `yolo config` shows it.")
-        matched_key, _ = _match_project_entry(projects, cwd)
-        if matched_key is not None:
-            # Longest key wins and only one entry applies, so an empty entry here
-            # switches this project OFF the ancestor's config — flag it.
-            print(
-                f"warning: this empty entry now shadows the entry for {matched_key} "
-                f"when running under {key}.",
-                file=sys.stderr,
-            )
-        register_project(home, key)
-        print(f"Registered {key} in {projects_file} (no overrides).")
+        for cand_name, cand in _match_project_entries(projects, cwd):
+            if _normalize_project_dir(cand["dir"]) != str(pathlib.Path(key).resolve()):
+                # Deepest dir wins and only one entry applies, so an entry here
+                # switches this directory OFF the ancestor's config — flag it.
+                print(
+                    f"warning: this entry now shadows project '{cand_name}' "
+                    f"when running under {key}.",
+                    file=sys.stderr,
+                )
+        try:
+            msg = register_project(home, key, parsed.project_name)
+        except YoloError as e:
+            sys.exit(str(e))
+        print(f"{msg} [{projects_file}]")
         return
 
     if parsed.cfg_global:
+        if parsed.project_name or parsed.cfg_delete:
+            sys.exit("--name/--delete apply to project entries, not ~/.yolo.json.")
         # Target the flat ~/.yolo.json. Read it raw (not via _parse_yolo_file,
         # which transforms values): this is read-modify-write, and a file that
         # fails validation must still be repairable here via --unset.
@@ -2864,39 +3100,79 @@ def do_config(
             return
         updated = _apply_config_edits(current, explicit, parsed, where, cwd)
         _parse_yolo_dict(updated, where)  # never write an unloadable config
+        if "repos" in updated:
+            sys.exit(
+                f"{global_file}: `repos` can't be set globally — it would add "
+                "worktrees to every project; set it on a project entry."
+            )
         global_file.write_text(json.dumps(updated, indent=2) + "\n")
         print(f"Updated {global_file}:")
         print(json.dumps(updated, indent=2))
         return
 
-    projects = _read_projects_file(projects_file)
+    # In-directory scope: resolve the cwd's project by dir containment.
+    projects = _read_projects_file(home)
     key = _project_key(cwd)
+    candidates = _match_project_entries(projects, cwd)
+    if len(candidates) > 1:
+        names = ", ".join(n for n, _ in candidates)
+        sys.exit(
+            f"several projects share this directory ({names}); pick one with `--project NAME`."
+        )
+    matched = candidates[0] if candidates else None
 
-    if not explicit and not editing:
+    if parsed.cfg_delete:
+        if explicit or editing or parsed.project_name:
+            sys.exit("--delete can't combine with other config edits.")
+        if matched is None:
+            sys.exit("no project entry applies here.")
+        _delete_project(home, matched[0], projects, force=parsed.force)
+        return
+
+    if not explicit and not editing and not parsed.project_name:
         # Show the *complete* effective config that would apply here — the global
         # ~/.yolo.json values that aren't overridden, merged with this project's
         # entry — not just the project entry, with per-key provenance.
         items, matched_key = _effective_config(home, cwd)
         print(f"projects file: {projects_file}")
+        label = f"project '{matched_key}' ({key})" if matched_key else key
         if not items:
             note = "" if matched_key is not None else " (no project entry)"
-            print(f"no config applies for {key}; built-in defaults{note}")
+            print(f"no config applies for {label}; built-in defaults{note}")
         else:
-            print(f"effective config for {key}:")
+            print(f"effective config for {label}:")
             width = max(len(k) for k, _, _ in items)
             for k, v, srcs in items:
                 print(f"  {k.ljust(width)}  {json.dumps(v)}  [{' + '.join(srcs)}]")
         _warn_dangling_keys(projects, no_entry=matched_key is None)
         return
 
-    where = f"{projects_file} [{key}]"
-    entry = _apply_config_edits(dict(projects.get(key, {})), explicit, parsed, where, cwd)
-    _parse_yolo_dict(entry, where)  # never write an unloadable entry
-    projects[key] = entry
-    projects_file.parent.mkdir(parents=True, exist_ok=True)
-    projects_file.write_text(json.dumps(projects, indent=2) + "\n")
-    print(f"Updated {projects_file}:")
-    print(json.dumps({key: entry}, indent=2))
+    # Edits (and/or --name). A first write auto-creates the entry, named by
+    # --name or the directory basename — the same implicit-creation contract the
+    # path-keyed format had, now with a name attached.
+    if matched is None:
+        name = parsed.project_name or pathlib.Path(key).name.lstrip(".") or "project"
+        if not _valid_project_name(name):
+            sys.exit(f"--name: invalid name {name!r} (a short label, not a path).")
+        if name in projects:
+            sys.exit(
+                f"a project named '{name}' already exists; pick another with --name "
+                f"(or edit that one via `yolo config --project {name}`)."
+            )
+        entry = {"dir": key}
+    else:
+        name = matched[0]
+        if parsed.project_name and parsed.project_name != name:
+            projects = _rename_project(home, projects, name, parsed.project_name)
+            name = parsed.project_name
+        entry = dict(projects.get(name, matched[1]))
+        if not explicit and not editing:  # --name alone: the rename already happened
+            return
+
+    where = f"{projects_file} [{name}]"
+    dir_val = entry.pop("dir", key)
+    entry = _apply_config_edits(entry, explicit, parsed, where, cwd)
+    _write_project_entry(home, projects, name, {"dir": dir_val, **entry})
 
 
 def _pyproject_version() -> str | None:
@@ -3582,39 +3858,45 @@ PARSER.add_argument(
     "--name",
     dest="project_name",
     metavar="NAME",
-    help="What sessions of this project are called: the container name (and tmux "
-    "window) becomes NAME for a current-directory session or NAME-TOPIC for a "
-    "worktree session, instead of deriving from the directory basename. Also "
-    "settable as `name` in config — set it on a project entry (`yolo config "
-    "--name NAME`) to rename every session of that project. A saved multi-repo "
-    "project is always named after its saved NAME (see --multi-repo).",
+    help="For `config`: the project's name. At creation (--init, or the first "
+    "config write in a directory) it overrides the default (the directory "
+    "basename); on an existing entry it renames the project, rewriting the "
+    "worktree overlays that point at it. Session/container names derive from "
+    "the project name, so a rename takes effect at each session's next launch.",
 )
 PARSER.add_argument(
-    "--multi-repo",
-    dest="multi_repo",
+    "--project",
+    dest="project",
     metavar="NAME",
-    help="For `start`: launch from the saved multi-repo project NAME — as if run "
-    "from its `dir`, with the saved keys (its `repos`, ports, …) layered between "
-    "that dir's project config and the CLI flags; requires a TOPIC. For `config`: "
-    "show or edit the saved entry (see --dir / --add-repo). Saved entries live in "
-    "~/.claude-yolo/multirepos.json and are consulted only at start: the topic's "
-    "worktree overlay carries the effective keys afterwards, so editing or "
-    "deleting the entry never changes a live topic.",
+    help="For `start`/`resume`/`shell`: act on project NAME — as if run from its "
+    "`dir`, with the entry's keys layered between ~/.yolo.json and the CLI flags "
+    "— from any directory, with or without a TOPIC. Also the only way to pick a "
+    "project when several share a directory. For `config`: show or edit the "
+    "entry by name (see --dir / --add-repo / --name / --delete).",
 )
 PARSER.add_argument(
     "--dir",
     dest="mr_dir",
     metavar="PATH",
-    help="For `config --multi-repo NAME`: the primary repo of the saved "
-    "multi-repo project (sessions start from it; its own project config still "
-    "applies underneath). Defaults to the current repo's root when run inside "
-    "one; required otherwise.",
+    help="For `config --project NAME`: the project's primary directory (sessions "
+    "start from it). Defaults to the current repo's root when run inside one; "
+    "required otherwise when creating a project by name.",
 )
 PARSER.add_argument(
-    "--project",
+    "--delete",
+    dest="cfg_delete",
+    action="store_true",
+    help="For `config`: delete the project entry (the cwd's, or --project NAME's). "
+    "Refuses while the project has live worktrees; --force overrides, degrading "
+    "those topics to directory matching plus their own overlays.",
+)
+PARSER.add_argument(
+    "--project-scope",
+    dest="project_scope",
     action="store_true",
     help="For `secret set`/`secret rm`: act on this project's scope (keyed to the "
-    "main repo root) instead of the global scope.",
+    "main repo root) instead of the global scope. (Formerly spelled --project, "
+    "which now selects a project by name.)",
 )
 PARSER.add_argument(
     "--clipboard",
@@ -6404,33 +6686,48 @@ def _order_sessions(sessions: list) -> list:
 def _wip_projects(home: pathlib.Path, sessions: list) -> list:
     """Projects to offer in the dashboard: registered (projects.json) + recently opened.
 
-    Returns `[{path, active, registered}]`. `registered` keys are deliberate
-    projects.json entries; the rest come from the recent-projects registry (every
-    launch stamps one) so a project you've opened shows up even with no config entry
-    — `a` can then register it. Recent-only keys whose directory no longer exists are
-    dropped (stale auto-records, not actionable); registered keys are kept regardless
-    (a dangling one is the config layer's warning to raise, not something to hide
-    here). `active` is true when a running session's cwd is at or under the path — a
-    hint that work is already happening there.
+    Returns `[{name, path, repos, active, registered}]`. Registered rows are the
+    named projects.json entries (`name` set, `path` = their `dir`, `repos` the
+    extras count); the rest come from the recent-projects registry (every launch
+    stamps one) so a directory you've opened shows up even with no project —
+    `a` can then register it (those rows have `name: None`). Recent-only paths
+    whose directory no longer exists — or that are already some project's `dir` —
+    are dropped; registered rows are kept regardless (a dangling dir is the
+    config layer's warning to raise, not something to hide here). `active` is
+    true when a running session's cwd is at or under the path — a hint that work
+    is already happening there.
     """
-    registered = set(_read_projects_file(home / ".claude-yolo" / "projects.json").keys())
+    projects = _read_projects_file(home, lenient=True)
+    registered_dirs = set()
+    rows = []
+    for name in sorted(projects):
+        raw_dir = projects[name].get("dir")
+        if not isinstance(raw_dir, str) or not raw_dir:
+            continue  # unusable entry; the strict config paths police shape
+        path = pathlib.Path(os.path.expanduser(raw_dir))
+        registered_dirs.add(path.resolve())
+        repos = projects[name].get("repos", [])
+        n = 1 if isinstance(repos, str) else len(repos) if isinstance(repos, list) else 0
+        rows.append({"name": name, "path": path, "repos": n, "registered": True})
     recent_raw = _read_recent_projects_file(home)
     recent = sorted(
         (
             k
             for k in recent_raw
-            if k not in registered and pathlib.Path(os.path.expanduser(k)).is_dir()
+            if pathlib.Path(os.path.expanduser(k)).is_dir()
+            and pathlib.Path(os.path.expanduser(k)).resolve() not in registered_dirs
         ),
         key=lambda k: recent_raw[k].get("last_opened", ""),
         reverse=True,  # most-recently-opened first, below the (alphabetical) registered ones
     )
+    rows += [
+        {"name": None, "path": pathlib.Path(k), "repos": 0, "registered": False} for k in recent
+    ]
     cwds = [pathlib.Path(s.cwd) for s in sessions if s.cwd]
-    out = []
-    for k in sorted(registered) + recent:
-        kp = pathlib.Path(k)
-        active = any(c == kp or kp in c.parents for c in cwds)
-        out.append({"path": kp, "active": active, "registered": k in registered})
-    return out
+    for row in rows:
+        kp = row["path"]
+        row["active"] = any(c == kp or kp in c.parents for c in cwds)
+    return rows
 
 
 def _session_window_for(path, sessions, windows) -> str | None:
@@ -6531,37 +6828,19 @@ def _wip_items(home: pathlib.Path) -> dict:
             directory = "~/" + str(path.relative_to(home))  # like the WORKTREES column
         except ValueError:
             directory = str(path)
+        if p["repos"]:
+            directory += f" +{p['repos']} repo{'' if p['repos'] == 1 else 's'}"
         project_items.append(
             WipItem(
                 "project",
-                f"project:{p['path']}",
-                (path.name, directory),  # REPO / DIRECTORY
+                f"project:{p['name'] or p['path']}",
+                (p["name"] or path.name, directory),  # PROJECT / DIRECTORY
                 {
+                    "name": p["name"],  # None for a recent (unregistered) dir
                     "path": p["path"],
                     "registered": p["registered"],  # `a` registers a recent (unregistered) one
                     "window": _session_window_for(p["path"], sessions, windows),
                 },
-            )
-        )
-    # Saved multi-repo projects (multirepos.json): one row each, in the PROJECTS
-    # section — `n` starts a worktree from the saved config, `c` edits it. Read
-    # leniently: the dashboard's refresh loop must keep drawing on a malformed
-    # file (`yolo config --multi-repo` is where it gets fixed, strictly).
-    for name, entry in sorted(_read_multirepos_file(home, lenient=True).items()):
-        raw_dir = entry.get("dir")
-        path = pathlib.Path(os.path.expanduser(raw_dir)) if isinstance(raw_dir, str) else None
-        try:
-            directory = "~/" + str(path.relative_to(home)) if path else "?"
-        except ValueError:
-            directory = str(path)
-        repos = entry.get("repos", [])
-        n = 1 if isinstance(repos, str) else len(repos) if isinstance(repos, list) else 0
-        project_items.append(
-            WipItem(
-                "multirepo",
-                f"multirepo:{name}",
-                (name, f"{directory} +{n} repo{'' if n == 1 else 's'}"),
-                {"name": name, "path": path},
             )
         )
     # A trailing `+` row: Enter on it prompts for a directory and opens a session
@@ -6669,7 +6948,6 @@ _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · ! halt-launch · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
     "project": "Enter open · N new · ! halt-launch · R resume-pick · n new worktree · c config · a register",
-    "multirepo": "n new multi-repo worktree · c config",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -6742,9 +7020,9 @@ def _worktree_config(home, main_root, worktree) -> tuple:
 
 
 def _project_display_name(home, root, worktree=None) -> str:
-    """The name sessions at `root` run under: the effective `name` config key
-    (project entry, or — with `worktree` — the topic's overlay, which carries a
-    saved multi-repo project's NAME), else `root`'s basename.
+    """The name sessions at `root` run under: the matching project's name (by
+    the topic's overlay pointer when `worktree` is given, else by dir
+    containment), else `root`'s basename.
 
     Recomputes what the launch path's naming block resolves, so a window the
     dashboard spawns is named exactly like the container the inner `yolo` in it
@@ -6753,14 +7031,14 @@ def _project_display_name(home, root, worktree=None) -> str:
     """
     root = pathlib.Path(root)
     if home is not None:
-        cfg, _ = load_yolo_config(
+        _, matched = load_yolo_config(
             root,
             home,
             worktree_dir=pathlib.Path(worktree) if worktree else None,
             quiet=True,
         )
-        if cfg.get("project_name"):
-            return cfg["project_name"]
+        if matched:
+            return matched
     return root.name
 
 
@@ -6873,7 +7151,7 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_diff(kind, p, home, session)
         if key == "c":
             return _wip_config(kind, p, home, term)
-        if key == "n" and kind in ("project", "multirepo"):
+        if key == "n" and kind == "project":
             return _wip_new_worktree(p, home, session, term)
         if key == "N":
             return _wip_new_session(kind, p, home, session)
@@ -6913,20 +7191,20 @@ def _wip_enter(item, home, session, term) -> str:
         return f"resuming '{p['topic']}'…"
     if kind == "project":
         path = p["path"]
-        name = _project_display_name(home, path)
+        name = p.get("name") or pathlib.Path(path).name
         # An active project already has a live session window: jump to it (as a
         # session row would) rather than spawning a `resume` the already-running
         # guard would reject. Otherwise open one — `resume` continues the dir's most
         # recent session, falling back to a fresh one when there's nothing to
         # continue (see _has_resumable_session), so Enter "just opens" it either way.
+        # A registered row resumes by name (immune to several projects sharing the
+        # dir); an unregistered (recent-dir) row has no name to use.
         if p.get("window"):
             _focus_tmux_window(session, p["window"])
             return f"switched to session in {name}."
-        _spawn_session_window(path, ["resume", "--no-tmux"], name, session)
+        argv = ["resume", *(["--project", p["name"]] if p.get("name") else []), "--no-tmux"]
+        _spawn_session_window(path, argv, name, session)
         return f"opening a session in {name}…"
-    if kind == "multirepo":
-        # A saved config isn't a running thing to open; its verb is `n`.
-        return f"'{p['name']}' is a saved multi-repo config — n starts a worktree from it."
     if kind == "newsession":
         # The trailing `+`: prompt for any directory (Tab-completed, ~-aware) and
         # start a fresh session there, like a project Enter for a dir not yet listed.
@@ -6944,9 +7222,12 @@ def _wip_enter(item, home, session, term) -> str:
 
 
 def _wip_spawn_target(kind, p, home):
-    """(cwd, window_name, label) for spawning a session on a worktree/project row.
+    """(cwd, window_name, label, extra argv) for spawning a session on a
+    worktree/project row.
 
     Mirrors the repo/name logic Enter uses, so a spawned window matches Enter's.
+    A registered project row contributes `--project NAME` so the spawned yolo
+    acts on that project by name (immune to several projects sharing the dir).
     Returns None for kinds that aren't launchable this way (session / the `+` row).
     """
     if kind == "worktree":
@@ -6956,10 +7237,11 @@ def _wip_spawn_target(kind, p, home):
             if p["main_root"]
             else p["topic"]
         )
-        return repo, name, p["topic"]
+        return repo, name, p["topic"], []
     if kind == "project":
         path = p["path"]
-        return path, _project_display_name(home, path), pathlib.Path(path).name
+        name = p.get("name") or pathlib.Path(path).name
+        return path, name, name, ["--project", p["name"]] if p.get("name") else []
     return None
 
 
@@ -6976,13 +7258,13 @@ def _wip_new_session(kind, p, home, session, halt: bool = False) -> str:
     target = _wip_spawn_target(kind, p, home)
     if target is None:
         return "new session applies to worktrees and projects."
-    cwd, window_name, label = target
+    cwd, window_name, label, extra = target
     if p.get("window"):
         return f"a session is already running in {label} — Enter switches to it; stop it first."
     argv_tail = (
         ["resume", p["topic"], "--new", "--no-tmux"]
         if kind == "worktree"
-        else ["start", "--no-tmux"]
+        else ["start", *extra, "--no-tmux"]
     )
     if halt:
         argv_tail.append("--_halt-before-exec")
@@ -6997,13 +7279,13 @@ def _wip_resume_pick(kind, p, home, session) -> str:
     target = _wip_spawn_target(kind, p, home)
     if target is None:
         return "resume picker applies to worktrees and projects."
-    cwd, window_name, label = target
+    cwd, window_name, label, extra = target
     if p.get("window"):
         return f"a session is already running in {label} — Enter switches to it; stop it first."
     argv_tail = (
         ["resume", p["topic"], "-r", "--no-tmux"]
         if kind == "worktree"
-        else ["resume", "-r", "--no-tmux"]
+        else ["resume", *extra, "-r", "--no-tmux"]
     )
     _spawn_session_window(cwd, argv_tail, window_name, session)
     return f"opening the session picker for {label}…"
@@ -7179,10 +7461,8 @@ class _ConfigScope:
     def read(self) -> dict:
         if self.store == "worktrees.json":
             data = _read_worktrees_file(_worktrees_file(self.home))
-        elif self.store == "multirepos.json":
-            data = _read_multirepos_file(self.home, lenient=True)
         else:
-            data = _read_projects_file(self.home / ".claude-yolo" / "projects.json")
+            data = _read_projects_file(self.home, lenient=True)
         return data.get(self._entry_key, {})
 
     def inherited(self) -> list:
@@ -7209,29 +7489,31 @@ def _config_scope(kind, payload, home):
         )
     if kind == "project":
         path = pathlib.Path(payload["path"])
+        name = payload.get("name")
+        if name:
+            # A registered project: writes go through `yolo config --project NAME`
+            # (immune to several projects sharing the dir); the inherited pane
+            # shows the global layer the entry sits on. The cwd only needs to be
+            # a valid directory (the verb targets the entry by NAME).
+            return _ConfigScope(
+                home,
+                label=f"project {name}",
+                store="projects.json",
+                config_args=["config", "--project", name],
+                cwd=str(path if path.is_dir() else home),
+                entry_key=name,
+                base_cwd=path,
+            )
+        # An unregistered recent dir: a plain in-dir `yolo config` write, whose
+        # first edit auto-creates the entry (named after the dir's basename).
         return _ConfigScope(
             home,
             label=path.name,
             store="projects.json",
             config_args=["config"],
             cwd=str(path),
-            entry_key=str(path),
+            entry_key=path.name.lstrip(".") or "project",
             base_cwd=path,
-        )
-    if kind == "multirepo":
-        # Writes go through `yolo config --multi-repo NAME`; the inherited pane
-        # shows the global + primary-dir layers the saved config sits on. The cwd
-        # only needs to be a valid directory (the verb targets the entry by NAME).
-        path = payload.get("path")
-        base = pathlib.Path(path) if path else home
-        return _ConfigScope(
-            home,
-            label=f"multi-repo {payload['name']}",
-            store="multirepos.json",
-            config_args=["config", "--multi-repo", payload["name"]],
-            cwd=str(base if base.is_dir() else home),
-            entry_key=payload["name"],
-            base_cwd=base,
         )
     return None
 
@@ -7478,8 +7760,8 @@ def _config_editor_loop(scope, term) -> str:
 
 def _config_edit_key(scope, key, term) -> str:
     """Edit one key: list keys open the element view, scalars re-prompt a value."""
-    if key == "dir" and scope.store == "multirepos.json":
-        # The saved entry's primary repo — not a YOLO_KEYS key; set via --dir.
+    if key == "dir" and "--project" in scope.config_args:
+        # The entry's primary directory — not a YOLO_KEYS key; set via --dir.
         path = term.prompt_path("dir = ")
         return _config_apply(scope, ["--dir", path])[1] if path else "cancelled."
     if key.replace("-", "_") not in YOLO_KEYS:
@@ -7506,45 +7788,34 @@ def _wip_new_worktree(p, home, session, term) -> str:
     """`n`: prompt for a topic, then start a new worktree session in this project.
 
     Shells out (like Enter's launches) into a fresh tmux window running `yolo start
-    <topic> --no-tmux` in the project dir, so the inner yolo creates the worktree +
-    branch and execs docker into the window. On a saved multi-repo row the spawn is
-    `yolo start <topic> --multi-repo <name> --no-tmux` instead — the inner yolo
-    retargets to the saved `dir` itself, so the window's cwd only needs to be valid.
-    Topic validation (existing worktree/branch, bad branch name) is left to that
-    spawned `yolo start`, surfacing in the window — the same place Enter's launch
-    errors land.
+    <topic> [--project <name>] --no-tmux` in the project dir, so the inner yolo
+    creates the worktree(s) + branch and execs docker into the window (a registered
+    row starts by name, so the inner yolo retargets to the project's `dir` itself
+    and the window's cwd only needs to be valid). Topic validation (existing
+    worktree/branch, bad branch name) is left to that spawned `yolo start`,
+    surfacing in the window — the same place Enter's launch errors land.
     """
     topic = term.prompt_line("New worktree topic: ")
     if not topic:
         return "cancelled."
-    if "name" in p:  # a saved multi-repo project row
-        cwd = p.get("path") or pathlib.Path.home()
-        _spawn_session_window(
-            cwd,
-            ["start", topic, "--multi-repo", p["name"], "--no-tmux"],
-            f"{p['name']}-{topic}",
-            session,
-        )
-        return f"starting multi-repo worktree '{topic}'…"
-    path = p["path"]
-    name = f"{_project_display_name(home, path)}-{topic}"
-    _spawn_session_window(path, ["start", topic, "--no-tmux"], name, session)
-    return f"starting worktree '{topic}'…"
+    target = _wip_spawn_target("project", p, home)
+    cwd, window_name, label, extra = target
+    _spawn_session_window(
+        cwd or pathlib.Path.home(),
+        ["start", topic, *extra, "--no-tmux"],
+        f"{window_name}-{topic}",
+        session,
+    )
+    return f"starting worktree '{topic}' in {label}…"
 
 
 def _wip_add_project(home, term) -> str:
-    """`a`: add a project — a two-way pick.
+    """`a`: register a project — a directory plus a name.
 
-    "directory project" registers a directory in projects.json (the original
-    flow: prompts for a path, Tab-completing; uses its git root if it has one).
-    "multi-repo project" creates a saved multi-repo config instead
-    (`_wip_add_multirepo`).
+    Prompts for the path (Tab-completed; its git root is used when it has one)
+    and a name, defaulting to the directory basename. Extra repos and any other
+    config are added afterwards via the row's `c` editor.
     """
-    choice = _pick_one(term, "Add:", ["directory project", "multi-repo project"])
-    if choice is None:
-        return "cancelled."
-    if choice == "multi-repo project":
-        return _wip_add_multirepo(home, term)
     raw = term.prompt_path("Project path to add: ")
     if not raw:
         return "cancelled."
@@ -7555,32 +7826,12 @@ def _wip_add_project(home, term) -> str:
         ["git", "-C", str(proj), "rev-parse", "--show-toplevel"], capture_output=True, text=True
     )
     key = top.stdout.strip() if top.returncode == 0 and top.stdout.strip() else str(proj.resolve())
+    default = pathlib.Path(key).name.lstrip(".") or "project"
+    name = term.prompt_line(f"Project name [{default}]: ") or default
     try:
-        return register_project(home, key)
+        return register_project(home, key, name)
     except YoloError as e:
         return str(e)
-
-
-def _wip_add_multirepo(home, term) -> str:
-    """Create a saved multi-repo project: name + primary repo, then straight into
-    the config editor so its extra repos are added right there (the `repos`
-    list-edit loop). The create shells out to `yolo config --multi-repo NAME
-    --dir PATH`, reusing all of that path's validation (name shape, dir must be a
-    git repo)."""
-    name = term.prompt_line("Multi-repo project name: ")
-    if not name:
-        return "cancelled."
-    raw = term.prompt_path("Primary repo path: ")
-    if not raw:
-        return "cancelled."
-    primary = pathlib.Path(raw).expanduser()
-    if not primary.is_dir():
-        return f"not a directory: {primary}"
-    scope = _config_scope("multirepo", {"name": name, "path": primary}, home)
-    ok, msg = _config_apply(scope, ["--dir", str(primary)])
-    if not ok:
-        return msg
-    return _config_editor_loop(scope, term)
 
 
 def do_wip(home, *, dashboard, tmux_session) -> None:
@@ -7899,6 +8150,18 @@ def _main():
     home = pathlib.Path.home()
     cwd = pathlib.Path.cwd()
 
+    # `secret set/rm`'s scope flag used to be spelled --project, which now
+    # selects a project by name. Translate the old spelling (the verb is the
+    # first positional, known before parsing) for one release.
+    first_positional = next((a for a in script_argv if not a.startswith("-")), None)
+    if first_positional == "secret" and "--project" in script_argv:
+        print(
+            "warning: `secret --project` is now spelled --project-scope "
+            "(--project selects a project by name); translating.",
+            file=sys.stderr,
+        )
+        script_argv = ["--project-scope" if a == "--project" else a for a in script_argv]
+
     # Parse once with built-in defaults to dispatch `config`, which is terminal and
     # runs *before* the config files are layered in: it must work even when those
     # are broken (it reads only projects.json itself, with a pointed error), and
@@ -7910,6 +8173,10 @@ def _main():
     # `browse` needs that distinction — its --port selects a port, and a
     # config-supplied `ports` list must not read as a selection.
     cli_ports = list(parsed.ports)
+    # --project *explicitly on the CLI* means "launch/edit project NAME"; after
+    # the config re-parse, parsed.project may also be set by a topic overlay's
+    # stamped pointer, which must not read as a launch-by-name request.
+    cli_project = parsed.project
 
     # `finish` only makes sense against a worktree, so it still requires a TOPIC;
     # start/resume/shell take an optional TOPIC (no TOPIC ⇒ current directory).
@@ -7951,8 +8218,8 @@ def _main():
         sys.exit("--resume/-r only applies to `resume`.")
     if parsed.new and parsed.resume is not None:
         sys.exit("--new can't be combined with --resume/-r.")
-    if parsed.force and verb not in ("finish", "rebase", "stop"):
-        sys.exit("--force only applies to `finish`, `rebase`, and `stop`.")
+    if parsed.force and verb not in ("finish", "rebase", "stop", "config"):
+        sys.exit("--force only applies to `finish`, `rebase`, `stop`, and `config --delete`.")
     if parsed.wip_dashboard and verb != "wip":
         sys.exit("--_dashboard is internal to `wip`.")
     if parsed.watch and verb != "ps":
@@ -7961,8 +8228,8 @@ def _main():
         sys.exit("--stat only applies to `diff`.")
     if parsed.all_repos and verb not in ("list", "secret"):
         sys.exit("--all only applies to `list` and `secret list`.")
-    if parsed.project and verb != "secret":
-        sys.exit("--project only applies to `secret set`/`secret rm`.")
+    if parsed.project_scope and verb != "secret":
+        sys.exit("--project-scope only applies to `secret set`/`secret rm`.")
     if parsed.clipboard and verb != "secret":
         sys.exit("--clipboard only applies to `secret set`.")
     if parsed.print_url and verb != "browse":
@@ -7988,16 +8255,13 @@ def _main():
         ("--add-repo", parsed.add_repos),
         ("--remove-repo", parsed.remove_repos),
         ("--dir", parsed.mr_dir),
+        ("--name", parsed.project_name),
+        ("--delete", parsed.cfg_delete),
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
-    if parsed.multi_repo and verb not in ("config", "start", None):
-        sys.exit("--multi-repo only applies to `start` and `config`.")
-    if parsed.multi_repo and verb != "config" and not topic:
-        sys.exit(
-            "--multi-repo starts a worktree session, so it needs a topic: "
-            "`yolo start TOPIC --multi-repo NAME`."
-        )
+    if cli_project and verb not in ("config", "start", "resume", "shell", None):
+        sys.exit("--project only applies to `start`/`resume`/`shell` and `config`.")
 
     if verb == "config":
         do_config(script_argv, home, cwd, parsed, topic)
@@ -8034,27 +8298,20 @@ def _main():
     # worktree mode also layer that worktree's overlay on top of the project entry;
     # `start` is excluded — it *creates* the overlay from the CLI flags (below), so
     # it must not also consume a stale same-path entry left by a manual removal.
-    # A saved multi-repo project (start --multi-repo NAME) retargets the launch to
-    # its primary repo: chdir there so every cwd-derived value (repo root, project
-    # key, secrets scope, project-entry match) is exactly what a start run from
-    # that repo would see, and remember the saved keys — layered into the config
-    # below and stamped into the worktree overlay at start.
-    multirepo_cfg = None
-    if parsed.multi_repo:
-        mr_dir, mr_raw = _multirepo_entry(home, parsed.multi_repo)
-        os.chdir(mr_dir)
-        cwd = mr_dir
-        # The saved NAME is the project's name: inject it as the `name` config key
-        # so this launch's container/session names derive from it (not the primary
-        # repo's basename) and — via the overlay stamp below — so do later
-        # resume/shell relaunches of the topic.
-        multirepo_cfg = (parsed.multi_repo, {**mr_raw, "name": parsed.multi_repo})
+    # `start --project NAME` retargets the launch to the project's primary dir:
+    # chdir there so every cwd-derived value (repo root, project key, secrets
+    # scope) is exactly what a start run from that dir would see; the entry
+    # itself layers in via load_yolo_config(project=...), live like any other.
+    if cli_project:
+        proj_dir, _ = _project_entry_by_name(home, cli_project)
+        os.chdir(proj_dir)
+        cwd = proj_dir
 
     overlay_dir = None
     if topic and verb in ("resume", "shell"):
         overlay_dir, _, _ = _worktree_dir(topic, home)
     config_defaults, matched_project_key = load_yolo_config(
-        cwd, home, worktree_dir=overlay_dir, multirepo=multirepo_cfg
+        cwd, home, worktree_dir=overlay_dir, project=cli_project
     )
     PARSER.set_defaults(**config_defaults)
     parsed = PARSER.parse_args(script_argv)
@@ -8249,12 +8506,11 @@ def _main():
             # config {topic}` can edit it). Always written, even {} — symmetric with
             # the worktree lifecycle (created here, removed by `finish`). `tmux` is
             # excluded (see _overlay_flags): the dashboard's --no-tmux mechanic must
-            # not pin tmux:false here. A saved multi-repo config is folded in under
-            # the CLI flags (see _merge_overlay_layers): the overlay is the topic's
-            # source of truth — resume/finish never consult the saved entry.
+            # not pin tmux:false here. A `--project NAME` start rides in as the
+            # overlay's `project` pointer (it's an explicit YOLO_KEYS flag), which
+            # is what keeps the topic bound to its project across resume/finish —
+            # the entry itself stays a live layer, never copied here.
             wt_overlay = _overlay_flags(script_argv)
-            if multirepo_cfg is not None:
-                wt_overlay = _merge_overlay_layers(multirepo_cfg[1], wt_overlay)
             _parse_yolo_dict(wt_overlay, f"worktrees.json [{topic}]")  # never persist unloadable
             wt_file = _worktrees_file(home)
             worktrees = _read_worktrees_file(wt_file)
@@ -8297,10 +8553,9 @@ def _main():
                     extra_wt = setup_worktree(topic, home, base=parsed.base, repo=extra_root)[0]
                 extra_repos.append((extra_wt, extra_git, extra_slug))
         worktree_name = topic
-        # The project's name: the `name` config key when set (a renamed project
-        # entry, or the saved multi-repo NAME riding in via the injected layer /
-        # the topic's overlay), else the primary repo's basename.
-        project = parsed.project_name or main_root.name
+        # The project's name — the matched entry (by --project, the overlay's
+        # pointer, or dir containment), else the primary repo's basename.
+        project = matched_project_key or main_root.name
         container_base = f"{project}-{topic}"
         # Name the Claude session `<project>:<topic>` — distinguishing it both from
         # a same-named topic in another project and from a cwd session (named just
@@ -8308,7 +8563,7 @@ def _main():
         session_name = f"{project}:{topic}"
     else:
         slug = _repo_slug_or_none()
-        container_base = parsed.project_name or cwd.name
+        container_base = matched_project_key or cwd.name
         # Name a cwd session after the project (default: the directory, = the
         # container hostname), so it gets the same label above Claude's prompt that
         # a worktree's topic does and is identifiable in the resume picker. Only one

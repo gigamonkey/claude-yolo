@@ -1268,7 +1268,7 @@ def test_config_verb_keys_entry_by_repo_root(cy, run_cli, repo):
     # subdirectory runs and worktree sessions all share it
     run_cli(["config", "--no-ssh-agent"], home=home, cwd=sub)
     projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    assert projects == {str(r): {"ssh-agent": False}}
+    assert projects == {r.name: {"dir": str(r), "ssh-agent": False}}
 
 
 def test_project_entry_applies_to_worktree_session(cy, run_cli, repo):

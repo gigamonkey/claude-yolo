@@ -31,7 +31,8 @@ def claude_args(cy, argv):
 
 def entry(home, work):
     projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    return projects[str(work)]
+    e = next(v for v in projects.values() if v.get("dir") == str(work))
+    return {k: v for k, v in e.items() if k != "dir"}
 
 
 # --- spec parsing -----------------------------------------------------------

@@ -112,7 +112,8 @@ def test_malformed_port_spec_does_not_break_terminal_verbs(cy, run_cli, dirs, ca
 
 def entry(home, work):
     projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    return projects[str(work)]
+    e = next(v for v in projects.values() if v.get("dir") == str(work))
+    return {k: v for k, v in e.items() if k != "dir"}
 
 
 def test_config_persists_ports(cy, run_cli, dirs):

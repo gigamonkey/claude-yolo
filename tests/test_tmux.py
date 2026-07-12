@@ -413,7 +413,8 @@ def test_config_verb_persists_tmux_keys(cy, run_cli, dirs):
     home, work = dirs
     run_cli(["config", "--tmux", "--tmux-session", "hacking"], home=home, cwd=work)
     projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    assert projects[str(work)] == {"tmux": True, "tmux-session": "hacking"}
+    e = next(v for v in projects.values() if v.get("dir") == str(work))
+    assert {k: v for k, v in e.items() if k != "dir"} == {"tmux": True, "tmux-session": "hacking"}
 
 
 # --- the ps verb -----------------------------------------------------------------

@@ -103,6 +103,7 @@ def project_item(cy, **over):
         over.pop("key", "project:/p"),
         over.pop("cols", ("p", "/p")),  # REPO, DIRECTORY
         {
+            "name": over.pop("name", None),
             "path": over.pop("path", "/p"),
             "registered": over.pop("registered", True),
             "window": over.pop("window", None),
@@ -505,27 +506,35 @@ def test_enter_active_project_focuses_window(cy, monkeypatch):
     assert spawned == []
 
 
-def test_wip_spawn_names_use_configured_project_name(cy, tmp_path):
-    # A project entry's `name` key renames its sessions (containers become
+def test_wip_spawn_names_use_project_name(cy, tmp_path):
+    # A project's name is what its sessions run under (containers become
     # `myproj` / `myproj-TOPIC`), so the dashboard must name the windows it
-    # spawns the same way — the session↔window match is by exact name.
+    # spawns the same way — the session↔window match is by exact name — and a
+    # registered row spawns with `--project NAME` so the inner yolo agrees.
     home = tmp_path / "home"
     proj = tmp_path / "proj"
     (home / ".claude-yolo").mkdir(parents=True)
     proj.mkdir()
-    (home / ".claude-yolo" / "projects.json").write_text(
-        json.dumps({str(proj): {"name": "myproj"}})
-    )
-    assert cy._wip_spawn_target("project", {"path": str(proj)}, home) == (
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({"myproj": {"dir": str(proj)}}))
+    assert cy._wip_spawn_target("project", {"name": "myproj", "path": str(proj)}, home) == (
         str(proj),
         "myproj",
-        "proj",
+        "myproj",
+        ["--project", "myproj"],
     )
+    # an unregistered (recent-dir) row: basename, no --project
+    assert cy._wip_spawn_target("project", {"path": str(proj)}, home) == (
+        str(proj),
+        "proj",
+        "proj",
+        [],
+    )
+    # a worktree row resolves the project by dir containment for its window name
     wt = tmp_path / "wt" / "feat"
     p = {"main_root": str(proj), "worktree": str(wt), "topic": "feat"}
     assert cy._wip_spawn_target("worktree", p, home)[1] == "myproj-feat"
     # home=None (the loop's test/standalone path) falls back to the basename
-    assert cy._wip_spawn_target("project", {"path": str(proj)}, None)[1] == "proj"
+    assert cy._wip_spawn_target("worktree", p, None)[1] == "proj-feat"
 
 
 def test_N_new_session_on_worktree_and_project(cy, monkeypatch):
@@ -1092,21 +1101,24 @@ def test_action_yolo_error_lands_in_footer(cy, monkeypatch):
 
 
 def test_add_project_prompts_and_registers(cy, monkeypatch, tmp_path):
-    # `a` opens the add picker; Enter on "directory project" (the first option)
-    # is the original register-a-path flow.
+    # `a` prompts for a path and a name (defaulting to the dir basename).
     registered = []
-    monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
+    monkeypatch.setattr(
+        cy, "register_project", lambda home, key, name=None: registered.append((key, name)) or "ok"
+    )
     d = tmp_path / "newproj"
     d.mkdir()
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["a", "\r"], lines=[str(d)])
-    assert registered == [str(d.resolve())]
+    run_loop(cy, monkeypatch, sections, ["a"], lines=[str(d), ""])
+    assert registered == [(str(d.resolve()), "newproj")]
 
 
 def test_add_project_on_recent_registers_selection(cy, monkeypatch):
     # `a` on a selected recent-only project registers *that* one directly (no prompt).
     registered = []
-    monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
+    monkeypatch.setattr(
+        cy, "register_project", lambda home, key, name=None: registered.append(key) or "ok"
+    )
     sections = {
         "session": [],
         "worktree": [],
@@ -1119,7 +1131,9 @@ def test_add_project_on_recent_registers_selection(cy, monkeypatch):
 def test_add_project_on_registered_still_prompts(cy, monkeypatch, tmp_path):
     # `a` on an already-registered project falls back to the prompt (add another).
     registered = []
-    monkeypatch.setattr(cy, "register_project", lambda home, key: registered.append(key) or "ok")
+    monkeypatch.setattr(
+        cy, "register_project", lambda home, key, name=None: registered.append((key, name)) or "ok"
+    )
     d = tmp_path / "other"
     d.mkdir()
     sections = {
@@ -1127,8 +1141,8 @@ def test_add_project_on_registered_still_prompts(cy, monkeypatch, tmp_path):
         "worktree": [],
         "project": [project_item(cy, path="/work/reg", registered=True)],
     }
-    run_loop(cy, monkeypatch, sections, ["a", "\r", "q"], lines=[str(d)])
-    assert registered == [str(d.resolve())]
+    run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d), "mylabel"])
+    assert registered == [(str(d.resolve()), "mylabel")]
 
 
 # --- bootstrap / dashboard role ---------------------------------------------

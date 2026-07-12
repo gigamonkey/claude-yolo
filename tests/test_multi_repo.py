@@ -1,8 +1,8 @@
 """Tests for multi-repo projects.
 
 Covers the `repos` config key (--repo / --add-repo / --remove-repo), saved
-multi-repo projects (~/.claude-yolo/multirepos.json, `config --multi-repo` /
---dir, `start --multi-repo`), the multi-worktree start (creation, mounts,
+named projects (~/.claude-yolo/projects.json, `config --project` / --dir,
+`start --project`), the multi-worktree start (creation, mounts,
 --add-dir, prompt, overlay stamp, guards, rollback), resume recreating missing
 extra worktrees, the worktree verbs operating across the repo set, and the
 `wip` dashboard's multi-repo rows/actions.
@@ -73,8 +73,14 @@ def read_overlay(cy, home, repo, topic):
     return worktrees[key]
 
 
-def read_multirepos(home):
-    return json.loads((home / ".claude-yolo" / "multirepos.json").read_text())
+def read_project(home, name):
+    return json.loads((home / ".claude-yolo" / "projects.json").read_text())[name]
+
+
+def entry_by_dir(home, d):
+    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    e = next(v for v in projects.values() if v.get("dir") == str(d))
+    return {k: v for k, v in e.items() if k != "dir"}
 
 
 # --- config plumbing ---------------------------------------------------------
@@ -83,15 +89,12 @@ def read_multirepos(home):
 def test_config_add_and_remove_repo(cy, run_cli, repos):
     app, lib, proto, home = repos
     run_cli(["config", "--add-repo", str(lib)], home=home, cwd=app)
-    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    assert projects[str(app)]["repos"] == [str(lib)]
+    assert entry_by_dir(home, app)["repos"] == [str(lib)]
     # adding the same path again is a no-op (matched by resolved path)
     run_cli(["config", "--add-repo", str(lib)], home=home, cwd=app)
-    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    assert projects[str(app)]["repos"] == [str(lib)]
+    assert entry_by_dir(home, app)["repos"] == [str(lib)]
     run_cli(["config", "--remove-repo", str(lib)], home=home, cwd=app)
-    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
-    assert "repos" not in projects[str(app)]
+    assert "repos" not in entry_by_dir(home, app)
 
 
 def test_config_add_repo_rejects_non_repo_path(cy, run_cli, repos, tmp_path):
@@ -112,7 +115,7 @@ def test_repos_from_project_entry_reaches_the_launch(cy, run_cli, repos, flag_va
     app, lib, proto, home = repos
     (home / ".claude-yolo").mkdir()
     (home / ".claude-yolo" / "projects.json").write_text(
-        json.dumps({str(app): {"repos": [str(lib)]}})
+        json.dumps({"app": {"dir": str(app), "repos": [str(lib)]}})
     )
     argv = run_cli(["start", "t1"], home=home, cwd=app)
     lib_wt = wt_of(cy, home, lib, "t1")
@@ -170,8 +173,8 @@ def test_relative_repo_specs_are_stored_absolute(cy, run_cli, repos):
     assert read_overlay(cy, home, app, "feat") == {"repos": [str(lib)]}
     run_cli(["config", "feat", "--add-repo", "../proto"], home=home, cwd=app)
     assert read_overlay(cy, home, app, "feat")["repos"] == [str(lib), str(proto)]
-    run_cli(["config", "--multi-repo", "chat", "--add-repo", "../lib"], home=home, cwd=app)
-    assert read_multirepos(home)["chat"]["repos"] == [str(lib)]
+    run_cli(["config", "--project", "chat", "--add-repo", "../lib"], home=home, cwd=app)
+    assert read_project(home, "chat")["repos"] == [str(lib)]
 
 
 def test_single_repo_start_unaffected(cy, run_cli, repos, flag_values):
@@ -256,43 +259,48 @@ def test_resume_creates_worktree_for_repo_added_mid_topic(cy, run_cli, repos, fl
     assert f"{proto_wt}:{proto_wt}" in flag_values(argv, "-v")
 
 
-# --- saved multi-repo projects (multirepos.json) ------------------------------
+# --- named projects (`config --project`, `start --project`) -------------------
 
 
-def test_config_multirepo_creates_entry_with_inferred_dir(cy, run_cli, repos):
+def test_config_project_creates_entry_with_inferred_dir(cy, run_cli, repos):
     app, lib, proto, home = repos
-    run_cli(["config", "--multi-repo", "chat", "--add-repo", str(lib)], home=home, cwd=app)
-    assert read_multirepos(home)["chat"] == {"dir": str(app), "repos": [str(lib)]}
+    run_cli(["config", "--project", "chat", "--add-repo", str(lib)], home=home, cwd=app)
+    assert read_project(home, "chat") == {"dir": str(app), "repos": [str(lib)]}
 
 
-def test_config_multirepo_dir_required_outside_a_repo(cy, run_cli, repos, tmp_path):
+def test_config_project_dir_required_outside_a_repo(cy, run_cli, repos, tmp_path):
     app, lib, proto, home = repos
     outside = tmp_path / "outside"
     outside.mkdir()
     with pytest.raises(SystemExit) as e:
-        run_cli(["config", "--multi-repo", "chat", "--add-repo", str(lib)], home=home, cwd=outside)
+        run_cli(["config", "--project", "chat", "--add-repo", str(lib)], home=home, cwd=outside)
     assert "--dir" in str(e.value)
     run_cli(
-        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
         home=home,
         cwd=outside,
     )
-    assert read_multirepos(home)["chat"]["dir"] == str(app)
+    assert read_project(home, "chat")["dir"] == str(app)
 
 
-def test_config_multirepo_dir_normalizes_to_repo_root_and_rejects_non_repo(
+def test_config_project_dir_normalizes_to_repo_root_and_allows_plain_dirs(
     cy, run_cli, repos, tmp_path
 ):
     app, lib, proto, home = repos
     sub = app / "src"
     sub.mkdir()
-    run_cli(["config", "--multi-repo", "chat", "--dir", str(sub)], home=home, cwd=tmp_path)
-    assert read_multirepos(home)["chat"]["dir"] == str(app)
+    run_cli(["config", "--project", "chat", "--dir", str(sub)], home=home, cwd=tmp_path)
+    assert read_project(home, "chat")["dir"] == str(app)
+    # a plain (non-git) directory is a fine primary — cwd-session projects need no git
     plain = tmp_path / "plain"
     plain.mkdir()
+    run_cli(["config", "--project", "notes", "--dir", str(plain)], home=home, cwd=tmp_path)
+    assert read_project(home, "notes")["dir"] == str(plain.resolve())
     with pytest.raises(SystemExit) as e:
-        run_cli(["config", "--multi-repo", "bad", "--dir", str(plain)], home=home, cwd=tmp_path)
-    assert "not a git repository" in str(e.value)
+        run_cli(
+            ["config", "--project", "bad", "--dir", str(tmp_path / "nope")], home=home, cwd=tmp_path
+        )
+    assert "no such directory" in str(e.value)
 
 
 def test_start_multi_repo_launches_from_saved_dir_anywhere(
@@ -300,99 +308,154 @@ def test_start_multi_repo_launches_from_saved_dir_anywhere(
 ):
     app, lib, proto, home = repos
     run_cli(
-        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
         home=home,
         cwd=tmp_path,
     )
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    argv = run_cli(["start", "feat", "--multi-repo", "chat"], home=home, cwd=elsewhere)
+    argv = run_cli(["start", "feat", "--project", "chat"], home=home, cwd=elsewhere)
     assert wt_of(cy, home, app, "feat").is_dir()
     assert wt_of(cy, home, lib, "feat").is_dir()
     assert flag_values(argv, "-w") == [str(wt_of(cy, home, app, "feat"))]
-    # the saved keys — plus the project's name — are stamped into the overlay:
-    # the topic is self-describing
-    assert read_overlay(cy, home, app, "feat") == {"name": "chat", "repos": [str(lib)]}
+    # the overlay records only the project *pointer* (plus explicit CLI flags) —
+    # the entry stays a live layer, never copied
+    assert read_overlay(cy, home, app, "feat") == {"project": "chat"}
 
 
-def test_multi_repo_sessions_are_named_after_the_project(cy, run_cli, repos, tmp_path):
-    # Container/session names derive from the saved project's NAME, not the primary
+def test_project_sessions_are_named_after_the_project(cy, run_cli, repos, tmp_path):
+    # Container/session names derive from the project's NAME, not the primary
     # repo's basename — the `wip` dashboard correlates sessions to tmux windows by
     # that name, and its `n` key names the spawned window NAME-TOPIC.
     app, lib, proto, home = repos
     run_cli(
-        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
         home=home,
         cwd=tmp_path,
     )
-    argv = run_cli(["start", "feat", "--multi-repo", "chat"], home=home, cwd=tmp_path)
+    argv = run_cli(["start", "feat", "--project", "chat"], home=home, cwd=tmp_path)
     assert argv[argv.index("--name") + 1] == "chat-feat"  # docker --name
     img = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
     cargs = argv[img + 1 :]  # what's passed to claude
     assert cargs[cargs.index("--name") + 1] == "chat:feat"  # claude session name
-    # resume re-resolves the name from the overlay stamp alone: deleting the saved
-    # entry doesn't rename (or otherwise change) the live topic
-    (home / ".claude-yolo" / "multirepos.json").unlink()
+    # resume resolves the project via the overlay's pointer, no --project needed
     argv = run_cli(["resume", "feat"], home=home, cwd=app)
     assert argv[argv.index("--name") + 1] == "chat-feat"
 
 
-def test_config_multirepo_rejects_name(cy, run_cli, repos, tmp_path):
-    # The saved NAME *is* the project's name; a divergent stored `name` key could
-    # never take effect (start injects NAME over it), so refuse to store one.
+def test_start_project_without_topic_opens_cwd_session_in_dir(cy, run_cli, repos, tmp_path):
+    # A project's dir is a fine cwd-session target: `start --project NAME` with no
+    # TOPIC launches there from anywhere, named after the project.
     app, lib, proto, home = repos
+    run_cli(["config", "--project", "chat", "--dir", str(app)], home=home, cwd=tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    argv = run_cli(["start", "--project", "chat"], home=home, cwd=elsewhere)
+    assert argv[argv.index("-w") + 1] == str(app)
+    assert argv[argv.index("--name") + 1] == "chat"
+
+
+def test_config_project_name_renames_and_repoints_topics(cy, run_cli, repos, tmp_path):
+    # --name renames the entry; worktree overlays pointing at it are rewritten.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=tmp_path,
+    )
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
+    run_cli(["config", "--project", "chat", "--name", "comms"], home=home, cwd=tmp_path)
+    projects = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    assert "chat" not in projects and projects["comms"]["dir"] == str(app)
+    assert read_overlay(cy, home, app, "feat") == {"project": "comms"}
+    # the topic relaunches under the new name
+    argv = run_cli(["resume", "feat"], home=home, cwd=app)
+    assert argv[argv.index("--name") + 1] == "comms-feat"
+
+
+def test_config_project_delete_guards_live_topics(cy, run_cli, repos, tmp_path, capsys):
+    app, lib, proto, home = repos
+    run_cli(["config", "--project", "chat", "--dir", str(app)], home=home, cwd=tmp_path)
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
     with pytest.raises(SystemExit) as e:
-        run_cli(
-            ["config", "--multi-repo", "chat", "--dir", str(app), "--name", "other"],
-            home=home,
-            cwd=tmp_path,
-        )
-    assert "--name can't combine with --multi-repo" in str(e.value)
+        run_cli(["config", "--project", "chat", "--delete"], home=home, cwd=tmp_path)
+    assert "live worktrees" in str(e.value) and "feat" in str(e.value)
+    run_cli(["config", "--project", "chat", "--delete", "--force"], home=home, cwd=tmp_path)
+    assert json.loads((home / ".claude-yolo" / "projects.json").read_text()) == {}
+    # the orphaned topic degrades to dir matching + its overlay: resume still works,
+    # with a warning about the dangling pointer, named after the dir again
+    argv = run_cli(["resume", "feat"], home=home, cwd=app)
+    assert "no longer exists" in capsys.readouterr().err
+    assert argv[argv.index("--name") + 1] == "app-feat"
 
 
-def test_saved_config_edit_never_changes_a_live_topic(cy, run_cli, repos, tmp_path):
+def test_project_config_edits_reach_live_topics(cy, run_cli, repos, tmp_path):
+    # The entry is a live layer: growing its `repos` after start reaches the
+    # topic at its next launch (the worktree is created then), and the guard
+    # symmetry — this is exactly how a dir-matched project entry behaves.
     app, lib, proto, home = repos
     run_cli(
-        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
         home=home,
         cwd=tmp_path,
     )
-    run_cli(["start", "feat", "--multi-repo", "chat"], home=home, cwd=app)
-    # growing the saved config after start must not affect the live topic
-    run_cli(["config", "--multi-repo", "chat", "--add-repo", str(proto)], home=home, cwd=app)
-    run_cli(["resume", "feat"], home=home, cwd=app)
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
     assert not wt_of(cy, home, proto, "feat").exists()
+    run_cli(["config", "--project", "chat", "--add-repo", str(proto)], home=home, cwd=app)
+    run_cli(["resume", "feat"], home=home, cwd=app)
+    assert wt_of(cy, home, proto, "feat").is_dir()
 
 
-def test_start_multi_repo_overlay_merges_saved_and_cli(cy, run_cli, repos, tmp_path):
+def test_start_project_overlay_keeps_cli_flags_only(cy, run_cli, repos, tmp_path):
     app, lib, proto, home = repos
     run_cli(
-        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
         home=home,
         cwd=tmp_path,
     )
     run_cli(
-        ["start", "feat", "--multi-repo", "chat", "--repo", str(proto), "--ssh-agent"],
+        ["start", "feat", "--project", "chat", "--repo", str(proto), "--ssh-agent"],
         home=home,
         cwd=app,
     )
     overlay = read_overlay(cy, home, app, "feat")
-    assert overlay["repos"] == [str(lib), str(proto)]  # saved first, CLI appended
+    assert overlay["repos"] == [str(proto)]  # CLI extras only; the entry's lib is live
     assert overlay["ssh-agent"] is True
+    assert overlay["project"] == "chat"
     assert wt_of(cy, home, proto, "feat").is_dir()
+    assert wt_of(cy, home, lib, "feat").is_dir()  # from the live entry
 
 
-def test_multi_repo_flag_guards(cy, run_cli, repos):
+def test_project_flag_guards(cy, run_cli, repos):
     app, lib, proto, home = repos
     with pytest.raises(SystemExit) as e:
-        run_cli(["start", "--multi-repo", "chat"], home=home, cwd=app)
-    assert "needs a topic" in str(e.value)
-    with pytest.raises(SystemExit) as e:
-        run_cli(["resume", "feat", "--multi-repo", "chat"], home=home, cwd=app)
+        run_cli(["finish", "feat", "--project", "chat"], home=home, cwd=app)
     assert "only applies" in str(e.value)
     with pytest.raises(SystemExit) as e:
-        run_cli(["start", "feat", "--multi-repo", "nope"], home=home, cwd=app)
-    assert "no multi-repo project 'nope'" in str(e.value)
+        run_cli(["start", "feat", "--project", "nope"], home=home, cwd=app)
+    assert "no project 'nope'" in str(e.value)
+
+
+def test_cwd_ambiguity_requires_project_flag(cy, run_cli, repos, tmp_path):
+    # Two projects over the same dir: a bare start can't pick — the error names
+    # them — and --project disambiguates.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=tmp_path,
+    )
+    run_cli(
+        ["config", "--project", "web", "--dir", str(app), "--add-repo", str(proto)],
+        home=home,
+        cwd=tmp_path,
+    )
+    with pytest.raises(SystemExit) as e:
+        run_cli(["start", "feat"], home=home, cwd=app)
+    assert "chat, web" in str(e.value) and "--project" in str(e.value)
+    run_cli(["start", "feat", "--project", "web"], home=home, cwd=app)
+    assert wt_of(cy, home, proto, "feat").is_dir()
+    assert not wt_of(cy, home, lib, "feat").exists()
 
 
 # --- verbs across the set ------------------------------------------------------
@@ -503,68 +566,51 @@ class FakeTerm:
         return self._confirms.pop(0) if self._confirms else False
 
 
-def test_wip_items_lists_saved_multirepo_rows(cy, repos, monkeypatch):
+def test_wip_items_lists_named_project_rows(cy, repos, monkeypatch):
     app, lib, proto, home = repos
     (home / ".claude-yolo").mkdir(exist_ok=True)
-    (home / ".claude-yolo" / "multirepos.json").write_text(
+    (home / ".claude-yolo" / "projects.json").write_text(
         json.dumps({"chat": {"dir": str(app), "repos": [str(lib), str(proto)]}})
     )
     monkeypatch.setattr(cy, "_wip_sessions", lambda home_: [])
     monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
     monkeypatch.setattr(cy, "_worktree_rows", lambda *a, **k: [])
-    monkeypatch.setattr(cy, "_wip_projects", lambda home_, sessions: [])
     items = cy._wip_items(home)["project"]
-    row = next(it for it in items if it.kind == "multirepo")
-    assert row.key == "multirepo:chat"
+    row = next(it for it in items if it.kind == "project")
+    assert row.key == "project:chat"
     assert row.cols[0] == "chat"
     assert "+2 repos" in row.cols[1]
     assert row.payload["name"] == "chat"
+    assert row.payload["registered"] is True
     assert items[-1].kind == "newsession"  # the `+` row stays last
 
 
-def test_wip_new_worktree_on_multirepo_row_spawns_start_multi_repo(cy, monkeypatch, tmp_path):
+def test_wip_new_worktree_on_project_row_spawns_start_project(cy, monkeypatch, tmp_path):
     spawned = []
     monkeypatch.setattr(
         cy, "_spawn_session_window", lambda cwd, argv, name, sess: spawned.append((cwd, argv, name))
     )
     item = cy.WipItem(
-        "multirepo", "multirepo:chat", ("chat", "~/app +1 repo"), {"name": "chat", "path": tmp_path}
+        "project",
+        "project:chat",
+        ("chat", "~/app +1 repo"),
+        {"name": "chat", "path": tmp_path, "registered": True, "window": None},
     )
     msg = cy._wip_action("n", item, tmp_path, "yolo", FakeTerm([], lines=["feat"]))
-    assert spawned == [
-        (tmp_path, ["start", "feat", "--multi-repo", "chat", "--no-tmux"], "chat-feat")
-    ]
-    assert "multi-repo worktree" in msg
+    assert spawned == [(tmp_path, ["start", "feat", "--project", "chat", "--no-tmux"], "chat-feat")]
+    assert "starting worktree 'feat'" in msg
 
 
-def test_wip_add_multirepo_creates_entry_and_opens_editor(cy, monkeypatch, repos):
-    app, lib, proto, home = repos
-    applied = []
-    monkeypatch.setattr(
-        cy, "_config_apply", lambda scope, flags: (applied.append((scope, flags)), (True, "ok"))[1]
-    )
-    opened = []
-    monkeypatch.setattr(
-        cy, "_config_editor_loop", lambda scope, term: (opened.append(scope), "edited")[1]
-    )
-    # `a` → picker (j to "multi-repo project", Enter), then name + primary path
-    term = FakeTerm(["j", "\r"], lines=["chat", str(app)])
-    msg = cy._wip_add_project(home, term)
-    assert applied[0][0].config_args == ["config", "--multi-repo", "chat"]
-    assert applied[0][1] == ["--dir", str(app)]
-    assert opened and msg == "edited"
-
-
-def test_wip_config_scope_reads_multirepos_entry(cy, repos):
+def test_wip_config_scope_targets_named_project(cy, repos):
     app, lib, proto, home = repos
     (home / ".claude-yolo").mkdir(exist_ok=True)
-    (home / ".claude-yolo" / "multirepos.json").write_text(
+    (home / ".claude-yolo" / "projects.json").write_text(
         json.dumps({"chat": {"dir": str(app), "repos": [str(lib)]}})
     )
-    scope = cy._config_scope("multirepo", {"name": "chat", "path": app}, home)
-    assert scope.store == "multirepos.json"
+    scope = cy._config_scope("project", {"name": "chat", "path": app, "registered": True}, home)
+    assert scope.store == "projects.json"
     assert scope.read() == {"dir": str(app), "repos": [str(lib)]}
-    assert scope.config_args == ["config", "--multi-repo", "chat"]
+    assert scope.config_args == ["config", "--project", "chat"]
 
 
 def test_wip_config_editor_dir_key_uses_dir_flag(cy, monkeypatch, repos):
@@ -573,6 +619,6 @@ def test_wip_config_editor_dir_key_uses_dir_flag(cy, monkeypatch, repos):
     monkeypatch.setattr(
         cy, "_config_apply", lambda scope, flags: (applied.append(flags), (True, "ok"))[1]
     )
-    scope = cy._config_scope("multirepo", {"name": "chat", "path": app}, home)
+    scope = cy._config_scope("project", {"name": "chat", "path": app, "registered": True}, home)
     cy._config_edit_key(scope, "dir", FakeTerm([], lines=[str(lib)]))
     assert applied == [["--dir", str(lib)]]
