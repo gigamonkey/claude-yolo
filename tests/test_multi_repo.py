@@ -646,6 +646,31 @@ def test_wip_extra_worktree_row_routes_to_primary(cy, run_cli, repos, monkeypatc
     assert pathlib.Path(cwd) == app and window == "chat-feat"
 
 
+def test_wip_finish_on_extra_worktree_row_finishes_the_whole_set(cy, run_cli, repos):
+    # `f` on an extra repo's worktree row routes to the topic's primary, so it
+    # finishes every repo of the set — finishing just the extra would half-
+    # dismantle the topic (and the live project entry would recreate or trip
+    # over it at the next resume). r/m/d stay per-repo.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=app,
+    )
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
+    lib_wt = wt_of(cy, home, lib, "feat")
+    payload = {
+        "worktree": str(lib_wt),
+        "main_root": str(lib),
+        "slug": lib_wt.parent.name,
+        "topic": "feat",
+    }
+    msg = cy._wip_finish("worktree", payload, home, FakeTerm([], confirms=[True]))
+    assert not lib_wt.exists()
+    assert not wt_of(cy, home, app, "feat").exists()  # the primary went too
+    assert "[app]" in msg and "[lib]" in msg
+
+
 def test_wip_extra_worktree_row_gets_primary_session_window(cy):
     # A running multi-repo session advertises its extras via the
     # yolo.extra-repos label; the extra's worktree row picks up that session's

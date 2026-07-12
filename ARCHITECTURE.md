@@ -1897,7 +1897,11 @@ verbs operate across the set. The moving parts:
   also marks them `running`), and with no session, Enter/`N`/`R` resolve the
   topic's *primary* (`_primary_for_extra`: an extra has no overlay of its own,
   so same-topic overlays are scanned for the one whose resolved `repos`
-  include this repo) and act there, named after the project.
+  include this repo) and act there, named after the project. `f` routes
+  through the same resolution — finishing from an extra would remove one
+  worktree of the set and the live entry would recreate/trip over it at the
+  next resume — while `r`/`m`/`d` deliberately stay per-repo (each rebases/
+  merges/diffs against its own repo's base, matching the row's counts).
 
 - **`wip`:** every named project renders as one PROJECT row (name, dir, a
   `+N repos` tag), recents (no project yet) below (`_wip_projects`; a recent

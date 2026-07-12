@@ -411,7 +411,10 @@ section show them as ordinary per-repo rows (with their own ahead/behind
 counts) — but they belong to the topic's *one* session: Enter on an extra
 repo's row switches to the primary's session when it's running, and otherwise
 resumes the topic from the primary, never a second container named for the
-secondary repo. A repo whose path has vanished is
+secondary repo. `f` likewise finishes the *whole* topic from any of its rows
+(the confirm says so — finishing just one repo of a set would half-dismantle
+it), while `r`/`m`/`d` stay per-repo: rebasing, merging, or diffing one repo
+of the set against its own base is exactly what those rows are for. A repo whose path has vanished is
 skipped by `finish` with a warning (never stranding the rest); a repo *added*
 to a topic's config mid-flight (`yolo config TOPIC --add-repo …`) gets its
 worktree created on the next `resume`. `repos` is ignored (with a note) for

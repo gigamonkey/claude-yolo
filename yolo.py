@@ -7450,17 +7450,34 @@ def _wip_browse(p, term) -> str:
 def _wip_finish(kind, p, home, term) -> str:
     """`f`: finish a worktree (the core stops an idle session first, refuses a working
     one), or stop-then-finish an idle (waiting) session row. base / finish-action /
-    finish-remote come from *this worktree's* own config (`_worktree_config`)."""
+    finish-remote come from *this worktree's* own config (`_worktree_config`).
+
+    On an *extra* repo's worktree row, finish routes to the topic's primary and so
+    finishes the whole repo set: finishing just the extra would half-dismantle the
+    topic, and the live project entry would then recreate (or trip over) it at the
+    next resume — an extra row is a view onto the topic, not an independent thing.
+    (`r`/`m`/`d` stay per-repo: rebasing or diffing one repo of the set is coherent.)
+    """
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        if not term.confirm(f"Finish '{p['topic']}' (remove worktree)?"):
+        worktree, main_root, slug = p["worktree"], p["main_root"], p["slug"]
+        prompt = f"Finish '{p['topic']}' (remove worktree)?"
+        primary = _primary_for_extra(home, worktree, main_root, p["topic"])
+        if primary is not None:
+            main_root, worktree = primary
+            slug = pathlib.Path(worktree).parent.name
+            prompt = (
+                f"Finish '{p['topic']}' — a multi-repo topic: removes its worktrees "
+                "in every repo of the set?"
+            )
+        if not term.confirm(prompt):
             return "cancelled."
-        base, action, remote = _worktree_config(home, p["main_root"], p["worktree"])
+        base, action, remote = _worktree_config(home, main_root, worktree)
         return finish_worktree(
-            p["worktree"],
-            p["main_root"],
-            p["slug"],
+            worktree,
+            main_root,
+            slug,
             p["topic"],
             home,
             base,
