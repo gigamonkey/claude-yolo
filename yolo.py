@@ -4219,7 +4219,9 @@ def build_claude_args(
         args += ["--resume"] + ([resume] if isinstance(resume, str) else [])
     if name:
         # Name the Claude session so it's identifiable in the prompt box / picker.
-        # Only for a fresh session: claude rejects --name alongside --continue/--resume.
+        # Also valid alongside --continue (current claude treats it as setting the
+        # continued session's display name — the CLI equivalent of /rename), which
+        # keeps the label in sync with the project name across resumes.
         args = ["--name", name, *args]
     return args
 
@@ -8750,6 +8752,13 @@ def _main():
                 parsed.prompts,
                 ssh_agent=parsed.ssh_agent,
                 continue_session=True,
+                # Re-assert the session's display name on every continue, so the
+                # label above Claude's prompt tracks the *current* project name —
+                # a session created before a project rename (or before the
+                # project existed) would otherwise show its stale creation-time
+                # label forever. Left off the explicit `-r [ID]` path: picking a
+                # specific session shouldn't clobber a deliberate /rename.
+                name=session_name,
                 add_dirs=mount_dirs,
                 plugin_dirs=plugin_dirs,
                 forwarded_ports=container_ports,

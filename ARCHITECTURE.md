@@ -1930,10 +1930,13 @@ in `~/.claude/projects/<slug>/*.jsonl`, which is already bind-mounted, and the
 slug is derived from the project path — which matches host↔container because the
 cwd is mounted at its identical path. So a session started in a yolo container
 (or even on the host, same dir) is resumable. With a `TOPIC`, resume is keyed to the
-worktree's path. The `--name` injection is **suppressed** when resuming, because
-`claude` rejects `--name` alongside `--continue`/`--resume` (the session already has
-its identity); `resume TOPIC --new` is the exception — it *does* name a fresh
-worktree session and so omits the resume flags.
+worktree's path. The plain-`--continue` path **re-asserts the session's display
+name** (`--name <project>:<topic>`, which current `claude` accepts alongside
+`--continue` as the CLI equivalent of `/rename`), so the label above the prompt
+tracks the current project name — a session created before a project rename
+would otherwise show its stale creation-time label forever. The explicit
+`-r [ID]` path passes no name: picking a specific session shouldn't clobber a
+deliberate in-session `/rename`.
 
 A plain `resume` (the `--continue` path) **falls back to a fresh session when
 there's nothing to continue.** `claude --continue` *errors* if no transcript

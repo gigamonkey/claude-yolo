@@ -30,7 +30,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   Sessions are named after the project — container `NAME` / `NAME-TOPIC`,
   Claude session label `NAME:TOPIC` — so renaming a project (`yolo config
   --name NEW`) renames its sessions at their next launch (topic pointers are
-  rewritten). Names are validated to docker's container-name charset. An
+  rewritten, and a plain `resume` re-asserts the display name via
+  `claude --continue --name`, so the label above Claude's prompt tracks the
+  current project name even for sessions created under an older one —
+  `resume -r` leaves names alone so a deliberate in-session `/rename`
+  survives). Names are validated to docker's container-name charset. An
   extra repo's worktree row in `wip` belongs to the topic's one session: it
   shows the primary session's window (and `running` state) while it runs, and
   Enter/`N`/`R` on it act on the topic's primary otherwise. `yolo config --delete` removes a project, refusing while it has

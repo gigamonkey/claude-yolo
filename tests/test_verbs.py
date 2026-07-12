@@ -124,7 +124,9 @@ def test_resume_defaults_to_continue(cy, run_cli, repo):
     argv = run_cli(["resume", "topic"], home=home, cwd=r)
     cmd = claude_command(cy, argv)
     assert "--continue" in cmd
-    assert "--name" not in cmd
+    # the display name rides along on every continue, so the label above the
+    # prompt tracks the current project name (a rename reaches old sessions)
+    assert cmd[cmd.index("--name") + 1] == f"{r.name}:topic"
 
 
 def test_resume_without_session_falls_back_to_fresh(cy, run_cli, repo, capsys):
