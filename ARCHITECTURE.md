@@ -1897,7 +1897,8 @@ verbs operate across the set. The moving parts:
   so several projects sharing a dir stay unambiguous and window names always
   match the container names the inner yolo picks. `a` registers a project:
   path prompt + name prompt (defaulting to the basename), via
-  `register_project`, which refuses a taken name or an already-registered dir.
+  `register_project`, which refuses only a taken name (a second project over
+  an already-registered dir is fine — it's two repo sets over one primary).
   The dashboard reads `projects.json` **leniently** (malformed → `{}`) so the
   refresh loop keeps drawing; the config verb stays strict.
 

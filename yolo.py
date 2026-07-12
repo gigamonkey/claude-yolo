@@ -2964,16 +2964,12 @@ def register_project(home: pathlib.Path, project_dir: str, name: str | None = No
 
     The in-process core behind `config --init` and the dashboard's add-project
     (`a`) action — "yolo knows about this project". The name defaults to the
-    directory's basename. Raises `YoloError` if the name is taken or the dir is
-    already some project's primary (a second project over the same dir is
-    created deliberately, via `yolo config --project NAME --dir PATH`).
+    directory's basename. Names must be unique — that's the only guard; a
+    second project over a dir that already has one is fine (two repo sets over
+    one primary), it just needs its own name.
     """
     projects = _read_projects_file(home)
     resolved = str(pathlib.Path(os.path.expanduser(project_dir)).resolve())
-    for existing, entry in projects.items():
-        d = entry.get("dir")
-        if isinstance(d, str) and str(pathlib.Path(os.path.expanduser(d)).resolve()) == resolved:
-            raise YoloError(f"{project_dir} is already project '{existing}'.")
     name = name or pathlib.Path(resolved).name.lstrip(".") or "project"
     if not _valid_project_name(name):
         raise YoloError(f"invalid project name {name!r} (a short label, not a path).")

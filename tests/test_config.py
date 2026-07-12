@@ -519,13 +519,24 @@ def test_config_init_satisfies_require_project_entry(cy, run_cli, dirs):
     assert run_cli([], home=home, cwd=work) is not None  # launches
 
 
-def test_config_init_errors_if_entry_exists(cy, run_cli, dirs):
+def test_config_init_errors_if_name_taken(cy, run_cli, dirs):
     home, work = dirs
-    write_projects(home, {str(work): {"auth": "bedrock"}})
+    write_projects(home, {str(work): {"auth": "bedrock"}})  # named "work" (basename)
     with pytest.raises(SystemExit) as exc:
         run_cli(["config", "--init"], home=home, cwd=work)
-    assert "already project" in str(exc.value)
+    assert "already exists" in str(exc.value)
     assert read_projects_by_dir(home) == {str(work): {"auth": "bedrock"}}  # untouched
+
+
+def test_second_project_over_same_dir_needs_only_a_new_name(cy, run_cli, dirs):
+    # Sharing a dir is fine (two repo sets over one primary); only names are
+    # unique. `a`/`--init` with an explicit --name creates the second project.
+    home, work = dirs
+    write_projects(home, {str(work): {"auth": "bedrock"}})
+    run_cli(["config", "--init", "--name", "other"], home=home, cwd=work)
+    projects = read_projects(home)
+    assert projects["other"] == {"dir": str(work)}
+    assert projects["work"] == {"dir": str(work), "auth": "bedrock"}
 
 
 def test_config_init_rejects_config_flags(cy, run_cli, dirs):
