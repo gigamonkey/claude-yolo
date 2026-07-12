@@ -1117,6 +1117,23 @@ def test_start_no_topic_runs_in_cwd(cy, run_cli, repo):
     assert "--continue" not in cmd and "--resume" not in cmd  # fresh
 
 
+def test_name_config_renames_sessions(cy, run_cli, repo):
+    # The `name` config key (yolo config --name) overrides the directory/repo
+    # basename in every session name: cwd container, worktree container, and the
+    # claude session label. This is what makes a project renameable — and what a
+    # saved multi-repo project's NAME rides in on.
+    r, home = repo
+    run_cli(["config", "--name", "myproj"], home=home, cwd=r)
+    argv = run_cli(["start"], home=home, cwd=r)
+    assert argv[argv.index("--name") + 1] == "myproj"
+    cmd = claude_command(cy, argv)
+    assert cmd[cmd.index("--name") + 1] == "myproj"
+    argv = run_cli(["start", "feat"], home=home, cwd=r)
+    assert argv[argv.index("--name") + 1] == "myproj-feat"
+    cmd = claude_command(cy, argv)
+    assert cmd[cmd.index("--name") + 1] == "myproj:feat"
+
+
 def test_docker_safe_name(cy):
     """Directory basenames coerced into valid docker --name / --hostname strings."""
     f = cy._docker_safe_name

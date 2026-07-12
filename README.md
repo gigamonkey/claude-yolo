@@ -203,8 +203,10 @@ yolo stop                              # stop the running session in this direct
 ```
 
 As a shorthand a bare `yolo` is the same as `yolo start`. A fresh cwd session is
-named after the directory (the name shown above Claude's prompt and in
-`claude --resume`), mirroring a worktree's `<repo>:<topic>`. `resume` continues the
+named after the project — the directory basename, unless the
+[`name`](#name---name-name) config key renames it — (the name shown above
+Claude's prompt and in `claude --resume`), mirroring a worktree's
+`<project>:<topic>`. `resume` continues the
 most recent session (`-r` picks a specific one, opening Claude's interactive
 picker when given no ID); if there's nothing to continue it just starts a fresh
 session. `shell` joins the **running** container for this
@@ -244,9 +246,11 @@ Verb details:
 
 - **`start TOPIC`** creates the worktree on a new branch `TOPIC`, branched off
   `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
-  the `base` config key), and launches a fresh session named `<repo>:<TOPIC>` (the
-  name shown above Claude's prompt and in `claude --resume`; the repo prefix keeps
-  it distinct from the same topic in another project). It errors
+  the `base` config key), and launches a fresh session named `<project>:<TOPIC>`
+  — the project being the repo basename, unless the [`name`](#name---name-name)
+  config key renames it — (the name shown above Claude's prompt and in
+  `claude --resume`; the project prefix keeps it distinct from the same topic in
+  another project). It errors
   if the topic already exists — use `resume`.
 
 - **`resume TOPIC`** continues that worktree's most recent session (`-r` for a
@@ -344,7 +348,9 @@ That `start` creates branch `fix-auth` and a worktree in **app**, **lib**, and
 **proto**; the session's working directory is app's worktree, with lib's and
 proto's mounted alongside and announced to Claude as extra working dirs (plus a
 system-prompt note explaining the layout, so it commits in each repo on the
-shared branch). In `yolo wip`, the saved config gets its own row — `n` on it
+shared branch). The session is named after the *project* — container
+`chat-fix-auth`, Claude session `chat:fix-auth` — not the primary repo's
+directory. In `yolo wip`, the saved config gets its own row — `n` on it
 starts a multi-repo worktree, `c` edits it, and `a` offers "multi-repo project"
 as one of the things to add.
 
@@ -1053,6 +1059,22 @@ yolo config --remove-clone ../lib                            # remove by dir
 
 The `yolo wip` dashboard's `c` config editor edits clones interactively too
 (prompting url, dir, and an optional depth).
+
+### `name` (`--name NAME`)
+
+What sessions of this project are called: the container/window name becomes
+`NAME` for a current-directory session or `NAME-TOPIC` for a worktree session,
+and the Claude session label `NAME:TOPIC` — instead of deriving from the
+directory basename. Set it on a project entry to rename every session of the
+project:
+
+```bash
+yolo config --name chat-app   # sessions become chat-app / chat-app-<topic>
+```
+
+A [saved multi-repo project](#multi-repo-projects) is always named after its
+saved NAME (`yolo start feat --multi-repo chat` runs as `chat-feat`), so
+`--name` is rejected on `config --multi-repo`.
 
 ### `repos` (`--repo PATH`, repeatable)
 

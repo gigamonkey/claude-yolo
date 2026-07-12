@@ -948,6 +948,7 @@ CLI flags. Per key the higher layer **overrides**, except `prompts`, `mounts`,
 and then the CLI values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
+`name` (what sessions run under — see the naming note below),
 `config-dir`, `dockerfile`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
@@ -970,6 +971,20 @@ lean on shell expansion). Booleans must be JSON `true`/`false`. A JSON **`null`*
 means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
 (`_parse_yolo_dict` / `_read_projects_file` / `_read_worktrees_file`).
+
+**`name` renames a project's sessions.** The naming block in `main()` builds
+every session name from the project's name — container `<name>-<TOPIC>`
+(worktree mode) or `<name>` (cwd mode), Claude session label `<name>:<TOPIC>` —
+where `<name>` defaults to the primary repo's / directory's basename and the
+`name` key (`--name`) overrides it. A saved multi-repo project injects its
+saved NAME as this key at `start --multi-repo` (and `config --multi-repo`
+refuses an explicit `--name`, which the injection would only shadow), and the
+key is stamped into the topic's overlay with the other saved keys, so
+`resume`/`shell` recompute the same names without the entry. The `wip`
+dashboard resolves the same key (`_project_display_name`, a quiet
+`load_yolo_config`) when naming the windows it spawns, because the dashboard's
+session↔window correlation is exact name equality — a window named differently
+from its container reads as "no tmux window".
 
 Every load also prints a one-line **provenance note** to stderr (suppressed by
 `quiet=True`, which the long-lived `wip` dashboard passes when it re-reads config
@@ -1113,8 +1128,10 @@ gracefully outside one — there's just no repo slug to label/find by).
 
 - **`start [TOPIC]`** — *with `TOPIC`:* create a new worktree + branch `TOPIC` off
   `--base` (default `HEAD`; see `base` below) and launch a container with a fresh
-  session named `<repo>:<TOPIC>` (the repo prefix distinguishes it from the same
-  topic in another project, and from a cwd session named just after its directory);
+  session named `<project>:<TOPIC>` — the project being the `name` config key when
+  set, else the repo basename (the prefix distinguishes it from the same
+  topic in another project, and from a cwd session named just after its
+  project/directory, no colon);
   **errors if the worktree or branch already exists** (use
   `resume`). Any **explicit config flags** passed here are snapshotted into the
   worktree's `worktrees.json` overlay (see the config section), so a later
@@ -1810,7 +1827,10 @@ worktree+branch in each and the verbs operate across the set. The moving parts:
   entry's keys between the dir's project entry and the CLI
   (`load_yolo_config(multirepo=…)`), and stamps them into the topic's worktree
   overlay (`_merge_overlay_layers`: saved under explicit CLI, list keys
-  concatenating). Nothing after `start` consults the entry.
+  concatenating). The saved NAME itself rides along as the injected `name`
+  config key, so the topic's sessions are named `NAME-TOPIC` (not after the
+  primary repo's basename) — matching the window the dashboard's `n` spawn
+  opens. Nothing after `start` consults the entry.
 
 - **The overlay is the per-topic source of truth.** `_topic_repo_set(worktree,
   main_root, slug, topic, home)` — backing finish/rebase/merge/diff — re-reads

@@ -505,6 +505,29 @@ def test_enter_active_project_focuses_window(cy, monkeypatch):
     assert spawned == []
 
 
+def test_wip_spawn_names_use_configured_project_name(cy, tmp_path):
+    # A project entry's `name` key renames its sessions (containers become
+    # `myproj` / `myproj-TOPIC`), so the dashboard must name the windows it
+    # spawns the same way — the session↔window match is by exact name.
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    (home / ".claude-yolo").mkdir(parents=True)
+    proj.mkdir()
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({str(proj): {"name": "myproj"}})
+    )
+    assert cy._wip_spawn_target("project", {"path": str(proj)}, home) == (
+        str(proj),
+        "myproj",
+        "proj",
+    )
+    wt = tmp_path / "wt" / "feat"
+    p = {"main_root": str(proj), "worktree": str(wt), "topic": "feat"}
+    assert cy._wip_spawn_target("worktree", p, home)[1] == "myproj-feat"
+    # home=None (the loop's test/standalone path) falls back to the basename
+    assert cy._wip_spawn_target("project", {"path": str(proj)}, None)[1] == "proj"
+
+
 def test_N_new_session_on_worktree_and_project(cy, monkeypatch):
     # `N` starts a *fresh* session: `resume TOPIC --new` for a worktree, `start` for
     # a project (vs Enter, which resumes the most recent).

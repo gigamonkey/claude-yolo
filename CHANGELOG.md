@@ -19,9 +19,20 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `~/.claude-yolo/multirepos.json` (`dir` inferred from the cwd's repo), and
   `yolo start TOPIC --multi-repo NAME` starts from it regardless of cwd. The
   saved entry is consulted only at start, so editing or deleting it never
-  changes a live topic. In `yolo wip`, saved configs get their own PROJECTS
+  changes a live topic. Sessions are named after the saved NAME (container
+  `NAME-TOPIC`, Claude session `NAME:TOPIC`), not the primary repo's basename.
+  In `yolo wip`, saved configs get their own PROJECTS
   rows (`n` starts a worktree from one, `c` edits it) and `a` now offers
   "multi-repo project" alongside the directory-project register flow.
+
+- **Projects are renameable: new `name` config key / `--name NAME`.** Overrides
+  the directory/repo basename in every session name — container and tmux window
+  `NAME` / `NAME-TOPIC`, Claude session label `NAME:TOPIC`. Set it on a project
+  entry (`yolo config --name NAME`) to rename all of a project's sessions; a
+  saved multi-repo project injects its saved NAME as this key automatically.
+  The `wip` dashboard resolves the same key when naming the windows it spawns,
+  fixing the session↔window mismatch (`… has no tmux window`) for a saved
+  multi-repo project whose name differed from its primary repo's basename.
 
 - **`YOLO_WORKDIR` is exported into every container** — the session working
   dir (the worktree dir in worktree mode, else the launch cwd). Sessions

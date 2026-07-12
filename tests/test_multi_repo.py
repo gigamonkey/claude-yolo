@@ -310,8 +310,44 @@ def test_start_multi_repo_launches_from_saved_dir_anywhere(
     assert wt_of(cy, home, app, "feat").is_dir()
     assert wt_of(cy, home, lib, "feat").is_dir()
     assert flag_values(argv, "-w") == [str(wt_of(cy, home, app, "feat"))]
-    # the saved keys are stamped into the overlay: the topic is self-describing
-    assert read_overlay(cy, home, app, "feat") == {"repos": [str(lib)]}
+    # the saved keys — plus the project's name — are stamped into the overlay:
+    # the topic is self-describing
+    assert read_overlay(cy, home, app, "feat") == {"name": "chat", "repos": [str(lib)]}
+
+
+def test_multi_repo_sessions_are_named_after_the_project(cy, run_cli, repos, tmp_path):
+    # Container/session names derive from the saved project's NAME, not the primary
+    # repo's basename — the `wip` dashboard correlates sessions to tmux windows by
+    # that name, and its `n` key names the spawned window NAME-TOPIC.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--multi-repo", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=tmp_path,
+    )
+    argv = run_cli(["start", "feat", "--multi-repo", "chat"], home=home, cwd=tmp_path)
+    assert argv[argv.index("--name") + 1] == "chat-feat"  # docker --name
+    img = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    cargs = argv[img + 1 :]  # what's passed to claude
+    assert cargs[cargs.index("--name") + 1] == "chat:feat"  # claude session name
+    # resume re-resolves the name from the overlay stamp alone: deleting the saved
+    # entry doesn't rename (or otherwise change) the live topic
+    (home / ".claude-yolo" / "multirepos.json").unlink()
+    argv = run_cli(["resume", "feat"], home=home, cwd=app)
+    assert argv[argv.index("--name") + 1] == "chat-feat"
+
+
+def test_config_multirepo_rejects_name(cy, run_cli, repos, tmp_path):
+    # The saved NAME *is* the project's name; a divergent stored `name` key could
+    # never take effect (start injects NAME over it), so refuse to store one.
+    app, lib, proto, home = repos
+    with pytest.raises(SystemExit) as e:
+        run_cli(
+            ["config", "--multi-repo", "chat", "--dir", str(app), "--name", "other"],
+            home=home,
+            cwd=tmp_path,
+        )
+    assert "--name can't combine with --multi-repo" in str(e.value)
 
 
 def test_saved_config_edit_never_changes_a_live_topic(cy, run_cli, repos, tmp_path):

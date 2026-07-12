@@ -1550,6 +1550,7 @@ def setup_worktree(
 # .yolo.json committed in a cloned repo would apply someone else's config the
 # first time yolo ran there. A leftover file draws a warning in load_yolo_config.
 YOLO_KEYS = {
+    "name": ("project_name", "str"),
     "config_dir": ("config_dir", "path"),
     "dockerfile": ("dockerfile", "path"),
     "yolorc": ("yolorc", "path"),
@@ -2635,6 +2636,10 @@ def _do_config_multirepo(
         sys.exit("--init registers a project entry; it can't combine with --multi-repo.")
     if not name or "/" in name or name.startswith("."):
         sys.exit(f"--multi-repo: invalid name {name!r} (a short label, not a path).")
+    if "name" in explicit:
+        # NAME itself is the project's name (start injects it as the `name` key),
+        # so a divergent stored `name` could never take effect — refuse it.
+        sys.exit("--name can't combine with --multi-repo: the project's name is NAME itself.")
 
     mr_file = _multirepos_file(home)
     data = _read_multirepos_file(home)
@@ -3572,6 +3577,17 @@ PARSER.add_argument(
     "merge/diff then operate across the whole set. Repeatable; also settable as "
     "`repos` in config, where the lists concatenate across the layers and the "
     "CLI. Ignored (with a note) for current-directory sessions.",
+)
+PARSER.add_argument(
+    "--name",
+    dest="project_name",
+    metavar="NAME",
+    help="What sessions of this project are called: the container name (and tmux "
+    "window) becomes NAME for a current-directory session or NAME-TOPIC for a "
+    "worktree session, instead of deriving from the directory basename. Also "
+    "settable as `name` in config — set it on a project entry (`yolo config "
+    "--name NAME`) to rename every session of that project. A saved multi-repo "
+    "project is always named after its saved NAME (see --multi-repo).",
 )
 PARSER.add_argument(
     "--multi-repo",
@@ -6725,6 +6741,29 @@ def _worktree_config(home, main_root, worktree) -> tuple:
     )
 
 
+def _project_display_name(home, root, worktree=None) -> str:
+    """The name sessions at `root` run under: the effective `name` config key
+    (project entry, or — with `worktree` — the topic's overlay, which carries a
+    saved multi-repo project's NAME), else `root`'s basename.
+
+    Recomputes what the launch path's naming block resolves, so a window the
+    dashboard spawns is named exactly like the container the inner `yolo` in it
+    will create — the name match `_wip_items` correlates sessions to windows by.
+    `home` None is the test/standalone path → the basename.
+    """
+    root = pathlib.Path(root)
+    if home is not None:
+        cfg, _ = load_yolo_config(
+            root,
+            home,
+            worktree_dir=pathlib.Path(worktree) if worktree else None,
+            quiet=True,
+        )
+        if cfg.get("project_name"):
+            return cfg["project_name"]
+    return root.name
+
+
 def _wip_loop(home, session, term) -> None:
     """The dashboard's event loop (terminal plumbing is _run_picker's job).
 
@@ -6806,7 +6845,7 @@ def _wip_action(key, item, home, session, term) -> str:
     kind, p = item.kind, item.payload
     try:
         if key in ("\r", "\n"):
-            return _wip_enter(item, session, term)
+            return _wip_enter(item, home, session, term)
         if key == "b" and kind == "session":
             return _wip_browse(p, term)
         if key == "s" and kind == "session":
@@ -6835,21 +6874,21 @@ def _wip_action(key, item, home, session, term) -> str:
         if key == "c":
             return _wip_config(kind, p, home, term)
         if key == "n" and kind in ("project", "multirepo"):
-            return _wip_new_worktree(p, session, term)
+            return _wip_new_worktree(p, home, session, term)
         if key == "N":
-            return _wip_new_session(kind, p, session)
+            return _wip_new_session(kind, p, home, session)
         if key == "!":
             # Temporary startup-log debugging: `N` plus --_halt-before-exec, so
             # the spawned window pauses (log written, pane frozen) before docker.
-            return _wip_new_session(kind, p, session, halt=True)
+            return _wip_new_session(kind, p, home, session, halt=True)
         if key == "R":
-            return _wip_resume_pick(kind, p, session)
+            return _wip_resume_pick(kind, p, home, session)
     except YoloError as e:
         return str(e)
     return ""
 
 
-def _wip_enter(item, session, term) -> str:
+def _wip_enter(item, home, session, term) -> str:
     """Enter on the selected item: switch to a session, or launch a worktree/project."""
     kind, p = item.kind, item.payload
     if kind == "session":
@@ -6865,12 +6904,16 @@ def _wip_enter(item, session, term) -> str:
             _focus_tmux_window(session, p["window"])
             return f"switched to {p['topic']}."
         repo = p["main_root"] or p["worktree"]
-        name = f"{pathlib.Path(repo).name}-{p['topic']}" if p["main_root"] else p["topic"]
+        name = (
+            f"{_project_display_name(home, repo, p['worktree'])}-{p['topic']}"
+            if p["main_root"]
+            else p["topic"]
+        )
         _spawn_session_window(repo, ["resume", p["topic"], "--no-tmux"], name, session)
         return f"resuming '{p['topic']}'…"
     if kind == "project":
         path = p["path"]
-        name = pathlib.Path(path).name
+        name = _project_display_name(home, path)
         # An active project already has a live session window: jump to it (as a
         # session row would) rather than spawning a `resume` the already-running
         # guard would reject. Otherwise open one — `resume` continues the dir's most
@@ -6893,12 +6936,14 @@ def _wip_enter(item, session, term) -> str:
         path = pathlib.Path(raw).expanduser()
         if not path.is_dir():
             return f"not a directory: {path}"
-        _spawn_session_window(path, ["start", "--no-tmux"], path.name, session)
+        _spawn_session_window(
+            path, ["start", "--no-tmux"], _project_display_name(home, path), session
+        )
         return f"starting a session in {path.name}…"
     return ""
 
 
-def _wip_spawn_target(kind, p):
+def _wip_spawn_target(kind, p, home):
     """(cwd, window_name, label) for spawning a session on a worktree/project row.
 
     Mirrors the repo/name logic Enter uses, so a spawned window matches Enter's.
@@ -6906,15 +6951,19 @@ def _wip_spawn_target(kind, p):
     """
     if kind == "worktree":
         repo = p["main_root"] or p["worktree"]
-        name = f"{pathlib.Path(repo).name}-{p['topic']}" if p["main_root"] else p["topic"]
+        name = (
+            f"{_project_display_name(home, repo, p['worktree'])}-{p['topic']}"
+            if p["main_root"]
+            else p["topic"]
+        )
         return repo, name, p["topic"]
     if kind == "project":
         path = p["path"]
-        return path, pathlib.Path(path).name, pathlib.Path(path).name
+        return path, _project_display_name(home, path), pathlib.Path(path).name
     return None
 
 
-def _wip_new_session(kind, p, session, halt: bool = False) -> str:
+def _wip_new_session(kind, p, home, session, halt: bool = False) -> str:
     """`N`: start a *fresh* session here (vs Enter, which resumes the latest).
 
     A project gets a plain `start` in its dir; a worktree gets `resume TOPIC --new`
@@ -6924,7 +6973,7 @@ def _wip_new_session(kind, p, session, halt: bool = False) -> str:
     plus --_halt-before-exec so the window pauses after the startup.log snapshot
     and before docker runs.
     """
-    target = _wip_spawn_target(kind, p)
+    target = _wip_spawn_target(kind, p, home)
     if target is None:
         return "new session applies to worktrees and projects."
     cwd, window_name, label = target
@@ -6941,11 +6990,11 @@ def _wip_new_session(kind, p, session, halt: bool = False) -> str:
     return f"starting a new session in {label}…"
 
 
-def _wip_resume_pick(kind, p, session) -> str:
+def _wip_resume_pick(kind, p, home, session) -> str:
     """`R`: open Claude's interactive session picker (`resume -r`) in a new window,
     so you can resume a session other than the most recent. Refuses on a running
     row, like `N` (you can't resume into the live container)."""
-    target = _wip_spawn_target(kind, p)
+    target = _wip_spawn_target(kind, p, home)
     if target is None:
         return "resume picker applies to worktrees and projects."
     cwd, window_name, label = target
@@ -7453,7 +7502,7 @@ def _wip_config(kind, p, home, term) -> str:
     return _config_editor_loop(scope, term)
 
 
-def _wip_new_worktree(p, session, term) -> str:
+def _wip_new_worktree(p, home, session, term) -> str:
     """`n`: prompt for a topic, then start a new worktree session in this project.
 
     Shells out (like Enter's launches) into a fresh tmux window running `yolo start
@@ -7478,7 +7527,7 @@ def _wip_new_worktree(p, session, term) -> str:
         )
         return f"starting multi-repo worktree '{topic}'…"
     path = p["path"]
-    name = f"{pathlib.Path(path).name}-{topic}"
+    name = f"{_project_display_name(home, path)}-{topic}"
     _spawn_session_window(path, ["start", topic, "--no-tmux"], name, session)
     return f"starting worktree '{topic}'…"
 
@@ -7995,7 +8044,11 @@ def _main():
         mr_dir, mr_raw = _multirepo_entry(home, parsed.multi_repo)
         os.chdir(mr_dir)
         cwd = mr_dir
-        multirepo_cfg = (parsed.multi_repo, mr_raw)
+        # The saved NAME is the project's name: inject it as the `name` config key
+        # so this launch's container/session names derive from it (not the primary
+        # repo's basename) and — via the overlay stamp below — so do later
+        # resume/shell relaunches of the topic.
+        multirepo_cfg = (parsed.multi_repo, {**mr_raw, "name": parsed.multi_repo})
 
     overlay_dir = None
     if topic and verb in ("resume", "shell"):
@@ -8244,19 +8297,24 @@ def _main():
                     extra_wt = setup_worktree(topic, home, base=parsed.base, repo=extra_root)[0]
                 extra_repos.append((extra_wt, extra_git, extra_slug))
         worktree_name = topic
-        container_base = f"{main_root.name}-{topic}"
-        # Name the Claude session `<repo>:<topic>` — distinguishing it both from a
-        # same-named topic in another project and from a cwd session (named just
-        # after its directory, no colon).
-        session_name = f"{main_root.name}:{topic}"
+        # The project's name: the `name` config key when set (a renamed project
+        # entry, or the saved multi-repo NAME riding in via the injected layer /
+        # the topic's overlay), else the primary repo's basename.
+        project = parsed.project_name or main_root.name
+        container_base = f"{project}-{topic}"
+        # Name the Claude session `<project>:<topic>` — distinguishing it both from
+        # a same-named topic in another project and from a cwd session (named just
+        # after its project/directory, no colon).
+        session_name = f"{project}:{topic}"
     else:
         slug = _repo_slug_or_none()
-        container_base = cwd.name
-        # Name a cwd session after the directory (= the container hostname), so it
-        # gets the same label above Claude's prompt that a worktree's topic does and
-        # is identifiable in the resume picker. Only one yolo session runs per
-        # directory anyway (the already-running guard), so the shared name is fine.
-        session_name = cwd.name
+        container_base = parsed.project_name or cwd.name
+        # Name a cwd session after the project (default: the directory, = the
+        # container hostname), so it gets the same label above Claude's prompt that
+        # a worktree's topic does and is identifiable in the resume picker. Only one
+        # yolo session runs per directory anyway (the already-running guard), so the
+        # shared name is fine.
+        session_name = container_base
         if parsed.repos:
             # Multi-repo is a worktree-session feature — the point is *creating*
             # per-repo worktrees. Don't silently half-apply it here.
