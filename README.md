@@ -337,6 +337,8 @@ directory you run `yolo` in) or by **name** (`--project NAME`, from any
 directory). You rarely create one explicitly: the first `yolo config` write in
 a directory creates its project (named after the directory basename;
 `--name` overrides), as do `yolo config --init` and the dashboard's `a` key.
+Names are held to docker's container-name charset (letters, digits, `.`, `_`,
+`-`) because the name *is* the session's container and tmux window name.
 
 Sessions are **named after the project**: container `chat` / `chat-fix-auth`,
 Claude session label `chat:fix-auth`. A directory with no project entry falls
@@ -405,7 +407,11 @@ repo, as usual):
 
 Each extra repo's worktree lives under its own slug in
 `~/.claude-yolo/worktrees/`, so `yolo list --all` and the dashboard's WORKTREES
-section show them as ordinary per-repo rows. A repo whose path has vanished is
+section show them as ordinary per-repo rows (with their own ahead/behind
+counts) — but they belong to the topic's *one* session: Enter on an extra
+repo's row switches to the primary's session when it's running, and otherwise
+resumes the topic from the primary, never a second container named for the
+secondary repo. A repo whose path has vanished is
 skipped by `finish` with a warning (never stranding the rest); a repo *added*
 to a topic's config mid-flight (`yolo config TOPIC --add-repo …`) gets its
 worktree created on the next `resume`. `repos` is ignored (with a note) for

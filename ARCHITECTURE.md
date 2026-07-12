@@ -1853,7 +1853,13 @@ verbs operate across the set. The moving parts:
   start, per-key shadowed by the overlay's explicit flags, list keys
   concatenating. Renaming rewrites the topic pointers; deletion is guarded
   (see the `config` verb section). Sessions are named `NAME` / `NAME-TOPIC` —
-  matching the window the dashboard's spawns open.
+  matching the window the dashboard's spawns open. Names are validated to
+  docker's `--name` charset up front (`_valid_project_name`; an invalid
+  *existing* name — hand-edited — stays addressable so a rename can fix it),
+  and every dashboard window name goes through `_session_window_name` (the
+  same `_docker_safe_name` coercion the launch applies) so the name-equality
+  window correlation can't desync even for a migrated basename that needed
+  coercion.
 
 - **The overlay carries the topic's own flags plus its project pointer** —
   never a copy of the entry. `_topic_repo_set(worktree, main_root, slug,
@@ -1885,7 +1891,13 @@ verbs operate across the set. The moving parts:
   labels, status file, overlay key) stays keyed to the primary, so
   `stop`/`ps`/`browse` needed no changes. Extra worktrees live under their
   *own* repos' slugs in `~/.claude-yolo/worktrees/`, so `list --all`, the
-  dashboard, and orphan recovery see them as ordinary rows.
+  dashboard, and orphan recovery see them as ordinary rows — but the dashboard
+  routes them to the topic's one session: the `yolo.extra-repos` label links a
+  running session's window to its extras' rows (`_extra_session_window`, which
+  also marks them `running`), and with no session, Enter/`N`/`R` resolve the
+  topic's *primary* (`_primary_for_extra`: an extra has no overlay of its own,
+  so same-topic overlays are scanned for the one whose resolved `repos`
+  include this repo) and act there, named after the project.
 
 - **`wip`:** every named project renders as one PROJECT row (name, dir, a
   `+N repos` tag), recents (no project yet) below (`_wip_projects`; a recent

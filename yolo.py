@@ -1711,10 +1711,11 @@ def _write_projects_file(home: pathlib.Path, data: dict) -> None:
 def _unique_project_name(base: str, taken, parent: str) -> str:
     """A project name derived from a directory basename, dodging collisions.
 
-    Leading dots are dropped (hidden dirs; a name can't start with one), then a
-    taken name gets the parent dir's basename appended, then a counter.
+    The basename is coerced to a valid name first (`_docker_safe_name` — names
+    are container names), then a taken name gets the parent dir's basename
+    appended, then a counter.
     """
-    base = base.lstrip(".") or "project"
+    base = _docker_safe_name(base, "project")
     if base not in taken:
         return base
     if parent and f"{base}-{parent}" not in taken:
@@ -1927,8 +1928,14 @@ def _merge_worktree_overlay(
 # a live config layer for every session and topic of the project. Host-side only
 # and never mounted, like every other config file.
 def _valid_project_name(name: str) -> bool:
-    """A project name is a short label, not a path (and can't hide as a dotfile)."""
-    return bool(name) and "/" not in name and not name.startswith(".")
+    """A project name must be a valid docker container name.
+
+    The name becomes the session's container name (and tmux window name)
+    verbatim — `<name>` / `<name>-<topic>` — so it's held to docker's `--name`
+    charset up front rather than silently coerced at launch (which would break
+    the dashboard's name-equality window correlation).
+    """
+    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]+", name) is not None
 
 
 def _project_dir_of(entry: dict, name: str, *, must_exist: bool = True) -> pathlib.Path:
@@ -2815,7 +2822,10 @@ def _rename_project(home: pathlib.Path, projects: dict, old: str, new: str) -> d
     next relaunch (containers are found by labels, so nothing strands).
     """
     if not _valid_project_name(new):
-        sys.exit(f"--name: invalid name {new!r} (a short label, not a path).")
+        sys.exit(
+            f"--name: invalid name {new!r} (letters, digits, ., _ or - — "
+            "it names containers and tmux windows)."
+        )
     if new in projects:
         sys.exit(f"--name: a project named '{new}' already exists.")
     projects[new] = projects.pop(old)
@@ -2843,11 +2853,13 @@ def _do_config_project(
         sys.exit("--global edits ~/.yolo.json; it can't combine with --project.")
     if parsed.init:
         sys.exit("--init creates the cwd's project; it can't combine with --project.")
-    if not _valid_project_name(name):
-        sys.exit(f"--project: invalid name {name!r} (a short label, not a path).")
-
     projects = _read_projects_file(home)
     exists = name in projects
+    if not exists and not _valid_project_name(name):
+        sys.exit(
+            f"--project: invalid name {name!r} (letters, digits, ., _ or - — "
+            "it names containers and tmux windows)."
+        )
     entry = dict(projects.get(name, {}))
 
     if parsed.cfg_delete:
@@ -2970,9 +2982,12 @@ def register_project(home: pathlib.Path, project_dir: str, name: str | None = No
     """
     projects = _read_projects_file(home)
     resolved = str(pathlib.Path(os.path.expanduser(project_dir)).resolve())
-    name = name or pathlib.Path(resolved).name.lstrip(".") or "project"
+    name = name or _docker_safe_name(pathlib.Path(resolved).name, "project")
     if not _valid_project_name(name):
-        raise YoloError(f"invalid project name {name!r} (a short label, not a path).")
+        raise YoloError(
+            f"invalid project name {name!r} (letters, digits, ., _ or - — "
+            "it names containers and tmux windows)."
+        )
     if name in projects:
         raise YoloError(
             f"a project named '{name}' already exists; pick another with --name "
@@ -3147,9 +3162,12 @@ def do_config(
     # --name or the directory basename — the same implicit-creation contract the
     # path-keyed format had, now with a name attached.
     if matched is None:
-        name = parsed.project_name or pathlib.Path(key).name.lstrip(".") or "project"
+        name = parsed.project_name or _docker_safe_name(pathlib.Path(key).name, "project")
         if not _valid_project_name(name):
-            sys.exit(f"--name: invalid name {name!r} (a short label, not a path).")
+            sys.exit(
+                f"--name: invalid name {name!r} (letters, digits, ., _ or - — "
+                "it names containers and tmux windows)."
+            )
         if name in projects:
             sys.exit(
                 f"a project named '{name}' already exists; pick another with --name "
@@ -6607,8 +6625,8 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
 # created_at defaults to "" so older 9-arg constructions (tests) still work.
 WipSession = collections.namedtuple(
     "WipSession",
-    "cid name topic cwd config_dir ports created state age created_at",
-    defaults=("",),
+    "cid name topic cwd config_dir ports created state age created_at extra",
+    defaults=("", ""),  # created_at, extra (the yolo.extra-repos slug list)
 )
 
 # One selectable dashboard row: its kind, a stable selection key (so a refresh
@@ -6639,6 +6657,7 @@ def _wip_sessions(home: pathlib.Path) -> list:
             "{{.Ports}}",
             "{{.RunningFor}}",
             "{{.CreatedAt}}",
+            '{{.Label "yolo.extra-repos"}}',
         )
     )
     try:
@@ -6652,14 +6671,26 @@ def _wip_sessions(home: pathlib.Path) -> list:
     now = time.time()
     sessions = []
     for line in out.splitlines():
-        cid, name, topic, cwd, cfgdir, ports, up, created_at = (line.split("\t") + [""] * 8)[:8]
+        cid, name, topic, cwd, cfgdir, ports, up, created_at, extra = (line.split("\t") + [""] * 9)[
+            :9
+        ]
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(cwd)}.state"
         activity = _session_activity(state_file, now)
         state, age = activity if activity else (None, 0)
         sessions.append(
             WipSession(
-                cid, name, topic, cwd, cfgdir, _condense_ports(ports), up, state, age, created_at
+                cid,
+                name,
+                topic,
+                cwd,
+                cfgdir,
+                _condense_ports(ports),
+                up,
+                state,
+                age,
+                created_at,
+                extra,
             )
         )
     return sessions
@@ -6751,6 +6782,19 @@ def _session_window_for(path, sessions, windows) -> str | None:
     return None
 
 
+def _extra_session_window(slug, topic, sessions, windows) -> str | None:
+    """The window of the running multi-repo session whose topic mounts this
+    extra repo's worktree — matched via the `yolo.extra-repos` label (the slug
+    list the launch stamped), so Enter on the extra's row switches to the
+    topic's one real session instead of reporting no window."""
+    for s in sessions:
+        if s.topic == topic and s.extra and slug in s.extra.split(","):
+            win = windows.get(s.name)
+            if win:
+                return win[0]
+    return None
+
+
 def _wip_items(home: pathlib.Path) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
@@ -6765,6 +6809,13 @@ def _wip_items(home: pathlib.Path) -> dict:
     sessions = _order_sessions(_wip_sessions(home))
     windows = _all_tmux_windows()
     running_paths = {pathlib.Path(s.cwd) for s in sessions if s.cwd}
+    # A multi-repo session runs in the primary's worktree but *is* the session
+    # for every extra repo's same-topic worktree too (all mounted): mark those
+    # running as well, via the yolo.extra-repos label the launch stamped.
+    for s in sessions:
+        if s.topic and s.extra:
+            for slug in s.extra.split(","):
+                running_paths.add(home / ".claude-yolo" / "worktrees" / slug / s.topic)
     worktrees = _worktree_rows(
         home,
         "HEAD",  # fallback; the resolver supplies each worktree's own base
@@ -6811,7 +6862,10 @@ def _wip_items(home: pathlib.Path) -> dict:
                 "slug": w.slug,
                 "topic": w.topic,
                 "running": w.running,
-                "window": _session_window_for(w.worktree, sessions, windows),
+                # its own session's window, else (an extra repo's worktree) the
+                # window of the multi-repo session that mounts it
+                "window": _session_window_for(w.worktree, sessions, windows)
+                or _extra_session_window(w.slug, w.topic, sessions, windows),
             },
         )
         for w in worktrees
@@ -7038,6 +7092,47 @@ def _project_display_name(home, root, worktree=None) -> str:
     return root.name
 
 
+def _session_window_name(project: str, topic: str | None = None) -> str:
+    """The tmux window name for a session of `project` (worktree mode with
+    `topic`): exactly the container name the launch will pick — the same
+    `_docker_safe_name` coercion over the same base — so the dashboard's
+    name-equality window correlation holds even for a name that needs coercion
+    (a migrated or hand-edited entry; new names are validated to need none).
+    """
+    return _docker_safe_name(f"{project}-{topic}" if topic else project)
+
+
+def _primary_for_extra(home, worktree, main_root, topic):
+    """(primary_root, primary_worktree) of the multi-repo topic that `worktree`
+    belongs to as an *extra*, or None.
+
+    Only a topic's primary worktree gets an overlay at start (extras never do),
+    so a worktree with an overlay is its own primary and anything else is
+    checked against same-topic overlays: the one whose resolved `repos` include
+    this worktree's repo is the primary. Lets the dashboard route an extra
+    repo's worktree row to the topic's one real session instead of starting a
+    second, secondary-repo-named container over the same topic.
+    """
+    if home is None or main_root is None:
+        return None
+    worktrees = _read_worktrees_file(_worktrees_file(home))
+    if _worktree_overlay_key(pathlib.Path(worktree)) in worktrees:
+        return None  # has its own overlay → it's a primary
+    own_root = pathlib.Path(main_root).resolve()
+    for key in worktrees:
+        wt = pathlib.Path(key)
+        if wt.name != topic or wt == pathlib.Path(worktree):
+            continue
+        primary_root = _worktree_main_repo(wt)
+        if primary_root is None:
+            continue
+        cfg, _ = load_yolo_config(pathlib.Path(primary_root), home, worktree_dir=wt, quiet=True)
+        extras = _resolve_repos(cfg.get("repos", []), pathlib.Path(primary_root), strict=False)
+        if any(root.resolve() == own_root for _, root, _ in extras):
+            return pathlib.Path(primary_root), wt
+    return None
+
+
 def _wip_loop(home, session, term) -> None:
     """The dashboard's event loop (terminal plumbing is _run_picker's job).
 
@@ -7171,18 +7266,15 @@ def _wip_enter(item, home, session, term) -> str:
         _focus_tmux_window(session, p["window"])
         return f"switched to {p['name']}."
     if kind == "worktree":
-        # An active worktree already has a live session window: jump to it (like a
-        # session row / active project), rather than spawning a `resume` the
-        # already-running guard would reject. Otherwise resume it in a new window.
+        # An active worktree already has a live session window — its own, or (for
+        # an extra repo's worktree) the topic's primary session, which mounts this
+        # worktree too: jump to it, rather than spawning a `resume` the
+        # already-running guard would reject. Otherwise resume it in a new window,
+        # from the topic's *primary* repo when this row is an extra's.
         if p.get("window"):
             _focus_tmux_window(session, p["window"])
             return f"switched to {p['topic']}."
-        repo = p["main_root"] or p["worktree"]
-        name = (
-            f"{_project_display_name(home, repo, p['worktree'])}-{p['topic']}"
-            if p["main_root"]
-            else p["topic"]
-        )
+        repo, name, _, _ = _wip_spawn_target(kind, p, home)
         _spawn_session_window(repo, ["resume", p["topic"], "--no-tmux"], name, session)
         return f"resuming '{p['topic']}'…"
     if kind == "project":
@@ -7199,7 +7291,7 @@ def _wip_enter(item, home, session, term) -> str:
             _focus_tmux_window(session, p["window"])
             return f"switched to session in {name}."
         argv = ["resume", *(["--project", p["name"]] if p.get("name") else []), "--no-tmux"]
-        _spawn_session_window(path, argv, name, session)
+        _spawn_session_window(path, argv, _session_window_name(name), session)
         return f"opening a session in {name}…"
     if kind == "newsession":
         # The trailing `+`: prompt for any directory (Tab-completed, ~-aware) and
@@ -7211,7 +7303,10 @@ def _wip_enter(item, home, session, term) -> str:
         if not path.is_dir():
             return f"not a directory: {path}"
         _spawn_session_window(
-            path, ["start", "--no-tmux"], _project_display_name(home, path), session
+            path,
+            ["start", "--no-tmux"],
+            _session_window_name(_project_display_name(home, path)),
+            session,
         )
         return f"starting a session in {path.name}…"
     return ""
@@ -7228,8 +7323,15 @@ def _wip_spawn_target(kind, p, home):
     """
     if kind == "worktree":
         repo = p["main_root"] or p["worktree"]
+        worktree = p["worktree"]
+        # An extra repo's worktree belongs to a multi-repo topic whose one real
+        # session is the primary's: act there, not on the extra (which would
+        # start a second container over the same topic).
+        primary = _primary_for_extra(home, worktree, p["main_root"], p["topic"])
+        if primary is not None:
+            repo, worktree = primary
         name = (
-            f"{_project_display_name(home, repo, p['worktree'])}-{p['topic']}"
+            _session_window_name(_project_display_name(home, repo, worktree), p["topic"])
             if p["main_root"]
             else p["topic"]
         )
@@ -7237,7 +7339,8 @@ def _wip_spawn_target(kind, p, home):
     if kind == "project":
         path = p["path"]
         name = p.get("name") or pathlib.Path(path).name
-        return path, name, name, ["--project", p["name"]] if p.get("name") else []
+        window = _session_window_name(name)
+        return path, window, name, ["--project", p["name"]] if p.get("name") else []
     return None
 
 
@@ -7508,7 +7611,7 @@ def _config_scope(kind, payload, home):
             store="projects.json",
             config_args=["config"],
             cwd=str(path),
-            entry_key=path.name.lstrip(".") or "project",
+            entry_key=_docker_safe_name(path.name, "project"),
             base_cwd=path,
         )
     return None
@@ -7795,11 +7898,11 @@ def _wip_new_worktree(p, home, session, term) -> str:
     if not topic:
         return "cancelled."
     target = _wip_spawn_target("project", p, home)
-    cwd, window_name, label, extra = target
+    cwd, _, label, extra = target
     _spawn_session_window(
         cwd or pathlib.Path.home(),
         ["start", topic, *extra, "--no-tmux"],
-        f"{window_name}-{topic}",
+        _session_window_name(label, topic),
         session,
     )
     return f"starting worktree '{topic}' in {label}…"
@@ -7822,7 +7925,7 @@ def _wip_add_project(home, term) -> str:
         ["git", "-C", str(proj), "rev-parse", "--show-toplevel"], capture_output=True, text=True
     )
     key = top.stdout.strip() if top.returncode == 0 and top.stdout.strip() else str(proj.resolve())
-    default = pathlib.Path(key).name.lstrip(".") or "project"
+    default = _docker_safe_name(pathlib.Path(key).name, "project")
     name = term.prompt_line(f"Project name [{default}]: ") or default
     try:
         return register_project(home, key, name)

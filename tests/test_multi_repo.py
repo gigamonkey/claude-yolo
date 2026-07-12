@@ -613,6 +613,75 @@ def test_wip_config_scope_targets_named_project(cy, repos):
     assert scope.config_args == ["config", "--project", "chat"]
 
 
+def test_wip_extra_worktree_row_routes_to_primary(cy, run_cli, repos, monkeypatch):
+    # The extra repo's worktree row belongs to the topic's ONE session (the
+    # primary's): Enter/N resolve the primary and spawn there, named after the
+    # project — never a second container named for the secondary repo.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=app,
+    )
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
+    lib_wt = wt_of(cy, home, lib, "feat")
+    p = {
+        "worktree": str(lib_wt),
+        "main_root": str(lib),
+        "slug": lib_wt.parent.name,
+        "topic": "feat",
+    }
+    cwd, window, label, extra = cy._wip_spawn_target("worktree", p, home)
+    assert pathlib.Path(cwd).resolve() == app.resolve()  # the primary repo
+    assert window == "chat-feat"  # the project's session name, not lib-feat
+    # ...while the primary's own row is unaffected
+    app_wt = wt_of(cy, home, app, "feat")
+    p = {
+        "worktree": str(app_wt),
+        "main_root": str(app),
+        "slug": app_wt.parent.name,
+        "topic": "feat",
+    }
+    cwd, window, _, _ = cy._wip_spawn_target("worktree", p, home)
+    assert pathlib.Path(cwd) == app and window == "chat-feat"
+
+
+def test_wip_extra_worktree_row_gets_primary_session_window(cy):
+    # A running multi-repo session advertises its extras via the
+    # yolo.extra-repos label; the extra's worktree row picks up that session's
+    # window so Enter switches instead of reporting "no tmux window".
+    s = cy.WipSession(
+        "cid", "chat-feat", "feat", "/wt/app/feat", "", "", "1m", "waiting", 5, "", "lib-1234abcd"
+    )
+    windows = {"chat-feat": ("@7", "yolo")}
+    assert cy._extra_session_window("lib-1234abcd", "feat", [s], windows) == "@7"
+    assert cy._extra_session_window("other-slug", "feat", [s], windows) is None
+    assert cy._extra_session_window("lib-1234abcd", "other", [s], windows) is None
+
+
+def test_project_names_must_be_container_safe(cy, run_cli, repos, tmp_path):
+    # The name IS the container/window name, so it's validated up front instead
+    # of silently coerced at launch (which would desync the wip correlation).
+    app, lib, proto, home = repos
+    with pytest.raises(SystemExit) as e:
+        run_cli(
+            ["config", "--project", "bhs-cs + courses", "--dir", str(app)],
+            home=home,
+            cwd=tmp_path,
+        )
+    assert "letters, digits" in str(e.value)
+    # an invalid *existing* name (hand-edited/migrated) is still addressable —
+    # renaming it to a valid one is the fix
+    (home / ".claude-yolo").mkdir(exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({"bhs-cs + courses": {"dir": str(app)}})
+    )
+    run_cli(
+        ["config", "--project", "bhs-cs + courses", "--name", "bhs-cs"], home=home, cwd=tmp_path
+    )
+    assert "bhs-cs" in json.loads((home / ".claude-yolo" / "projects.json").read_text())
+
+
 def test_wip_config_editor_dir_key_uses_dir_flag(cy, monkeypatch, repos):
     app, lib, proto, home = repos
     applied = []
