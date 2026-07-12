@@ -5,34 +5,45 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **Multi-repo projects.** A project can now span several git repos: a
-  worktree session gets a same-named worktree+branch in *each* repo, every one
-  mounted like the primary (worktree + shared `.git` at their identical host
-  paths) and announced to Claude as a working dir, and
-  `finish`/`rebase`/`merge`/`diff` operate across the whole set (guards run
-  across every repo before anything is touched). Three entry points, all
-  feeding the topic's worktree overlay (the per-topic source of truth): a new
-  `repos` config key / repeatable `--repo PATH` flag (with `--add-repo` /
-  `--remove-repo` config edits), and — the main affordance — **saved
-  multi-repo projects**: `yolo config --multi-repo NAME [--dir PATH]
-  --add-repo …` saves a named launch template in
-  `~/.claude-yolo/multirepos.json` (`dir` inferred from the cwd's repo), and
-  `yolo start TOPIC --multi-repo NAME` starts from it regardless of cwd. The
-  saved entry is consulted only at start, so editing or deleting it never
-  changes a live topic. Sessions are named after the saved NAME (container
-  `NAME-TOPIC`, Claude session `NAME:TOPIC`), not the primary repo's basename.
-  In `yolo wip`, saved configs get their own PROJECTS
-  rows (`n` starts a worktree from one, `c` edits it) and `a` now offers
-  "multi-repo project" alongside the directory-project register flow.
+- **Projects are now named, and can span several git repos.** A project is a
+  named entry in `~/.claude-yolo/projects.json`: a primary directory (`dir`),
+  optional extra repos (`repos`, via the repeatable `--repo PATH` flag or
+  `--add-repo`/`--remove-repo` config edits), plus ordinary config keys. It's
+  found by cwd (containment on `dir`) or by name — `yolo start [TOPIC]
+  --project NAME` (also `resume`/`shell`) launches it from any directory, and
+  `yolo config --project NAME` shows/creates/edits it (`--dir` inferred from
+  the cwd's repo). The first config write in a directory creates its project,
+  named after the directory basename (`--name` overrides). Several projects
+  may share a `dir` (distinct repo sets over one primary); a bare launch there
+  asks you to pick with `--project`.
 
-- **Projects are renameable: new `name` config key / `--name NAME`.** Overrides
-  the directory/repo basename in every session name — container and tmux window
-  `NAME` / `NAME-TOPIC`, Claude session label `NAME:TOPIC`. Set it on a project
-  entry (`yolo config --name NAME`) to rename all of a project's sessions; a
-  saved multi-repo project injects its saved NAME as this key automatically.
-  The `wip` dashboard resolves the same key when naming the windows it spawns,
-  fixing the session↔window mismatch (`… has no tmux window`) for a saved
-  multi-repo project whose name differed from its primary repo's basename.
+  A multi-repo topic gets a same-named worktree+branch in *each* repo, every
+  one mounted like the primary (worktree + shared `.git` at their identical
+  host paths) and announced to Claude as a working dir, and
+  `finish`/`rebase`/`merge`/`diff` operate across the whole set (guards run
+  across every repo before anything is touched). The project entry is a
+  **live** config layer: edits reach existing topics at their next container
+  launch (a repo added to the project grows its worktree at the next resume);
+  a topic started by name stays bound via a `project` pointer in its worktree
+  overlay, which otherwise carries only that topic's own explicit flags.
+
+  Sessions are named after the project — container `NAME` / `NAME-TOPIC`,
+  Claude session label `NAME:TOPIC` — so renaming a project (`yolo config
+  --name NEW`) renames its sessions at their next launch (topic pointers are
+  rewritten). `yolo config --delete` removes a project, refusing while it has
+  live worktrees unless `--force`. In `yolo wip`, every project is one
+  PROJECTS row (name, dir, a `+N repos` tag); `n` starts a worktree from it,
+  `c` edits it, and `a` registers a new one (path + name). `repos` is
+  rejected in `~/.yolo.json` — a global extras list would add worktrees to
+  every project.
+
+- **Migration:** a pre-existing path-keyed `projects.json` migrates
+  automatically on first read — each entry becomes a named project (the
+  directory basename, disambiguated when taken) with the path moved into
+  `dir` — with `.bak` backups. **BREAKING (small):** `secret set`/`rm`'s
+  scope flag `--project` is renamed **`--project-scope`** (`--project` now
+  selects a project by name); the old spelling still works under `secret` for
+  one release, with a deprecation warning.
 
 - **`YOLO_WORKDIR` is exported into every container** — the session working
   dir (the worktree dir in worktree mode, else the launch cwd). Sessions

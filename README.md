@@ -204,7 +204,7 @@ yolo stop                              # stop the running session in this direct
 
 As a shorthand a bare `yolo` is the same as `yolo start`. A fresh cwd session is
 named after the project — the directory basename, unless the
-[`name`](#name---name-name) config key renames it — (the name shown above
+project's [name](#projects) renames it — (the name shown above
 Claude's prompt and in `claude --resume`), mirroring a worktree's
 `<project>:<topic>`. `resume` continues the
 most recent session (`-r` picks a specific one, opening Claude's interactive
@@ -247,8 +247,8 @@ Verb details:
 - **`start TOPIC`** creates the worktree on a new branch `TOPIC`, branched off
   `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
   the `base` config key), and launches a fresh session named `<project>:<TOPIC>`
-  — the project being the repo basename, unless the [`name`](#name---name-name)
-  config key renames it — (the name shown above Claude's prompt and in
+  — the project being the repo basename, unless the [project's name](#projects)
+  differs — (the name shown above Claude's prompt and in
   `claude --resume`; the project prefix keeps it distinct from the same topic in
   another project). It errors
   if the topic already exists — use `resume`.
@@ -328,46 +328,60 @@ There are also three token-management verbs — `setup-token`, `tokens`, and
 `forget-token` — described under [Authentication modes](#authentication-modes),
 and a `config` verb described under [Configuration](#configuration).
 
-### Multi-repo projects
+### Projects
 
-A project can span several git repos: a worktree session then gets a same-named
-worktree+branch in *each* repo, every one mounted into the container exactly
-like the single repo above (worktree + shared `.git`, at their identical host
-paths), and the worktree verbs operate across the whole set.
+A **project** is a named entry in yolo's config: a primary directory (`dir`),
+optionally extra git repos (`repos`), plus any ordinary config keys. Projects
+are found two ways — by **cwd** (the project whose `dir` contains the
+directory you run `yolo` in) or by **name** (`--project NAME`, from any
+directory). You rarely create one explicitly: the first `yolo config` write in
+a directory creates its project (named after the directory basename;
+`--name` overrides), as do `yolo config --init` and the dashboard's `a` key.
 
-The usual way in is a **saved multi-repo project** — a named config listing the
-primary repo and the extras:
+Sessions are **named after the project**: container `chat` / `chat-fix-auth`,
+Claude session label `chat:fix-auth`. A directory with no project entry falls
+back to its basename. Renaming a project (`yolo config --name NEW`, or
+`--project OLD --name NEW`) takes effect at each session's next launch;
+deleting one (`yolo config --delete`) refuses while it still has live
+worktrees (`--force` overrides).
+
+A project can span **several git repos**: a worktree session then gets a
+same-named worktree+branch in *each* repo, every one mounted into the
+container exactly like the single repo above (worktree + shared `.git`, at
+their identical host paths), and the worktree verbs operate across the whole
+set.
 
 ```bash
-cd ~/work/app                          # the primary repo (sessions start here)
-yolo config --multi-repo chat --add-repo ~/work/lib --add-repo ~/work/proto
-yolo start fix-auth --multi-repo chat  # works from any directory
+cd ~/work/app                        # the primary repo
+yolo config --project chat --add-repo ~/work/lib --add-repo ~/work/proto
+yolo start fix-auth --project chat   # works from any directory
 ```
 
 That `start` creates branch `fix-auth` and a worktree in **app**, **lib**, and
 **proto**; the session's working directory is app's worktree, with lib's and
 proto's mounted alongside and announced to Claude as extra working dirs (plus a
 system-prompt note explaining the layout, so it commits in each repo on the
-shared branch). The session is named after the *project* — container
-`chat-fix-auth`, Claude session `chat:fix-auth` — not the primary repo's
-directory. In `yolo wip`, the saved config gets its own row — `n` on it
-starts a multi-repo worktree, `c` edits it, and `a` offers "multi-repo project"
-as one of the things to add.
+shared branch). `yolo start --project chat` (no topic) opens a cwd session in
+`~/work/app` from anywhere, and `resume`/`shell` accept `--project` the same
+way. In `yolo wip`, every project gets a row — `n` starts a worktree from it,
+`c` edits it.
 
-When creating a saved config, the primary `dir` is inferred from the repo you
-run `yolo config` in; `--dir PATH` overrides it (and is required outside a
-repo). The entry lives in `~/.claude-yolo/multirepos.json` and is **consulted
-only at start**: the effective keys are stamped into the topic's worktree
-overlay, so the topic is self-describing — `resume`/`finish`/`rebase`/`merge`/
-`diff` read the overlay, and editing or deleting the saved config never changes
-a live topic.
+When creating a project by name, the primary `dir` is inferred from the repo
+you run `yolo config` in; `--dir PATH` overrides it (and is required outside a
+repo; a plain non-git directory is fine — the worktree verbs just don't apply).
+The entry is a **live config layer**: it's re-read at every container launch,
+so config edits — adding a repo, a port, a mount — reach existing topics the
+next time they start (per-topic explicit flags in the worktree overlay still
+shadow it, and list keys concatenate). A topic started with `--project`
+remembers its project via a pointer in its overlay, so `resume`/`finish`/
+`rebase`/`merge`/`diff` keep resolving the right entry even when several
+projects share a `dir` (allowed — that's two repo sets over one primary; a
+bare `yolo` there asks you to pick with `--project`).
 
-Two lower-level entry points feed the same machinery: ad-hoc `--repo PATH`
-flags on `start` (sticky for that topic via the overlay snapshot, like
-`--mount`), and a [`repos`](#repos---repo-path-repeatable) key on a directory's
-own project entry for a project whose *every* worktree session should be
-multi-repo. Defining a saved config does **not** make plain `yolo start` from
-its member repos multi-repo.
+Ad-hoc `--repo PATH` flags on `start` feed the same machinery (sticky for that
+topic via the overlay snapshot, like `--mount`). A repo being listed in some
+project's `repos` does **not** change plain `yolo start` runs from that repo's
+own directory.
 
 Across the set, the verbs behave as you'd hope (run them from the primary
 repo, as usual):
@@ -526,7 +540,8 @@ in three sections:
   *including* ones with a running session (which also appear up in Sessions). The
   **COMMITS** column shows how far each branch has diverged from its base as
   `↓behind ↑ahead`.
-- **Projects** — a REPO / DIRECTORY table of the projects registered in
+- **Projects** — a PROJECT / DIRECTORY table (multi-repo projects show a
+  `+N repos` tag) of the projects registered in
   `projects.json` *plus* any you've simply opened (yolo remembers those), so a
   project shows up here without a `yolo config` step. The section ends with a `+`
   row for opening a session in any other directory (see `Enter` below).
@@ -552,7 +567,7 @@ the selected row:
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
 | `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (confirms) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
-| `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row) |
+| `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row — and a name, defaulting to the dir basename) |
 | `q`     | anything                         | quit the dashboard — only once **no sessions are running** (the footer explains the refusal otherwise; stop them with `s` first). If the dashboard window is nonetheless gone while the tmux session lives on, `yolo wip` respawns it. |
 
 `f` and `r` won't interrupt an actively `working` session: applied to a worktree
@@ -778,10 +793,13 @@ to highest precedence:
    ```
 
 2. **`~/.claude-yolo/projects.json`** — per-project defaults, a JSON object
-   mapping a project directory to the same kind of object. You don't edit this
-   one by hand: the [`config` verb](#the-config-verb) below writes it. An entry
-   applies to any directory at or under its key path; when several keys match,
-   the most specific wins.
+   mapping a [project](#projects) **name** to the same kind of object plus its
+   `dir` (the project's primary directory). You don't edit this one by hand:
+   the [`config` verb](#the-config-verb) below writes it. An entry applies to
+   any directory at or under its `dir`; when several match, the most specific
+   `dir` wins (and several projects *sharing* a dir must be picked between
+   with `--project`). A pre-v0.27 path-keyed file (and a `multirepos.json`)
+   is migrated automatically on first read, with `.bak` backups.
 
 3. **CLI flags** — always win over both files.
 
@@ -910,7 +928,7 @@ same arrangement as the OAuth-token registry.
 yolo secret set GH_TOKEN              # prompts (hidden), or reads piped stdin
 gh auth token | yolo secret set GH_TOKEN     # from a pipe
 yolo secret set GH_TOKEN --clipboard  # from the system clipboard (pbpaste / Get-Clipboard / wl-paste / xclip / xsel)
-yolo secret set DB_PASSWORD --project # scoped to this repo, not global
+yolo secret set DB_PASSWORD --project-scope   # scoped to this repo, not global
 yolo secret list                      # global + this project's secrets
 yolo secret list --all                # across every project
 yolo secret rm GH_TOKEN               # delete (store + registry)
@@ -919,7 +937,10 @@ yolo secret rm GH_TOKEN               # delete (store + registry)
 The value is **never passed as a command-line argument** (which would leak it
 into shell history and the process list) — it comes from stdin, a hidden prompt,
 or `--clipboard`. Secrets have two **storage scopes**: **global** (the default)
-and **project** (`--project`, keyed to the repo root). At injection a name
+and **project** (`--project-scope`, keyed to the repo root — spelled
+`--project` before v0.27, which now selects a project by name; the old
+spelling still works under `secret` for one release, with a warning). At
+injection a name
 resolves project-scope first, then global, so a project can override a global
 secret of the same name. The NAME must be a shell identifier
 (`[A-Za-z_][A-Za-z0-9_]*`) because it can become an env var name.
@@ -1060,26 +1081,10 @@ yolo config --remove-clone ../lib                            # remove by dir
 The `yolo wip` dashboard's `c` config editor edits clones interactively too
 (prompting url, dir, and an optional depth).
 
-### `name` (`--name NAME`)
-
-What sessions of this project are called: the container/window name becomes
-`NAME` for a current-directory session or `NAME-TOPIC` for a worktree session,
-and the Claude session label `NAME:TOPIC` — instead of deriving from the
-directory basename. Set it on a project entry to rename every session of the
-project:
-
-```bash
-yolo config --name chat-app   # sessions become chat-app / chat-app-<topic>
-```
-
-A [saved multi-repo project](#multi-repo-projects) is always named after its
-saved NAME (`yolo start feat --multi-repo chat` runs as `chat-feat`), so
-`--name` is rejected on `config --multi-repo`.
-
 ### `repos` (`--repo PATH`, repeatable)
 
 Extra git repos that are part of this project — the
-[multi-repo](#multi-repo-projects) key. A worktree session (`yolo start
+[multi-repo](#projects) key. A worktree session (`yolo start
 TOPIC`) also creates a `TOPIC` worktree+branch in each listed repo and mounts
 it (with its shared `.git`) into the container, and
 `finish`/`rebase`/`merge`/`diff` operate across the whole set:
@@ -1096,7 +1101,8 @@ layers and the CLI. Unlike `clones` (which fetches a repo *into the ephemeral
 container*), `repos` is about **host** repos: the worktrees are real host git
 worktrees, so commits persist exactly like the primary's. Ignored (with a
 note) for current-directory sessions. Usually set via a
-[saved multi-repo project](#multi-repo-projects) rather than directly.
+[named project](#projects) (`yolo config --project NAME --add-repo …`) rather
+than directly.
 
 ### `yolorc` (`--yolorc PATH`)
 
@@ -1418,13 +1424,12 @@ subtlety: because only the most specific matching entry applies, an empty entry
 created inside a directory covered by some broader entry *shadows* that entry's
 config for this project — yolo warns when that happens.
 
-With **`--multi-repo NAME`**, the same invocations target the saved
-[multi-repo project](#multi-repo-projects) `NAME` in
-`~/.claude-yolo/multirepos.json` instead — show it bare, or set/edit its keys
-with the same flags (plus `--dir PATH` for its primary repo, inferred from the
-cwd's repo on creation). A saved entry is an ordinary config object with the
-extra required `dir`, so it can also carry `ports`, `prompts`, etc. — it's a
-saved way to launch.
+With **`--project NAME`**, the same invocations target the
+[project](#projects) `NAME` by name instead of by cwd — show it bare, create
+or edit its keys with the same flags (plus `--dir PATH` for its primary
+directory, inferred from the cwd's repo on creation). **`--name NEW`** renames
+a project (re-pointing its topics' overlays); **`--delete`** removes one,
+refusing while it has live worktrees unless `--force`.
 
 ## Extra `docker run` arguments
 

@@ -52,10 +52,11 @@ shape at a glance:
   `tokens` / `forget-token` / `dockerfile`. A bare `yolo` == `yolo start`.
 - **Config** is host-side only: global `~/.yolo.json` < per-project
   `~/.claude-yolo/projects.json` < per-worktree `~/.claude-yolo/worktrees.json` <
-  CLI flags, written via the `config` verb. Saved multi-repo launch templates
-  (`~/.claude-yolo/multirepos.json`, edited via `config --multi-repo NAME`) layer
-  between the project entry and the CLI at `start --multi-repo` only; the topic's
-  overlay carries the effective keys afterwards.
+  CLI flags, written via the `config` verb. Projects are **named** entries
+  (`{dir, ...keys}`, `repos` for multi-repo), matched by cwd containment on
+  `dir` or selected by name (`--project NAME` on start/resume/shell/config);
+  the entry is a live layer for every launch, and a topic started by name stays
+  bound via a `project` pointer in its overlay.
 
 ## Invariants you must not break
 

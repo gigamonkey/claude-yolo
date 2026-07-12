@@ -1,5 +1,14 @@
 # Unified projects: one named project type
 
+> **Implemented** (see CHANGELOG "Projects are now named"), with three
+> deviations: `--project` also works on `resume`/`shell` (the dashboard's
+> Enter/N/R spawn resumes by name, so ambiguous dirs stay unambiguous);
+> migration *merges* a saved multi-repo entry with a v1 path entry over the
+> same dir into one project (two entries would have turned a working dir
+> ambiguous); and `--multi-repo` was removed outright with no alias (never
+> released) while `secret`'s shipped `--project` kept a one-release
+> `--project-scope` translation shim.
+
 Today there are two project concepts: path-keyed entries in `projects.json`
 (per-directory config, matched by cwd containment, live at every launch) and
 named saved multi-repo configs in `multirepos.json` (launch templates,

@@ -60,7 +60,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py forget-token             # delete this config dir's token (local only)
 ./yolo.py secret set GH_TOKEN      # store a secret in the credential store (stdin/prompt)
 ./yolo.py secret set GH_TOKEN --clipboard   # ...read the value from the clipboard
-./yolo.py secret set DB_PW --project        # ...at project scope (not global)
+./yolo.py secret set DB_PW --project-scope  # ...at project scope (not global)
 ./yolo.py secret list              # list global + this project's secrets
 ./yolo.py secret list --all        # ...across every project
 ./yolo.py secret rm GH_TOKEN       # delete a secret (keychain + registry)
@@ -752,9 +752,12 @@ Dispatched before the config load (needs no yolo config; the project key comes f
 git). The subcommand is the TOPIC, the secret NAME a trailing positional
 (`do_secret` validates the shape).
 
-- **`yolo secret set NAME [--project] [--clipboard]`** (`do_secret_set`) —
+- **`yolo secret set NAME [--project-scope] [--clipboard]`** (`do_secret_set`;
+  the scope flag was spelled `--project` before v0.27 — now the project-by-name
+  selector — and `_main` pre-translates the old spelling under `secret` for one
+  release, with a warning) —
   store upsert + registry entry, **global by default** or **project scope** with
-  `--project`. The value is **never a CLI argument** (that would leak it into shell
+  `--project-scope`. The value is **never a CLI argument** (that would leak it into shell
   history and the process argv visible in `ps`). Three input sources: **stdin** when
   piped (`... | yolo secret set NAME`), an **interactive no-echo prompt**
   (`getpass`) on a TTY, or **`--clipboard`** (`_read_clipboard`: the platform's
@@ -770,7 +773,7 @@ git). The subcommand is the TOPIC, the secret NAME a trailing positional
   secrets; **`--all`** spans every project (the cross-project counterpart, like
   `list --all`).
 
-- **`yolo secret rm NAME [--project]`** (`do_secret_rm`) — delete the stored value
+- **`yolo secret rm NAME [--project-scope]`** (`do_secret_rm`) — delete the stored value
   (`_keychain_delete`) + registry row at the given scope.
 
 ### Config key — `secrets`, a spec list (name → target)
@@ -886,19 +889,28 @@ avoids. *tmpfs / FIFO / stdin* — none can carry a host *value* into a bind mou
 
 Config supplies defaults for most flags; `load_yolo_config` applies them via
 `PARSER.set_defaults` *before* the re-`parse_args`, so explicit CLI flags still
-win. Up to three layers, merged low→high, **all host-side only** (a fourth,
-`~/.claude-yolo/multirepos.json`, holds saved multi-repo launch templates that
-`start --multi-repo` layers between the project entry and the CLI — see
-"Multi-repo projects"):
+win. Up to three layers, merged low→high, **all host-side only**:
 
-1. **`~/.yolo.json`** (global) — a flat JSON object of config keys.
+1. **`~/.yolo.json`** (global) — a flat JSON object of config keys. `repos` is
+   rejected here (a global extras list would add worktrees to every project),
+   both at load and at `config --global` write time.
 2. **`~/.claude-yolo/projects.json`** (per-project) — a JSON object mapping a
-   **directory path** to a config object of the same keys. An entry applies when
-   the *real* cwd (before any worktree `TOPIC` retargeting) is **at or under**
-   the key path; when several keys match, the **longest wins** and only that one
-   entry is used — the same nearest-wins rule the old in-directory search had,
-   so running from a subdirectory picks up the project's entry. Written by
-   `yolo config` (its only writer); a plain launch never touches it.
+   **project name** to a config object of the same keys plus its required
+   `dir`, the project's primary directory (see "Projects"). Which entry
+   applies: an explicit `--project NAME` (hard error if unknown), else a
+   topic's overlay `project` pointer (a dangling one warns and falls
+   through), else **dir containment** — the *real* cwd (before any worktree
+   `TOPIC` retargeting) is at or under the entry's `dir`, deepest `dir` wins.
+   Several projects may share that best dir (two repo sets over one primary);
+   that ambiguity is a hard error naming the candidates (`--project` picks),
+   except under `quiet`, where the first by name is used so the dashboard's
+   read-only loops keep drawing. Written by `yolo config` (its only writer); a
+   plain launch never touches it. A v1 path-keyed file — and a pre-unification
+   `multirepos.json` — migrates automatically on first read
+   (`_migrate_projects_file`): path entries become named entries (basename,
+   disambiguated by parent dir then a counter), multirepo entries merge in
+   under their names (absorbing a same-dir v1 entry: saved keys over v1 keys,
+   list keys concatenating), `.bak` backups kept.
 3. **`~/.claude-yolo/worktrees.json`** (per-worktree overlay) — a JSON object
    mapping a **worktree's absolute path** to a config object of the same keys,
    layered on *only* in worktree mode (`load_yolo_config(..., worktree_dir=…)`)
@@ -948,7 +960,8 @@ CLI flags. Per key the higher layer **overrides**, except `prompts`, `mounts`,
 and then the CLI values (those lists accumulate; everything else replaces).
 
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
-`name` (what sessions run under — see the naming note below),
+`project` (a topic overlay's pointer to its project — stamped by `start
+--project`, not set by hand — see the naming note below),
 `config-dir`, `dockerfile`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
@@ -972,45 +985,55 @@ means "leave at the built-in default" (the loader skips it). Unknown keys, wrong
 types, and malformed JSON all `sys.exit` naming the offending file/entry
 (`_parse_yolo_dict` / `_read_projects_file` / `_read_worktrees_file`).
 
-**`name` renames a project's sessions.** The naming block in `main()` builds
-every session name from the project's name — container `<name>-<TOPIC>`
-(worktree mode) or `<name>` (cwd mode), Claude session label `<name>:<TOPIC>` —
-where `<name>` defaults to the primary repo's / directory's basename and the
-`name` key (`--name`) overrides it. A saved multi-repo project injects its
-saved NAME as this key at `start --multi-repo` (and `config --multi-repo`
-refuses an explicit `--name`, which the injection would only shadow), and the
-key is stamped into the topic's overlay with the other saved keys, so
-`resume`/`shell` recompute the same names without the entry. The `wip`
-dashboard resolves the same key (`_project_display_name`, a quiet
-`load_yolo_config`) when naming the windows it spawns, because the dashboard's
-session↔window correlation is exact name equality — a window named differently
-from its container reads as "no tmux window".
+**Sessions are named after the project.** The naming block in `main()` builds
+every session name from the matched project's name (`matched_project_key`) —
+container `<name>-<TOPIC>` (worktree mode) or `<name>` (cwd mode), Claude
+session label `<name>:<TOPIC>` — falling back to the primary repo's /
+directory's basename when no project matches. A topic started by name stays
+bound via the overlay's `project` pointer (an ordinary YOLO_KEYS flag, so
+`_overlay_flags` stamps it automatically), so `resume`/`shell` re-resolve the
+same entry — and the same name — without `--project`. The `wip` dashboard
+resolves the same way (`_project_display_name`, a quiet `load_yolo_config`,
+or the row's own payload name) when naming the windows it spawns, because the
+dashboard's session↔window correlation is exact name equality — a window named
+differently from its container reads as "no tmux window".
 
 Every load also prints a one-line **provenance note** to stderr (suppressed by
 `quiet=True`, which the long-lived `wip` dashboard passes when it re-reads config
 each tick so the note/warnings don't scribble its frame) — e.g.
-`config: ~/.yolo.json + projects.json[/Users/peter/hacks/foo]`, with a
+`config: ~/.yolo.json + projects.json[chat]`, with a
 `+ worktrees.json[<topic>]` tail when a (non-empty) worktree overlay applies, or
 `config: built-in defaults (no project entry)` — and warns about **dangling
-project keys** (entries whose directory no longer exists: the signature of a
-moved/renamed project, whose config would otherwise *silently* fall back to the
-global defaults — wrong account/profile being the real hazard). When the cwd
-also has no matching entry — the rename case produces both at once — the warning
-suggests re-running `yolo config` and removing the stale entry. This detection
-only works because entries are never auto-created: a plain run in a fresh
-directory configures nothing and writes nothing. The hard-mode version is the
-`require-project-entry` guardrail (see above). Note `projects.json` keys are
-**paths-as-identity**: renames must be hand-migrated (matching how Claude's
-`~/.claude/projects/` buckets and the worktree slugs behave).
+project dirs** (entries whose `dir` no longer exists: the signature of a
+moved/renamed directory, whose config would otherwise *silently* fall back to
+the global defaults — wrong account/profile being the real hazard). When the
+cwd also has no matching entry — the rename case produces both at once — the
+warning suggests re-pointing the project with `yolo config --project NAME
+--dir .`. This detection only works because entries are never auto-created by
+*launches*: a plain run in a fresh directory configures nothing and writes
+nothing (a `config` **write** does auto-create the entry, named after the
+directory basename or `--name`). Directory renames are now a config edit
+(`--dir`), not identity surgery — the *name* is the identity; what stays
+path-keyed is Claude's `~/.claude/projects/` buckets, the worktree slugs, the
+secrets project scope, and the recent-projects registry.
 
 ### `config` verb
 
 `yolo.py config [TOPIC] [CONFIG FLAGS]` (`do_config`) shows or updates this
 project's `projects.json` entry — or, with **`--global`**, `~/.yolo.json`
 itself, or, with a **`TOPIC`**, that worktree's `worktrees.json` overlay
-(`_do_config_worktree`) — then exits; it does **not** run a container. The
-project entry key is the **main repo root** when inside a git repo (so
-subdirectory runs and worktree sessions share it; `_project_key`), else the cwd.
+(`_do_config_worktree`) — or, with **`--project NAME`**, that project's entry
+by name (`_do_config_project` — create with `--dir` inferred from the cwd's
+repo, edit, rename via `--name`, delete via `--delete`) — then exits; it does
+**not** run a container. The in-dir target resolves by dir containment (the
+ambiguity error applies); a first write **auto-creates** the entry, its `dir`
+the main repo root when inside a git repo (so subdirectory runs and worktree
+sessions share it; `_project_key`) else the cwd, its name the dir basename or
+`--name`. **`--name NEW`** on an existing entry renames it, rewriting the
+worktree overlays that point at it (`_rename_project`, projects.json written
+before the pointers so a failure can't tear the rename); **`--delete`**
+refuses while topics still resolve to the project (`_project_live_topics`:
+pointer match, or dir match for pointer-less topics) unless `--force`.
 Behavior à la `git config`:
 
 - **With a `TOPIC`** — `yolo config fix-auth --add-mount ~/refdocs` — targets
@@ -1802,44 +1825,47 @@ is named via `claude --name <repo>:<TOPIC>`. Durability is the point: commits la
 host's shared `.git` and uncommitted edits live in the host worktree dir, so a
 container exit loses nothing. Must be run from inside a git repo.
 
-## Multi-repo projects (`repos`, `--multi-repo`, `multirepos.json`)
+## Projects and multi-repo (`--project`, `repos`, named `projects.json`)
 
-A worktree session can span several repos: `start` creates a same-named
-worktree+branch in each and the verbs operate across the set. The moving parts:
+A **project** is a named `projects.json` entry — `dir` (the primary) plus
+ordinary config keys — and a worktree session can span several repos: `start`
+creates a same-named worktree+branch in each of the project's `repos` and the
+verbs operate across the set. The moving parts:
 
 - **The `repos` config key** (`--repo PATH`, concat across layers) names the
-  *additional* repos; the primary stays implicit (the repo yolo runs from — the
-  same identity as the project key). `_parse_repo_spec` validates at config-set
+  *additional* repos; the primary stays implicit (the project's `dir` / the
+  repo yolo runs from). `_parse_repo_spec` validates at config-set
   time (must exist + be a git repo, like a mount source); `_resolve_repos`
   normalizes each spec to its repo's main root via `_repo_root_of` (the
   explicit-directory sibling of `_repo_paths`), dedupes by root, and drops the
   primary. It's **strict on the launch paths** (a typo'd path fails before any
   worktree exists) and **tolerant (`strict=False`) in `_topic_repo_set`** — the
-  verbs must not let a vanished repo strand the removable rest.
+  verbs must not let a vanished repo strand the removable rest. Rejected in
+  `~/.yolo.json` (a global extras list would be worktrees for everyone).
 
-- **Saved multi-repo projects** — `~/.claude-yolo/multirepos.json`, `{name:
-  {dir, ...config keys}}`, written only by `yolo config --multi-repo NAME`
-  (`_do_config_multirepo`, which reuses `_apply_config_edits`; `dir` is
-  --dir or inferred from the cwd's main root, and is normalized to a repo
-  root). A saved entry is a **launch template, not an identity**: `start TOPIC
-  --multi-repo NAME` chdirs to `dir` (so every cwd-derived value — repo root,
-  project key, secrets scope — matches a start run from there), layers the
-  entry's keys between the dir's project entry and the CLI
-  (`load_yolo_config(multirepo=…)`), and stamps them into the topic's worktree
-  overlay (`_merge_overlay_layers`: saved under explicit CLI, list keys
-  concatenating). The saved NAME itself rides along as the injected `name`
-  config key, so the topic's sessions are named `NAME-TOPIC` (not after the
-  primary repo's basename) — matching the window the dashboard's `n` spawn
-  opens. Nothing after `start` consults the entry.
+- **The project is the identity, and its entry is live.** `start/resume/shell
+  [--project NAME]` chdirs to the entry's `dir` (so every cwd-derived value —
+  repo root, secrets scope — matches a run from there) and selects the entry
+  by name (`load_yolo_config(project=…)`); without the flag the entry resolves
+  by dir containment or, for an existing topic, the overlay's `project`
+  pointer. Either way the entry is **re-read at every container launch** —
+  editing it (adding a repo, a port) reaches existing topics at their next
+  start, per-key shadowed by the overlay's explicit flags, list keys
+  concatenating. Renaming rewrites the topic pointers; deletion is guarded
+  (see the `config` verb section). Sessions are named `NAME` / `NAME-TOPIC` —
+  matching the window the dashboard's spawns open.
 
-- **The overlay is the per-topic source of truth.** `_topic_repo_set(worktree,
-  main_root, slug, topic, home)` — backing finish/rebase/merge/diff — re-reads
-  the topic's own config (`load_yolo_config(..., worktree_dir=worktree,
-  quiet=True)`, so the overlay is included regardless of which verb runs) and
-  returns `[(worktree, main_root, slug)]`, primary first. Repos with no
+- **The overlay carries the topic's own flags plus its project pointer** —
+  never a copy of the entry. `_topic_repo_set(worktree, main_root, slug,
+  topic, home)` — backing finish/rebase/merge/diff — re-reads the topic's
+  config (`load_yolo_config(..., worktree_dir=worktree, quiet=True)`, so the
+  overlay and the pointed-at entry are included regardless of which verb runs)
+  and returns `[(worktree, main_root, slug)]`, primary first. Repos with no
   worktree for the topic are skipped silently; a repo added mid-topic (`yolo
-  config TOPIC --add-repo`) gets its worktree created by the next `resume`
-  (never by `shell`, which only mounts what exists).
+  config TOPIC --add-repo`, or on the *project* — the entry is live) gets its
+  worktree created by the next `resume` (never by `shell`, which only mounts
+  what exists). A deleted project degrades a pointered topic to dir matching
+  plus its overlay, with a warning.
 
 - **Start is guard-all-then-create with rollback:** every repo is pre-flighted
   (worktree dir or branch exists → error naming the repo) before anything is
@@ -1861,19 +1887,23 @@ worktree+branch in each and the verbs operate across the set. The moving parts:
   *own* repos' slugs in `~/.claude-yolo/worktrees/`, so `list --all`, the
   dashboard, and orphan recovery see them as ordinary rows.
 
-- **`wip`:** saved configs render as `multirepo` rows in the PROJECTS section
-  (`n` spawns `start TOPIC --multi-repo NAME --no-tmux`; `c` opens the config
-  editor via a `multirepos.json` `_ConfigScope` whose writes go through `yolo
-  config --multi-repo NAME`, with a special `dir` prompt in
-  `_config_edit_key`); `a` is a two-way picker — directory project (the
-  original register flow) or multi-repo project (name + primary path →
-  create via `--dir` → straight into the editor to add `repos`). The dashboard
-  reads `multirepos.json` **leniently** (malformed → `{}`) so the refresh loop
-  keeps drawing; the config verb stays strict.
+- **`wip`:** every named project renders as one PROJECT row (name, dir, a
+  `+N repos` tag), recents (no project yet) below (`_wip_projects`; a recent
+  whose dir is already some project's `dir` is folded away). Registered rows
+  act by name — Enter/`N`/`R` spawn `resume`/`start`/`resume -r` with
+  `--project NAME`, `n` spawns `start TOPIC --project NAME --no-tmux`, and `c`
+  opens the config editor via a `_ConfigScope` whose writes go through `yolo
+  config --project NAME` (with a special `dir` prompt in `_config_edit_key`) —
+  so several projects sharing a dir stay unambiguous and window names always
+  match the container names the inner yolo picks. `a` registers a project:
+  path prompt + name prompt (defaulting to the basename), via
+  `register_project`, which refuses a taken name or an already-registered dir.
+  The dashboard reads `projects.json` **leniently** (malformed → `{}`) so the
+  refresh loop keeps drawing; the config verb stays strict.
 
 - `repos` on a cwd session is ignored with a stderr note (the feature is
-  creating worktrees; `mounts` covers live checkouts). `--multi-repo` is named
-  around the existing `--project` flag, which `secret set`/`rm` already own.
+  creating worktrees; `mounts` covers live checkouts). `secret set`/`rm`'s old
+  `--project` scope flag became `--project-scope` to free the name.
 
 ## Resuming a session (`resume`, `--resume [SESSION_ID]` / `-r`)
 
@@ -2124,18 +2154,24 @@ the `yolo.extra-repos` label, the `--repo`-flags overlay stamp, the untouched
 single-repo path), the guards (bad path / branch-collision errors creating
 nothing, mid-set failure rolling back worktrees and branches, the cwd-session
 ignored-with-a-note case), `resume` (remounting the set from the overlay,
-creating the worktree for a repo added mid-topic), saved multi-repo projects
-(`config --multi-repo` creating with inferred/explicit/normalized `--dir` and
-the outside-a-repo error, `start --multi-repo` launching from the saved `dir`
-regardless of cwd and stamping the overlay, saved-config edits never touching a
-live topic, the saved+CLI overlay merge, the flag guards), the verbs across
+creating the worktree for a repo added mid-topic), named projects
+(`config --project` creating with inferred/explicit/normalized `--dir`, plain
+dirs allowed, and the outside-a-repo error; `start --project` launching from
+the entry's `dir` regardless of cwd — with and without a TOPIC — and stamping
+only the pointer + explicit flags into the overlay; entry edits reaching live
+topics at the next launch; project-based session naming, resolved via the
+pointer at resume; `--name` renames re-pointing topics; `--delete` guarding
+live worktrees with `--force` degrading them gracefully; the dir-ambiguity
+error and `--project` disambiguation; the flag guards), the verbs across
 the set (`finish` removing all worktrees with per-repo branch handling, the
 any-repo dirty block + `--force`, the vanished-repo skip; `rebase` and `merge`
 per-repo against each repo's own base/checkout; `diff` with `== repo ==`
-headers), and the `wip` layer (saved-config rows in `_wip_items`, `n` spawning
-`start … --multi-repo`, the `a` picker's multi-repo branch creating the entry
-then opening the editor, the `multirepos.json` `_ConfigScope`, and the editor's
-`dir`-via-`--dir` prompt).
+headers), and the `wip` layer (named-project rows in `_wip_items` with the
+`+N repos` tag, `n` spawning `start … --project`, the by-name `_ConfigScope`,
+and the editor's `dir`-via-`--dir` prompt). Migration (v1 path keys →
+named entries with collision handling, `multirepos.json` folding in with
+same-dir absorption, `.bak` backups) and the global-`repos` rejection live in
+`test_config.py`.
 `test_tokens.py` covers the token registry, the registry-sourced expiry warning
 (`_token_minted`), the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the credential-store wrapping helpers stubbed).
