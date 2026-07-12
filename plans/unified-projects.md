@@ -180,13 +180,13 @@ Costs, and their mitigations:
 ## Flag naming
 
 `--project NAME` is the right spelling, but `--project` is taken as
-`secret set`/`rm`'s boolean scope flag (yolo.py:3610). Resolution: rename the
-secret scope flag to **`--project-scope`** and, since the verb is known before
-parsing (positional `verb`), pre-translate a bare `--project` in a `secret`
-invocation to `--project-scope` with a deprecation warning for one release.
-`--multi-repo NAME` stays as a hidden alias for a release, then goes.
-(This is what plans/multi-repo.md originally wanted before the collision
-forced `--multi-repo`.)
+`secret set`/`rm`'s boolean scope flag — and that flag *has* shipped (v0.15.0),
+so it gets a compatibility shim: rename it to **`--project-scope`** and, since
+the verb is known before parsing (positional `verb`), pre-translate a bare
+`--project` in a `secret` invocation to `--project-scope` with a deprecation
+warning for one release. `--multi-repo` has never been in a release, so it is
+**removed outright** — no alias. (`--project` is what plans/multi-repo.md
+originally wanted before the collision forced `--multi-repo`.)
 
 `config` surface after unification:
 
@@ -271,14 +271,18 @@ project's name" — same resolution the launch does.
    template-freeze semantics never ships at all and the CHANGELOG describes
    only the final shape).
 
-## Open questions
+## Settled decisions
 
-- **Delete/rename guard strictness**: refuse vs warn-and-degrade when live
-  topics point at the project. Plan says refuse + `--force`; cheap to soften
-  later.
-- **Secrets scope**: stays repo-root-keyed here. Re-keying by project name
-  would make secrets survive directory moves but break on renames instead;
-  defer until there's a felt need.
-- **`repos` on `~/.yolo.json`**: a global extras list is almost certainly a
-  mistake (it would add worktrees to every project); consider rejecting the
-  key at the global layer while unifying, independent of the rest.
+- **Delete guard**: deleting a project (a `--delete` affordance on
+  `config --project NAME` / the in-dir match) **refuses** while worktrees
+  exist for topics that resolve to it; `--force` overrides, degrading those
+  topics to cwd-resolution + overlay. Renaming needs no refusal at all: the
+  `dir` doesn't change, so cwd-matched topics are unaffected — the rename just
+  rewrites overlay `project` pointers and session names change at each topic's
+  next relaunch (containers are found by labels, so nothing strands).
+- **Secrets scope**: stays repo-root-keyed. Re-keying by project name would
+  make secrets survive directory moves but break on renames instead; deferred
+  until there's a felt need.
+- **`repos` is rejected at the global layer**: a `repos` key in `~/.yolo.json`
+  (or `config --global --add-repo`) is a hard error — a global extras list
+  would add worktrees to every project.
