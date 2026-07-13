@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.27.0 — 2026-07-13
 
 - **Projects are now named, and can span several git repos.** A project is a
   named entry in `~/.claude-yolo/projects.json`: a primary directory (`dir`),
