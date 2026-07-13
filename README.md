@@ -404,6 +404,11 @@ repo, as usual):
 - **`diff TOPIC`** prints each repo's diff under a `== repo ==` header
   (`--stat` runs the interactive picker per repo in turn).
 
+- **`--this-repo`** (on `rebase`/`merge`/`diff`) limits any of the three to the
+  repo containing the current directory instead of the whole set — the per-repo
+  scope the dashboard's `r`/`m`/`d` keys use. `finish` always acts on the whole
+  set (removing just one repo's worktree would half-dismantle the topic).
+
 - **`stop` / `ps` / `browse`** are unchanged — it's still one container.
 
 Each extra repo's worktree lives under its own slug in
@@ -414,8 +419,10 @@ repo's row switches to the primary's session when it's running, and otherwise
 resumes the topic from the primary, never a second container named for the
 secondary repo. `f` likewise finishes the *whole* topic from any of its rows
 (the confirm says so — finishing just one repo of a set would half-dismantle
-it), while `r`/`m`/`d` stay per-repo: rebasing, merging, or diffing one repo
-of the set against its own base is exactly what those rows are for. A repo whose path has vanished is
+it), while `r`/`m`/`d` are per-repo on every row, the primary's included:
+rebasing, merging, or diffing one repo of the set against its own base is
+exactly what those rows are for (the CLI verbs are the whole-set spelling;
+`--this-repo` gives them the dashboard's per-repo scope). A repo whose path has vanished is
 skipped by `finish` with a warning (never stranding the rest); a repo *added*
 to a topic's config mid-flight (`yolo config TOPIC --add-repo …`) gets its
 worktree created on the next `resume`. `repos` is ignored (with a note) for

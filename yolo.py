@@ -3429,6 +3429,14 @@ PARSER.add_argument(
     "in a new tmux window (needs tmux). This is what `yolo wip`'s `d` key uses.",
 )
 PARSER.add_argument(
+    "--this-repo",
+    action="store_true",
+    help="For `rebase`/`merge`/`diff` on a multi-repo topic: act only on the repo "
+    "containing the current directory instead of every repo of the set (no effect "
+    "on a single-repo topic). This is what `yolo wip`'s per-repo `r`/`m`/`d` keys "
+    "use; `finish` always acts on the whole set.",
+)
+PARSER.add_argument(
     "--finish-action",
     choices=FINISH_CHOICES,
     default="delete-if-merged",
@@ -5482,6 +5490,7 @@ def do_rebase(
     base: str,
     *,
     force: bool,
+    this_repo: bool = False,
 ) -> None:
     """`rebase` verb: rebase a worktree's branch onto `base` (e.g. main's new work).
 
@@ -5489,11 +5498,16 @@ def do_rebase(
     session-activity guards for both the CLI and the dashboard (like
     `finish_worktree`). Resolves the worktree path in this repo, then prints the
     core's result; streaming git output (capture=False) goes straight to the
-    terminal, with the session note + outcome printed after.
+    terminal, with the session note + outcome printed after. `this_repo`
+    (`--this-repo`) limits a multi-repo topic to the cwd's repo.
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
-    print(rebase_worktree(worktree, main_root, slug, topic, home, base, force=force))
+    print(
+        rebase_worktree(
+            worktree, main_root, slug, topic, home, base, force=force, single_repo=this_repo
+        )
+    )
 
 
 def rebase_worktree(
@@ -5506,6 +5520,7 @@ def rebase_worktree(
     *,
     force: bool = False,
     capture: bool = False,
+    single_repo: bool = False,
 ) -> str:
     """Rebase `worktree`'s branch onto `base`; return a result message.
 
@@ -5531,15 +5546,22 @@ def rebase_worktree(
     whole set rebases: the dirty guard runs across every repo first, then each
     worktree rebases onto `base` resolved in its *own* main repo; a conflict
     stops at that repo (the earlier repos stay rebased — each rebase is
-    per-repo-atomic, so there's nothing to unwind). Raises `YoloError` on those
-    refusals, an unresolvable base, or conflicts (leaving that repo's rebase
-    in-progress to resolve/abort). With `capture=True` git's output is captured
-    (and folded into the conflict error) rather than streamed — for the
-    dashboard, which can't let git scribble over its frame.
+    per-repo-atomic, so there's nothing to unwind). With `single_repo=True`
+    (the dashboard's `r`, and `--this-repo` on the verb) the fan-out is
+    suppressed: only the given worktree rebases, whatever the topic spans.
+    Raises `YoloError` on those refusals, an unresolvable base, or conflicts
+    (leaving that repo's rebase in-progress to resolve/abort). With
+    `capture=True` git's output is captured (and folded into the conflict
+    error) rather than streamed — for the dashboard, which can't let git
+    scribble over its frame.
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    repo_set = (
+        [(pathlib.Path(worktree), pathlib.Path(main_root), slug)]
+        if single_repo
+        else _topic_repo_set(worktree, main_root, slug, topic, home)
+    )
     multi = len(repo_set) > 1
     msgs = []
     cid = running_container_for(slug, topic)
@@ -5603,17 +5625,18 @@ def rebase_worktree(
     return "\n".join(msgs)
 
 
-def do_merge(topic: str, home: pathlib.Path, base: str) -> None:
+def do_merge(topic: str, home: pathlib.Path, base: str, *, this_repo: bool = False) -> None:
     """`merge` verb: merge a worktree's branch into `base`, keeping worktree + branch.
 
     A thin wrapper over `merge_worktree` (the shared core behind the CLI and the
     dashboard's `m`), like `do_rebase` over `rebase_worktree`. Unlike `finish
     --finish-action merge`, the worktree and branch are left in place — only the
     merge happens — so you can keep iterating on the branch and merge again later.
+    `this_repo` (`--this-repo`) limits a multi-repo topic to the cwd's repo.
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
-    print(merge_worktree(worktree, main_root, slug, topic, home, base))
+    print(merge_worktree(worktree, main_root, slug, topic, home, base, single_repo=this_repo))
 
 
 def merge_worktree(
@@ -5625,6 +5648,7 @@ def merge_worktree(
     base: str,
     *,
     capture: bool = False,
+    single_repo: bool = False,
 ) -> str:
     """Merge `worktree`'s branch into `base` in the main checkout; keep both.
 
@@ -5645,7 +5669,9 @@ def merge_worktree(
     For a multi-repo topic (see `_topic_repo_set`) each repo of the set merges its
     own branch into its own checkout, sequentially, stopping at the first failure
     (each repo's merge is atomic — aborted on conflict — so earlier successes
-    stand and are reported in the error).
+    stand and are reported in the error). With `single_repo=True` (the
+    dashboard's `m`, and `--this-repo` on the verb) the fan-out is suppressed:
+    only the given worktree's branch merges, whatever the topic spans.
 
     On a merge failure (conflicts, or a main checkout too dirty to merge into) the
     merge is aborted and a `YoloError` is raised, so nothing is left half-merged.
@@ -5654,7 +5680,11 @@ def merge_worktree(
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    repo_set = (
+        [(pathlib.Path(worktree), pathlib.Path(main_root), slug)]
+        if single_repo
+        else _topic_repo_set(worktree, main_root, slug, topic, home)
+    )
     multi = len(repo_set) > 1
     msgs = []
     for _, root, _ in repo_set:
@@ -5707,7 +5737,9 @@ def merge_worktree(
     return "\n".join(msgs)
 
 
-def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) -> None:
+def do_diff(
+    topic: str, home: pathlib.Path, base: str, *, stat: bool = False, this_repo: bool = False
+) -> None:
     """`diff` verb: the branch's changes vs `base`, including uncommitted work.
 
     Diffs from the merge-base of `base` and the worktree's HEAD to the worktree's
@@ -5730,12 +5762,18 @@ def do_diff(topic: str, home: pathlib.Path, base: str, *, stat: bool = False) ->
     A multi-repo topic (see `_topic_repo_set`) diffs each repo of the set in turn
     under a `== <repo> ==` header, `base` resolved per repo; with `--stat` the
     interactive picker runs per repo sequentially (quit one to reach the next).
+    `this_repo` (`--this-repo`, what the dashboard's per-repo `d` passes) limits
+    the diff to the cwd's repo — no fan-out, no headers.
     """
     _, main_root, slug = _repo_paths()
     worktree = home / ".claude-yolo" / "worktrees" / slug / topic
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
-    repo_set = _topic_repo_set(worktree, main_root, slug, topic, home)
+    repo_set = (
+        [(worktree, main_root, slug)]
+        if this_repo
+        else _topic_repo_set(worktree, main_root, slug, topic, home)
+    )
     multi = len(repo_set) > 1
     for wt, root, _ in repo_set:
         rev = subprocess.run(
@@ -7461,7 +7499,9 @@ def _wip_finish(kind, p, home, term) -> str:
     finishes the whole repo set: finishing just the extra would half-dismantle the
     topic, and the live project entry would then recreate (or trip over) it at the
     next resume — an extra row is a view onto the topic, not an independent thing.
-    (`r`/`m`/`d` stay per-repo: rebasing or diffing one repo of the set is coherent.)
+    (`r`/`m`/`d` stay per-repo — enforced via the cores' `single_repo` / the spawned
+    diff's `--this-repo`, on the primary's row too: rebasing, merging, or diffing
+    one repo of the set is coherent, and the whole-set spelling is the CLI verb.)
     """
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
@@ -7495,13 +7535,24 @@ def _wip_finish(kind, p, home, term) -> str:
 
 def _wip_rebase(kind, p, home, term) -> str:
     """`r`: rebase a worktree (the core guards a running session), or an idle
-    (waiting) session row, onto the base from *this worktree's* own config."""
+    (waiting) session row, onto the base from *this worktree's* own config.
+
+    Per-repo by construction (`single_repo=True`): a row is one repo, so on a
+    multi-repo topic only that repo rebases — `yolo rebase TOPIC` is the
+    whole-set spelling."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
         base, _, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return rebase_worktree(
-            p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
+            p["worktree"],
+            p["main_root"],
+            p["slug"],
+            p["topic"],
+            home,
+            base,
+            capture=True,
+            single_repo=True,
         )
     return "rebase applies to worktrees and idle sessions."
 
@@ -7513,15 +7564,27 @@ def _wip_merge(kind, p, home, term) -> str:
     The merge reads the branch's committed tip and lands in the main checkout, so a
     running session in the worktree isn't a hazard (no session guard); it applies to
     a worktree row or a worktree-backed session row. Base comes from *this
-    worktree's* own config (`_worktree_config`)."""
+    worktree's* own config (`_worktree_config`).
+
+    Per-repo by construction (`single_repo=True`): a row is one repo, so on a
+    multi-repo topic only that repo's branch merges (the confirm names the repo) —
+    `yolo merge TOPIC` is the whole-set spelling."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        if not term.confirm(f"Merge '{p['topic']}' into its base (keep the worktree)?"):
+        repo = pathlib.Path(p["main_root"]).name
+        if not term.confirm(f"Merge '{p['topic']}' into its base in {repo} (keep the worktree)?"):
             return "cancelled."
         base, _, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return merge_worktree(
-            p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
+            p["worktree"],
+            p["main_root"],
+            p["slug"],
+            p["topic"],
+            home,
+            base,
+            capture=True,
+            single_repo=True,
         )
     return "merge applies to worktrees and worktree sessions."
 
@@ -7532,12 +7595,14 @@ def _wip_diff(kind, p, home, session) -> str:
     Applies to a worktree row *or* a worktree-backed session row — and, since the
     diff is read-only (no mutation, no locks), even a `working` one, unlike `f`/`r`.
     Diff output is large and interactive, so it can't live in the footer — it shells
-    out, spawning `yolo diff <topic> --base <base> --stat` (the base from *this
-    worktree's* own config, so it matches the COMMITS column and the dashboard's
-    rebase; a matched project entry rides along as `--project`, so the spawned yolo
-    resolves the same entry instead of erroring when several projects share the
-    dir). That window shows the interactive diff-stat; Enter/Space on a file there
-    opens its diff in yet another window."""
+    out, spawning `yolo diff <topic> --base <base> --stat --this-repo` (the base
+    from *this worktree's* own config, so it matches the COMMITS column and the
+    dashboard's rebase; a matched project entry rides along as `--project`, so the
+    spawned yolo resolves the same entry instead of erroring when several projects
+    share the dir; `--this-repo` keeps a multi-repo topic's diff to the row's own
+    repo — like `r`/`m`, per-repo by construction, `yolo diff TOPIC` being the
+    whole-set spelling). That window shows the interactive diff-stat; Enter/Space
+    on a file there opens its diff in yet another window."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
@@ -7551,6 +7616,7 @@ def _wip_diff(kind, p, home, session) -> str:
                 "--base",
                 base,
                 "--stat",
+                "--this-repo",
             ],
             f"diff-{p['topic']}",
             session,
@@ -8509,13 +8575,13 @@ def _main():
         )
         return
     if verb == "rebase":
-        do_rebase(topic, home, parsed.base, force=parsed.force)
+        do_rebase(topic, home, parsed.base, force=parsed.force, this_repo=parsed.this_repo)
         return
     if verb == "merge":
-        do_merge(topic, home, parsed.base)
+        do_merge(topic, home, parsed.base, this_repo=parsed.this_repo)
         return
     if verb == "diff":
-        do_diff(topic, home, parsed.base, stat=parsed.stat)
+        do_diff(topic, home, parsed.base, stat=parsed.stat, this_repo=parsed.this_repo)
         return
     if verb == "shell":
         if topic:

@@ -1902,8 +1902,12 @@ verbs operate across the set. The moving parts:
   include this repo) and act there, named after the project. `f` routes
   through the same resolution — finishing from an extra would remove one
   worktree of the set and the live entry would recreate/trip over it at the
-  next resume — while `r`/`m`/`d` deliberately stay per-repo (each rebases/
-  merges/diffs against its own repo's base, matching the row's counts).
+  next resume — while `r`/`m`/`d` are per-repo on every row, the primary's
+  included (each rebases/merges/diffs against its own repo's base, matching
+  the row's counts): the dashboard calls the cores with `single_repo=True` and
+  spawns `diff --this-repo`, suppressing the `_topic_repo_set` fan-out the
+  bare CLI verbs do; the same `--this-repo` flag gives `rebase`/`merge`/`diff`
+  that per-repo scope from the command line.
 
 - **`wip`:** every named project renders as one PROJECT row (name, dir, a
   `+N repos` tag), recents (no project yet) below (`_wip_projects`; a recent
@@ -2189,7 +2193,9 @@ pointer or an explicit flag, the topic verbs; the flag guards), the verbs across
 the set (`finish` removing all worktrees with per-repo branch handling, the
 any-repo dirty block + `--force`, the vanished-repo skip; `rebase` and `merge`
 per-repo against each repo's own base/checkout; `diff` with `== repo ==`
-headers), and the `wip` layer (named-project rows in `_wip_items` with the
+headers; `--this-repo` limiting all three to the cwd's repo, and the
+dashboard's `m`/`r` acting on only the selected row's repo even from the
+primary), and the `wip` layer (named-project rows in `_wip_items` with the
 `+N repos` tag, `n` spawning `start … --project`, the by-name `_ConfigScope`,
 and the editor's `dir`-via-`--dir` prompt). Migration (v1 path keys →
 named entries with collision handling, `multirepos.json` folding in with

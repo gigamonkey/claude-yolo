@@ -561,6 +561,48 @@ def test_diff_concatenates_per_repo_with_headers(cy, run_cli, repos, capfd):
     assert "app change" in out and "lib change" in out
 
 
+def test_merge_this_repo_merges_only_the_cwd_repo(cy, run_cli, repos):
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    run_cli(["merge", "feat", "--this-repo"], home=home, cwd=app)
+    assert (app / "a-wt.txt").exists()
+    assert not (lib / "l-wt.txt").exists()  # the other repo of the set untouched
+    assert awt.is_dir() and lwt.is_dir()
+
+
+def test_rebase_this_repo_rebases_only_the_cwd_repo(cy, run_cli, repos):
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for repo, fname in ((app, "a-main.txt"), (lib, "l-main.txt")):
+        (repo / fname).write_text("new on main\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "advance main")
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    run_cli(["rebase", "feat", "--this-repo"], home=home, cwd=app)
+    assert (awt / "a-main.txt").exists()
+    assert not (lwt / "l-main.txt").exists()  # the other repo's branch not replayed
+
+
+def test_diff_this_repo_skips_extras_and_headers(cy, run_cli, repos, capfd):
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    (awt / "README").write_text("app change\n")
+    (lwt / "README").write_text("lib change\n")
+    capfd.readouterr()
+    run_cli(["diff", "feat", "--this-repo"], home=home, cwd=app)
+    out = capfd.readouterr().out
+    assert "app change" in out
+    assert "lib change" not in out
+    assert "== app ==" not in out  # single-repo output: no headers
+
+
 # --- wip dashboard -------------------------------------------------------------
 
 
@@ -687,6 +729,41 @@ def test_wip_finish_on_extra_worktree_row_finishes_the_whole_set(cy, run_cli, re
     assert not lib_wt.exists()
     assert not wt_of(cy, home, app, "feat").exists()  # the primary went too
     assert "[app]" in msg and "[lib]" in msg
+
+
+def test_wip_merge_on_primary_row_merges_only_that_repo(cy, run_cli, repos):
+    # `m` is per-repo on EVERY row, the primary's included: the dashboard calls
+    # the core with single_repo=True, so the whole-set fan-out of `yolo merge
+    # TOPIC` never happens from a row.
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    payload = {"worktree": awt, "main_root": app, "slug": awt.parent.name, "topic": "feat"}
+    msg = cy._wip_merge("worktree", payload, home, FakeTerm([], confirms=[True]))
+    assert "Merged 'feat'" in msg
+    assert (app / "a-wt.txt").exists()
+    assert not (lib / "l-wt.txt").exists()  # the extra repo untouched
+
+
+def test_wip_rebase_on_primary_row_rebases_only_that_repo(cy, run_cli, repos):
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for repo, fname in ((app, "a-main.txt"), (lib, "l-main.txt")):
+        (repo / fname).write_text("new on main\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "advance main")
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    payload = {"worktree": awt, "main_root": app, "slug": awt.parent.name, "topic": "feat"}
+    msg = cy._wip_rebase("worktree", payload, home, FakeTerm([]))
+    assert "Rebased 'feat'" in msg
+    assert (awt / "a-main.txt").exists()
+    assert not (lwt / "l-main.txt").exists()  # the extra repo's branch not replayed
 
 
 def test_wip_extra_worktree_row_gets_primary_session_window(cy):

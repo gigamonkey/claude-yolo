@@ -41,7 +41,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   extra repo's worktree row in `wip` belongs to the topic's one session: it
   shows the primary session's window (and `running` state) while it runs,
   Enter/`N`/`R` on it act on the topic's primary otherwise, and `f` finishes
-  the whole topic (`r`/`m`/`d` stay per-repo). `yolo config --delete` removes a project, refusing while it has
+  the whole topic. `wip`'s `r`/`m`/`d` are per-repo on every row — the
+  primary's included — acting only on the selected row's repo (`m`'s confirm
+  names it); the CLI verbs are the whole-set spelling, and a new
+  **`--this-repo`** flag on `rebase`/`merge`/`diff` gives them the dashboard's
+  per-repo scope. `yolo config --delete` removes a project, refusing while it has
   live worktrees unless `--force`. In `yolo wip`, every project is one
   PROJECTS row (name, dir, a `+N repos` tag); `n` starts a worktree from it,
   `c` edits it, and `a` registers a new one (path + name). `repos` is

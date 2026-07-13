@@ -779,7 +779,7 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
     frames = run_loop(cy, monkeypatch, sections, ["r", "q"])
-    assert calls == [("old", {"capture": True})]
+    assert calls == [("old", {"capture": True, "single_repo": True})]
     assert frames[-1][1] == "rebased"
 
 
@@ -792,7 +792,7 @@ def test_merge_worktree_confirms_then_calls_core(cy, monkeypatch):
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
     frames = run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[True])
-    assert calls == [("old", {"capture": True})]
+    assert calls == [("old", {"capture": True, "single_repo": True})]
     assert frames[-1][1] == "merged"
 
 
@@ -833,7 +833,7 @@ def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
     frames = run_loop(cy, monkeypatch, sections, ["d", "q"])
     ((repo, argv, name),) = spawned
     assert repo == "/repo"
-    assert argv == ["diff", "old", "--base", "HEAD", "--stat"]
+    assert argv == ["diff", "old", "--base", "HEAD", "--stat", "--this-repo"]
     assert name == "diff-old"
     assert frames[-1][1] == "diffing 'old'…"
 
@@ -851,7 +851,7 @@ def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
     ((repo, argv, name),) = spawned
     assert (
         repo == "/repo"
-        and argv == ["diff", "topic", "--base", "HEAD", "--stat"]
+        and argv == ["diff", "topic", "--base", "HEAD", "--stat", "--this-repo"]
         and name == "diff-topic"
     )
 
@@ -871,7 +871,9 @@ def test_d_passes_matched_project_to_spawned_diff(cy, monkeypatch):
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
     run_loop(cy, monkeypatch, sections, ["d", "q"])
-    assert spawned == [["diff", "old", "--project", "web", "--base", "main", "--stat"]]
+    assert spawned == [
+        ["diff", "old", "--project", "web", "--base", "main", "--stat", "--this-repo"]
+    ]
 
 
 def test_d_on_cwd_session_is_noop(cy, monkeypatch):
