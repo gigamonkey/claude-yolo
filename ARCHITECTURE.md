@@ -85,7 +85,7 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py finish fix-auth --finish-action push --finish-remote origin  # ...push the branch, keep it local
 ./yolo.py rebase fix-auth          # rebase the worktree's branch onto --base (default HEAD)
 ./yolo.py merge fix-auth           # merge the worktree's branch into --base, keep the worktree+branch
-./yolo.py list                     # this repo's worktrees
+./yolo.py list                     # this directory's worktrees (across its projects' repos)
 ./yolo.py list --all               # every repo's worktrees under ~/.claude-yolo/worktrees
 ./yolo.py dir fix-auth             # print that worktree's dir (cd "$(yolo dir fix-auth)")
 ./yolo.py ps                       # running yolo containers, across all repos
@@ -1307,8 +1307,20 @@ gracefully outside one — there's just no repo slug to label/find by).
   Needs a tty + tmux; without them `--stat` just prints the stat and returns. This
   is what the dashboard's `d` spawns (paged/interactive output can't live in the
   footer).
-- **`list`** — the repo's worktrees as a table (TOPIC/STATUS/COMMITS/
-  DIRECTORY). The
+- **`list`** — the current directory's worktrees as a table (TOPIC/STATUS/COMMITS/
+  DIRECTORY). "The directory's" is wider than one repo: `_list_scope_slugs` unions
+  the cwd repo's slug with the slug of every extra repo any of the directory's
+  topics spread into — pulled from two sources, a project entry's `repos` (across
+  *all* projects rooted at the cwd, via `_match_project_entries`; so unlike a
+  launch, `list` never errors on a shared dir — it lists across them) and each of
+  the cwd repo's own worktree overlays' per-start `--repo` set. Only slugs with a
+  worktree dir on disk survive, so a single-repo directory keeps the leaner
+  no-REPO table; once a second repo is in view a leading **REPO** column appears
+  and each worktree is judged in its *own* main repo against the base *its* config
+  sets (a `_worktree_config` `base_resolver`, like the dashboard). `list` is
+  dispatched *before* the strict per-project config load precisely so the shared-dir
+  ambiguity that load rejects can't block it; it resolves its own base quietly
+  instead (an explicit `--base` still wins). The
   TOPIC cell is just the topic, since yolo names the worktree's branch the same;
   it's only shown as `topic (branch: X)` when the worktree has a *different*
   branch checked out (someone switched it inside the container) — so there's no
@@ -1326,12 +1338,15 @@ gracefully outside one — there's just no repo slug to label/find by).
   counts vs `base` (GitHub's order — behind first), from `_branch_ahead_behind`'s
   `git rev-list --left-right --count base...branch`, carried on the `WorktreeRow`
   and shown by both `list` and the `wip` dashboard. So a fast-forward-merged or never-diverged branch reads
-  `merged`; a *squash*-merge isn't reachable and reads `unmerged`. `do_list` runs
-  the check in the main repo (not `git -C <worktree>`) so a `HEAD` base resolves
-  to the main checkout, not the worktree's own branch. **`--all`** (verb-only,
+  `merged`; a *squash*-merge isn't reachable and reads `unmerged`. In the
+  single-repo case `do_list` runs the check in the main repo (not `git -C
+  <worktree>`) so a `HEAD` base resolves to the main checkout, not the worktree's
+  own branch; once the view spans repos (a multi-repo directory or `--all`) each
+  worktree is checked in its own repo instead (below). **`--all`** (verb-only,
   `all_repos`) instead lists every worktree under `~/.claude-yolo/worktrees`
-  across all repos, with a leading **REPO** column — the cross-repo counterpart
-  to a plain `list`, like `ps` is for running containers. Under `--all` the
+  across all repos, with a leading **REPO** column — the whole-machine counterpart
+  to a plain `list`, like `ps` is for running containers. Whenever more than one
+  repo is in view (`--all`, or a multi-repo directory) the
   `merged` check is run in each worktree's *own* main repo (resolved via
   `_worktree_main_repo`: the shared `.git`'s parent), since the branch and a
   `HEAD` base only resolve there, not in the dir `list` was invoked from. The REPO

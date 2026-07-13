@@ -225,7 +225,9 @@ command requires a worktree name and cleans up the worktree for you. What
 happens to the branch is controlled by [`finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
 — by default it's deleted if it's already merged and kept otherwise. And the
 `list` command, run in a directory, shows the worktrees associated with that
-repo, i.e. the worktrees started via `yolo start <name>`.
+directory, i.e. the worktrees started via `yolo start <name>` — across every
+repo the directory's [projects](#projects) span, not just the primary repo's
+(so a multi-repo topic's worktrees all show, each under its own repo).
 
 ```bash
 yolo start something                    # new worktree+branch, launch a session
@@ -238,7 +240,7 @@ yolo diff something                     # PR-style diff vs --base, including unc
 yolo finish something                   # remove the worktree; delete the branch if merged
 yolo finish something --finish-action merge   # ...or merge the branch into HEAD, then delete it
 yolo finish something --finish-action push    # ...or push it to a remote, keep it locally
-yolo list                               # show this repo's worktrees
+yolo list                               # show this directory's worktrees (across its projects' repos)
 yolo dir something                      # print its directory: cd "$(yolo dir something)"
 ```
 
@@ -301,16 +303,22 @@ Verb details:
   [`--finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
   (default: delete it if merged, else keep it).
 
-- **`list`** shows TOPIC / STATUS / COMMITS / DIRECTORY. STATUS is `running`,
+- **`list`** shows TOPIC / STATUS / COMMITS / DIRECTORY for every worktree the
+  current directory's work spans — the repo you're in plus every extra repo any of
+  its [projects](#projects) name (a project entry's `repos`, or a topic's per-start
+  `--repo`), so a multi-repo topic's worktrees all appear. When more than one repo
+  is in view a leading REPO column names each. STATUS is `running`,
   `dirty` (uncommitted changes), or — when idle and clean — `merged`/`unmerged`
   depending on whether the branch is already contained in the base branch (`git
   branch --merged` semantics, so `merged` means it's ready to `finish`; a
   squash-merge reads as `unmerged`), or `orphaned` when git can't resolve the
   worktree's main repo at all (it was moved or deleted — `list` then prints a hint
-  to run `git worktree repair`). COMMITS shows how far the branch has diverged
+  to run `git worktree repair`). Each worktree is judged against the base *its* own
+  repo's config sets. COMMITS shows how far the branch has diverged
   from its base as `↓behind ↑ahead`. The branch name is folded into TOPIC and shown
   only when it differs from the topic — e.g. if someone switched branches inside
-  the container.
+  the container. `list --all` widens the view to every worktree on the machine,
+  across all repos, regardless of the current directory.
 
 - **`dir [TOPIC]`** prints a session's directory — the worktree's root with a
   `TOPIC` (it errors if that worktree doesn't exist), or the current directory

@@ -52,6 +52,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   rejected in `~/.yolo.json` — a global extras list would add worktrees to
   every project.
 
+- **`yolo list` now spans the directory's whole project repo set**, not just
+  the repo you're in: it unions the current repo's worktrees with those of
+  every extra repo any of the directory's projects name (a project entry's
+  `repos`, and each topic's per-start `--repo` overlay), so a multi-repo topic's
+  worktrees all show — each judged against the base *its* own repo's config sets.
+  A leading REPO column appears once more than one repo is in view (a plain
+  single-repo directory keeps the leaner table), and, unlike a launch, `list`
+  no longer errors when several projects share the directory — it lists across
+  all of them. `list --all` still widens to every worktree on the machine.
+
 - **Migration:** a pre-existing path-keyed `projects.json` migrates
   automatically on first read — each entry becomes a named project (the
   directory basename, disambiguated when taken) with the path moved into

@@ -603,6 +603,92 @@ def test_diff_this_repo_skips_extras_and_headers(cy, run_cli, repos, capfd):
     assert "== app ==" not in out  # single-repo output: no headers
 
 
+# --- list across the directory's projects --------------------------------------
+
+
+def _list_body(capsys, run_cli, home, cwd):
+    capsys.readouterr()  # clear
+    run_cli(["list"], home=home, cwd=cwd)
+    return capsys.readouterr().out
+
+
+def test_list_spans_the_projects_repo_set(cy, run_cli, repos, capsys):
+    """A plain `yolo list` in a multi-repo project shows every repo's worktrees,
+    with a REPO column, not just the primary's."""
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=app,
+    )
+    run_cli(["start", "feat", "--project", "chat"], home=home, cwd=app)
+    out = _list_body(capsys, run_cli, home, app)
+    lines = out.splitlines()
+    assert lines[0].split() == ["REPO", "TOPIC", "STATUS", "COMMITS", "DIRECTORY"]
+    body = "\n".join(lines[1:])
+    # the same topic appears once per repo, each under its own repo/slug
+    assert "app" in body and "lib" in body
+    app_slug = cy._repo_root_of(app)[2]
+    lib_slug = cy._repo_root_of(lib)[2]
+    assert f"{app_slug}/feat" in body and f"{lib_slug}/feat" in body
+
+
+def test_list_single_repo_directory_keeps_lean_table(cy, run_cli, repos, capsys):
+    """No extra repos configured: the output is the plain no-REPO table it always
+    was (the across-projects widening only kicks in when there's a second repo)."""
+    app, lib, proto, home = repos
+    run_cli(["start", "solo"], home=home, cwd=app)
+    lines = _list_body(capsys, run_cli, home, app).splitlines()
+    assert lines[0].split() == ["TOPIC", "STATUS", "COMMITS", "DIRECTORY"]
+
+
+def test_list_unions_repos_across_projects_sharing_a_dir(cy, run_cli, repos, capsys):
+    """Two projects rooted at the same dir, each naming a different extra repo:
+    `list` unions the whole directory's work even though a launch there would be
+    ambiguous — it must not error the way `start` does."""
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=app,
+    )
+    run_cli(
+        ["config", "--project", "web", "--dir", str(app), "--add-repo", str(proto)],
+        home=home,
+        cwd=app,
+    )
+    run_cli(["start", "chatfeat", "--project", "chat"], home=home, cwd=app)
+    run_cli(["start", "webfeat", "--project", "web"], home=home, cwd=app)
+    body = _list_body(capsys, run_cli, home, app)
+    # both projects' extra-repo worktrees show, plus the primary's own
+    assert "lib" in body and "proto" in body
+    assert "chatfeat" in body and "webfeat" in body
+
+
+def test_list_judges_each_repo_against_its_own_base(cy, run_cli, repos, capsys):
+    """A branch merged in its own repo reads `merged` even when the other repo's
+    same-topic branch is not — each worktree judged in its own main repo."""
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)  # topic `feat` in app + lib
+    # advance and merge only lib's branch into lib's main
+    (lwt / "x").write_text("x")
+    git(lwt, "add", ".")
+    git(lwt, "commit", "-qm", "work")
+    git(lib, "merge", "--no-ff", "-m", "merge feat", "feat")
+    # leave app's branch committed but unmerged
+    (awt / "y").write_text("y")
+    git(awt, "add", ".")
+    git(awt, "commit", "-qm", "work")
+    out = _list_body(capsys, run_cli, home, app)
+    rows = {
+        cols[0]: cols[2]  # REPO -> STATUS
+        for line in out.splitlines()[1:]
+        if (cols := line.split()) and cols[1] == "feat"
+    }
+    assert rows["lib"] == "merged"
+    assert rows["app"] == "unmerged"
+
+
 # --- wip dashboard -------------------------------------------------------------
 
 

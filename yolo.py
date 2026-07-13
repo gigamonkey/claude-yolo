@@ -6071,29 +6071,39 @@ def _worktree_rows(
     all_repos: bool,
     running_paths: set | None = None,
     base_resolver=None,
+    slugs: set | None = None,
 ) -> list:
     """The worktrees under ~/.claude-yolo/worktrees as WorktreeRow records.
 
     Shared by `do_list` and the `wip` dashboard. With `all_repos`, every repo's
     worktrees (each judged `merged` in its *own* main repo, since the branch/base
-    only resolve there); otherwise just this repo's. `running` is normally a
-    per-worktree `running_container_for` (a docker ps each) — but a caller that
-    already has the set of running worktree paths (the dashboard, from one docker
-    ps) passes `running_paths` to avoid N docker calls at its 2s refresh.
+    only resolve there); with an explicit `slugs` set, just those repos' (how
+    `do_list` spans a directory's project repo set); otherwise just this repo's.
+    `running` is normally a per-worktree `running_container_for` (a docker ps
+    each) — but a caller that already has the set of running worktree paths (the
+    dashboard, from one docker ps) passes `running_paths` to avoid N docker calls
+    at its 2s refresh.
 
     `base` judges the merged/COMMITS columns. `base_resolver(main_root, wt)` (the
-    dashboard) overrides it **per worktree** — each cross-repo worktree judged
-    against the base its *own* config sets, not one global value; without it the
-    single `base` applies to all (`do_list`, which is one repo / an explicit
-    `--base`).
+    dashboard, and `do_list` when spanning repos) overrides it **per worktree** —
+    each cross-repo worktree judged against the base its *own* config sets, not
+    one global value; without it the single `base` applies to all. Whenever more
+    than one repo is in view (all_repos, or a multi-slug set) each worktree's
+    branch is resolved in its own main repo, since the branch/base only resolve
+    there.
     """
     root = home / ".claude-yolo" / "worktrees"
     if all_repos:
         slug_dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    elif slugs is not None:
+        slug_dirs = sorted(root / s for s in slugs if (root / s).is_dir())
     else:
         _, _, slug = _repo_paths()
         sd = root / slug
         slug_dirs = [sd] if sd.is_dir() else []
+    # Resolve each worktree's own main repo (for the REPO column and to judge its
+    # branch there) whenever the view spans more than one repo.
+    resolve_repo = all_repos or len(slug_dirs) > 1
 
     rows = []
     for slug_dir in slug_dirs:
@@ -6129,9 +6139,9 @@ def _worktree_rows(
                         text=True,
                     ).stdout.strip()
                 )
-                # Under --all, resolve the branch in its own repo (the current dir
-                # isn't it); also names the REPO column.
-                repo = _worktree_main_repo(wt) if all_repos else None
+                # When the view spans repos, resolve the branch in its own repo
+                # (the current dir isn't it); also names the REPO column.
+                repo = _worktree_main_repo(wt) if resolve_repo else None
                 wt_base = base_resolver(repo, wt) if base_resolver else base
                 flags = (["running"] if running else []) + (["dirty"] if dirty else [])
                 # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
@@ -6168,28 +6178,85 @@ def _worktree_rows(
     return rows
 
 
-def do_list(home: pathlib.Path, base: str, all_repos: bool = False) -> None:
+def _list_scope_slugs(home: pathlib.Path, cwd: pathlib.Path) -> set:
+    """The worktree slugs `list` shows for `cwd`: this repo's, plus every extra
+    repo any of the cwd's topics spreads into.
+
+    A multi-repo topic spreads its worktrees across every repo it names — each
+    under its own slug — and that repo set comes from two places: a project entry's
+    `repos` (shared by every topic of a project, and a directory can be the `dir`
+    of several projects — distinct repo sets over one primary), and a per-topic
+    `--repo` stamped into that worktree's overlay. `list` unions both so a plain
+    `yolo list` shows the whole directory's work, not just the primary repo's. Only
+    slugs with a worktree dir on disk are returned (an extra repo nobody has
+    started a topic in yet contributes nothing), so a single-repo directory keeps
+    the one-repo output it always had.
+    """
+    root = home / ".claude-yolo" / "worktrees"
+    _, primary_root, slug = _repo_paths()
+    slugs = {slug}
+    specs: list[str] = []
+    # Every project rooted at the cwd contributes its entry's repo set.
+    projects = _read_projects_file(home, lenient=True)
+    for _, entry in _match_project_entries(projects, cwd):
+        specs += entry.get("repos") or []
+    # Each of this repo's own topic worktrees contributes its overlay's `--repo` set.
+    overlays = _read_worktrees_file(_worktrees_file(home))
+    cur_dir = root / slug
+    if cur_dir.is_dir():
+        for wt in cur_dir.iterdir():
+            if wt.is_dir():
+                specs += (overlays.get(_worktree_overlay_key(wt)) or {}).get("repos") or []
+    for _, _, extra_slug in _resolve_repos(specs, primary_root, strict=False):
+        slugs.add(extra_slug)
+    return {s for s in slugs if (root / s).is_dir()}
+
+
+def do_list(
+    home: pathlib.Path, base: str, all_repos: bool = False, *, cwd: pathlib.Path | None = None
+) -> None:
     """`list` verb: show worktrees, their status, and directory.
 
-    By default just this repo's worktrees; with `all_repos` (--all), every worktree
-    under ~/.claude-yolo/worktrees across all repos, with a leading REPO column.
+    By default every worktree for the current *directory* across the projects
+    rooted there — this repo's worktrees plus those of the extra repos any of
+    those projects name (see `_list_scope_slugs`). With `all_repos` (--all), every
+    worktree under ~/.claude-yolo/worktrees across all repos on the machine. Both
+    lead with a REPO column once more than one repo is in view; a plain single-repo
+    directory keeps the leaner no-REPO table.
 
     The TOPIC column normally equals the branch (yolo names them alike), so the
     branch is only shown — as `topic (branch: X)` — when the worktree has a
     *different* branch checked out (someone switched it inside the container).
 
     `merged` is judged against `base` (the same ref `start` branches off — default
-    HEAD, or whatever config/--base set). Under --all it's judged in each worktree's
-    own main repo, since the branch/base only resolve there. COMMITS is the
-    branch's `↓behind ↑ahead` counts vs `base` (GitHub's order — behind first),
-    from `_branch_ahead_behind`.
+    HEAD, or whatever config/--base set). When the view spans repos each worktree
+    is judged in its own main repo against the base *its* config sets, since the
+    branch/base only resolve there. COMMITS is the branch's `↓behind ↑ahead` counts
+    vs the base (GitHub's order — behind first), from `_branch_ahead_behind`.
     """
-    rows = _worktree_rows(home, base, all_repos)
-    if not rows:
-        print("No worktrees." if all_repos else "No worktrees for this repo.")
-        return
+    cwd = cwd or pathlib.Path.cwd()
+    # Honor an explicit --base; else fall back to the cwd repo's config base (a
+    # quiet load so a dir several projects share never errors as ambiguous here —
+    # `list` deliberately spans them). A multi-repo view overrides this per
+    # worktree via the resolver below.
+    if base == "HEAD":
+        cfg, _ = load_yolo_config(cwd, home, quiet=True)
+        base = cfg.get("base") or "HEAD"
 
     if all_repos:
+        rows = _worktree_rows(home, base, all_repos=True)
+        show_repo = True
+    else:
+        slugs = _list_scope_slugs(home, cwd)
+        show_repo = len(slugs) > 1
+        resolver = (lambda root, wt: _worktree_config(home, root, wt)[0]) if show_repo else None
+        rows = _worktree_rows(home, base, all_repos=False, slugs=slugs, base_resolver=resolver)
+
+    if not rows:
+        print("No worktrees." if all_repos else "No worktrees for this directory.")
+        return
+
+    if show_repo:
         _print_table(
             ("REPO", "TOPIC", "STATUS", "COMMITS", "DIRECTORY"),
             [(r.repo_name, r.topic_label, r.status, r.commits, r.directory) for r in rows],
@@ -8503,8 +8570,16 @@ def _main():
         do_stop(topic, home, cwd, force=parsed.force)
         return
 
+    # `list` reads worktrees and launches nothing. It's dispatched before the
+    # strict config load below because it spans *all* projects rooted at the cwd —
+    # the very ambiguity (several projects sharing a dir) that load rejects. It
+    # resolves its own base quietly instead (an explicit --base still wins).
+    if verb == "list":
+        do_list(home, parsed.base, parsed.all_repos, cwd=cwd)
+        return
+
     # Every other verb gets the config defaults layered under the CLI flags
-    # (so e.g. `list` honours a config-set `base`); re-parse so explicit flags win.
+    # (so e.g. `resume` honours a config-set `base`); re-parse so explicit flags win.
     # Uses the real cwd, before any worktree retargeting below. `resume`/`shell` and
     # the topic verbs (`finish`/`rebase`/`merge`/`diff`) in worktree mode also layer
     # that worktree's overlay on top of the project entry — so the topic's own
@@ -8531,9 +8606,6 @@ def _main():
     parsed = PARSER.parse_args(script_argv)
 
     # Terminal verbs (no credential config needed) — handle and return.
-    if verb == "list":
-        do_list(home, parsed.base, parsed.all_repos)
-        return
     if verb == "ps":
         do_ps(home, watch=parsed.watch)
         return
