@@ -3717,17 +3717,6 @@ PARSER.add_argument(
     help=argparse.SUPPRESS,
 )
 PARSER.add_argument(
-    # Temporary debugging aid for the startup-log capture: pause after
-    # _snapshot_startup_pane writes startup.log, before exec'ing docker, so the
-    # frozen pane can be compared against the captured log. Spawned into session
-    # windows by the wip dashboard's `!` key. Hidden; remove once the capture
-    # gap is diagnosed.
-    "--_halt-before-exec",
-    dest="halt_before_exec",
-    action="store_true",
-    help=argparse.SUPPRESS,
-)
-PARSER.add_argument(
     "--ssh-agent",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -5154,21 +5143,6 @@ def launch_container(
         print(sep)
     # Last moment before the exec: every host-side startup line is in the pane now.
     _snapshot_startup_pane(run_dir)
-    if getattr(parsed, "halt_before_exec", False):
-        # Temporary startup-log debugging (--_halt-before-exec, wip `!`): freeze
-        # here, after the snapshot and before docker runs. The pane above is what
-        # the snapshot saw; output after Enter is post-exec, covered by the
-        # streaming pipe (up to the launch sentinel).
-        print(
-            "\n[halted before exec — startup.log holds the snapshot half; the "
-            "post-exec half streams in after Enter. Enter launches claude, "
-            "Ctrl-C aborts]",
-            file=sys.stderr,
-        )
-        try:
-            input()
-        except (EOFError, KeyboardInterrupt):
-            sys.exit(130)
     if wrapped:
         # The post-exec half of the startup log: stream the pane into it until
         # the wrapper's sentinel says claude is taking over.
@@ -7104,8 +7078,8 @@ def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
 
 _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
-    "worktree": "Enter open · N new · ! halt-launch · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
-    "project": "Enter open · N new · ! halt-launch · R resume-pick · n new worktree · c config · a register",
+    "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle)",
+    "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -7358,10 +7332,6 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_new_worktree(p, home, session, term)
         if key == "N":
             return _wip_new_session(kind, p, home, session)
-        if key == "!":
-            # Temporary startup-log debugging: `N` plus --_halt-before-exec, so
-            # the spawned window pauses (log written, pane frozen) before docker.
-            return _wip_new_session(kind, p, home, session, halt=True)
         if key == "R":
             return _wip_resume_pick(kind, p, home, session)
     except YoloError as e:
@@ -7456,15 +7426,13 @@ def _wip_spawn_target(kind, p, home):
     return None
 
 
-def _wip_new_session(kind, p, home, session, halt: bool = False) -> str:
+def _wip_new_session(kind, p, home, session) -> str:
     """`N`: start a *fresh* session here (vs Enter, which resumes the latest).
 
     A project gets a plain `start` in its dir; a worktree gets `resume TOPIC --new`
     (a new named session on the existing worktree). Only one session runs per
     dir/worktree (the already-running guard), so this refuses when one is live —
-    Enter switches to it instead. `halt` is the temporary `!` key: same launch,
-    plus --_halt-before-exec so the window pauses after the startup.log snapshot
-    and before docker runs.
+    Enter switches to it instead.
     """
     target = _wip_spawn_target(kind, p, home)
     if target is None:
@@ -7477,8 +7445,6 @@ def _wip_new_session(kind, p, home, session, halt: bool = False) -> str:
         if kind == "worktree"
         else ["start", *extra, "--no-tmux"]
     )
-    if halt:
-        argv_tail.append("--_halt-before-exec")
     _spawn_session_window(cwd, argv_tail, window_name, session)
     return f"starting a new session in {label}…"
 
