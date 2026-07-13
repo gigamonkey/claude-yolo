@@ -429,7 +429,7 @@ def test_start_project_overlay_keeps_cli_flags_only(cy, run_cli, repos, tmp_path
 def test_project_flag_guards(cy, run_cli, repos):
     app, lib, proto, home = repos
     with pytest.raises(SystemExit) as e:
-        run_cli(["finish", "feat", "--project", "chat"], home=home, cwd=app)
+        run_cli(["list", "--project", "chat"], home=home, cwd=app)
     assert "only applies" in str(e.value)
     with pytest.raises(SystemExit) as e:
         run_cli(["start", "feat", "--project", "nope"], home=home, cwd=app)
@@ -456,6 +456,24 @@ def test_cwd_ambiguity_requires_project_flag(cy, run_cli, repos, tmp_path):
     run_cli(["start", "feat", "--project", "web"], home=home, cwd=app)
     assert wt_of(cy, home, proto, "feat").is_dir()
     assert not wt_of(cy, home, lib, "feat").exists()
+
+
+def test_topic_verbs_resolve_shared_dir_by_pointer_or_flag(cy, run_cli, repos, tmp_path):
+    # Two projects over the same dir: the topic verbs must still resolve — via the
+    # topic's stamped `project` pointer on a bare invocation, or via an explicit
+    # --project (what the wip dashboard's `d` passes) — instead of erroring as
+    # ambiguous.
+    app, lib, proto, home = repos
+    run_cli(["config", "--project", "chat", "--dir", str(app)], home=home, cwd=tmp_path)
+    run_cli(["config", "--project", "web", "--dir", str(app)], home=home, cwd=tmp_path)
+    run_cli(["start", "feat", "--project", "web"], home=home, cwd=app)
+    # bare `diff`: the overlay's pointer picks the entry — no ambiguity error
+    run_cli(["diff", "feat"], home=home, cwd=app)
+    # explicit --project also works, and retargets to the project's dir
+    run_cli(["diff", "feat", "--project", "web"], home=home, cwd=tmp_path)
+    run_cli(["rebase", "feat", "--project", "web"], home=home, cwd=tmp_path)
+    run_cli(["finish", "feat", "--project", "web"], home=home, cwd=tmp_path)
+    assert not wt_of(cy, home, app, "feat").exists()
 
 
 # --- verbs across the set ------------------------------------------------------

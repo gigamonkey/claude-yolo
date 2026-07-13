@@ -991,8 +991,9 @@ container `<name>-<TOPIC>` (worktree mode) or `<name>` (cwd mode), Claude
 session label `<name>:<TOPIC>` — falling back to the primary repo's /
 directory's basename when no project matches. A topic started by name stays
 bound via the overlay's `project` pointer (an ordinary YOLO_KEYS flag, so
-`_overlay_flags` stamps it automatically), so `resume`/`shell` re-resolve the
-same entry — and the same name — without `--project`. The `wip` dashboard
+`_overlay_flags` stamps it automatically), so `resume`/`shell` and the topic
+verbs (`finish`/`rebase`/`merge`/`diff` layer the overlay the same way) re-resolve
+the same entry — and the same name — without `--project`. The `wip` dashboard
 resolves the same way (`_project_display_name`, a quiet `load_yolo_config`,
 or the row's own payload name) when naming the windows it spawns, because the
 dashboard's session↔window correlation is exact name equality — a window named
@@ -1843,8 +1844,9 @@ verbs operate across the set. The moving parts:
   verbs must not let a vanished repo strand the removable rest. Rejected in
   `~/.yolo.json` (a global extras list would be worktrees for everyone).
 
-- **The project is the identity, and its entry is live.** `start/resume/shell
-  [--project NAME]` chdirs to the entry's `dir` (so every cwd-derived value —
+- **The project is the identity, and its entry is live.** `start/resume/shell`
+  and the topic verbs (`finish`/`rebase`/`merge`/`diff`) `[--project NAME]`
+  chdir to the entry's `dir` (so every cwd-derived value —
   repo root, secrets scope — matches a run from there) and selects the entry
   by name (`load_yolo_config(project=…)`); without the flag the entry resolves
   by dir containment or, for an existing topic, the overlay's `project`
@@ -2182,7 +2184,8 @@ only the pointer + explicit flags into the overlay; entry edits reaching live
 topics at the next launch; project-based session naming, resolved via the
 pointer at resume; `--name` renames re-pointing topics; `--delete` guarding
 live worktrees with `--force` degrading them gracefully; the dir-ambiguity
-error and `--project` disambiguation; the flag guards), the verbs across
+error and `--project` disambiguation — on the launch verbs and, via the
+pointer or an explicit flag, the topic verbs; the flag guards), the verbs across
 the set (`finish` removing all worktrees with per-repo branch handling, the
 any-repo dirty block + `--force`, the vanished-repo skip; `rebase` and `merge`
 per-repo against each repo's own base/checkout; `diff` with `== repo ==`

@@ -856,6 +856,24 @@ def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
     )
 
 
+def test_d_passes_matched_project_to_spawned_diff(cy, monkeypatch):
+    # When the worktree's config resolves a project entry, `d` passes it as
+    # --project so the spawned yolo picks the same entry even when several
+    # projects share the directory (a bare `yolo diff` there would error).
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append(argv),
+    )
+    monkeypatch.setattr(
+        cy, "_worktree_config", lambda home, root, wt: ("main", "delete-if-merged", "origin", "web")
+    )
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    run_loop(cy, monkeypatch, sections, ["d", "q"])
+    assert spawned == [["diff", "old", "--project", "web", "--base", "main", "--stat"]]
+
+
 def test_d_on_cwd_session_is_noop(cy, monkeypatch):
     # A plain cwd session (no topic / main repo) isn't a worktree, so `d` does nothing.
     spawned = []
@@ -1199,9 +1217,9 @@ def test_worktree_config_reads_global_base(cy, repo):
     # The dashboard re-resolves each worktree's base/finish-action/finish-remote
     # from config; a freshly-edited global ~/.yolo.json takes effect (no restart).
     r, home = repo
-    assert cy._worktree_config(home, r, r / "wt") == ("HEAD", "delete-if-merged", "origin")
+    assert cy._worktree_config(home, r, r / "wt") == ("HEAD", "delete-if-merged", "origin", None)
     (home / ".yolo.json").write_text('{"base": "main", "finish-action": "push"}')
-    base, action, remote = cy._worktree_config(home, r, r / "wt")
+    base, action, remote, _ = cy._worktree_config(home, r, r / "wt")
     assert base == "main" and action == "push" and remote == "origin"
 
 
@@ -1216,7 +1234,7 @@ def test_worktree_config_uses_the_worktrees_own_repo_entry(cy, repo):
 
 
 def test_worktree_config_none_is_defaults(cy):
-    assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin")
+    assert cy._worktree_config(None, None, None) == ("HEAD", "delete-if-merged", "origin", None)
 
 
 def test_complete_path_single_match_fills_full_path(cy, tmp_path):

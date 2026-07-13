@@ -3882,11 +3882,12 @@ PARSER.add_argument(
     "--project",
     dest="project",
     metavar="NAME",
-    help="For `start`/`resume`/`shell`: act on project NAME — as if run from its "
-    "`dir`, with the entry's keys layered between ~/.yolo.json and the CLI flags "
-    "— from any directory, with or without a TOPIC. Also the only way to pick a "
-    "project when several share a directory. For `config`: show or edit the "
-    "entry by name (see --dir / --add-repo / --name / --delete).",
+    help="For `start`/`resume`/`shell` and the topic verbs (`finish`/`rebase`/"
+    "`merge`/`diff`): act on project NAME — as if run from its `dir`, with the "
+    "entry's keys layered between ~/.yolo.json and the CLI flags — from any "
+    "directory, with or without a TOPIC. Also the only way to pick a project "
+    "when several share a directory. For `config`: show or edit the entry by "
+    "name (see --dir / --add-repo / --name / --delete).",
 )
 PARSER.add_argument(
     "--dir",
@@ -7050,24 +7051,28 @@ def _wip_nav(sections: dict) -> list:
 
 
 def _worktree_config(home, main_root, worktree) -> tuple:
-    """`(base, finish_action, finish_remote)` from *this worktree's* config.
+    """`(base, finish_action, finish_remote, project)` from *this worktree's* config.
 
     The dashboard spans repos, so each worktree's base / finish settings come from
     its **own** repo (project entry, keyed by `main_root`) + its worktree overlay +
     global `~/.yolo.json` — exactly what `yolo rebase TOPIC` / `yolo list` resolve
-    from inside that repo. Read live (each refresh/action) and `quiet` so a `yolo
-    config` edit reaches the long-lived dashboard without scribbling its frame.
-    `home`/`main_root` None is the test/standalone path → built-in defaults.
+    from inside that repo. `project` is the matched project entry's name (None when
+    no entry applies), so an action that shells out can pass `--project` and the
+    spawned yolo resolves the same entry even when several projects share the dir.
+    Read live (each refresh/action) and `quiet` so a `yolo config` edit reaches the
+    long-lived dashboard without scribbling its frame. `home`/`main_root` None is
+    the test/standalone path → built-in defaults.
     """
     if home is None or main_root is None:
-        return "HEAD", "delete-if-merged", "origin"
-    cfg, _ = load_yolo_config(
+        return "HEAD", "delete-if-merged", "origin", None
+    cfg, matched = load_yolo_config(
         pathlib.Path(main_root), home, worktree_dir=pathlib.Path(worktree), quiet=True
     )
     return (
         cfg.get("base") or "HEAD",
         cfg.get("finish_action") or "delete-if-merged",
         cfg.get("finish_remote") or "origin",
+        matched,
     )
 
 
@@ -7473,7 +7478,7 @@ def _wip_finish(kind, p, home, term) -> str:
             )
         if not term.confirm(prompt):
             return "cancelled."
-        base, action, remote = _worktree_config(home, main_root, worktree)
+        base, action, remote, _ = _worktree_config(home, main_root, worktree)
         return finish_worktree(
             worktree,
             main_root,
@@ -7494,7 +7499,7 @@ def _wip_rebase(kind, p, home, term) -> str:
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+        base, _, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return rebase_worktree(
             p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
         )
@@ -7514,7 +7519,7 @@ def _wip_merge(kind, p, home, term) -> str:
             return "couldn't resolve the worktree's main repo."
         if not term.confirm(f"Merge '{p['topic']}' into its base (keep the worktree)?"):
             return "cancelled."
-        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+        base, _, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return merge_worktree(
             p["worktree"], p["main_root"], p["slug"], p["topic"], home, base, capture=True
         )
@@ -7529,15 +7534,24 @@ def _wip_diff(kind, p, home, session) -> str:
     Diff output is large and interactive, so it can't live in the footer — it shells
     out, spawning `yolo diff <topic> --base <base> --stat` (the base from *this
     worktree's* own config, so it matches the COMMITS column and the dashboard's
-    rebase). That window shows the interactive diff-stat; Enter/Space on a file there
+    rebase; a matched project entry rides along as `--project`, so the spawned yolo
+    resolves the same entry instead of erroring when several projects share the
+    dir). That window shows the interactive diff-stat; Enter/Space on a file there
     opens its diff in yet another window."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        base, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
+        base, _, _, project = _worktree_config(home, p["main_root"], p["worktree"])
         _spawn_session_window(
             p["main_root"],
-            ["diff", p["topic"], "--base", base, "--stat"],
+            [
+                "diff",
+                p["topic"],
+                *(["--project", project] if project else []),
+                "--base",
+                base,
+                "--stat",
+            ],
             f"diff-{p['topic']}",
             session,
         )
@@ -8378,8 +8392,21 @@ def _main():
     ):
         if val and verb != "config":
             sys.exit(f"{flag} only applies to `config`.")
-    if cli_project and verb not in ("config", "start", "resume", "shell", None):
-        sys.exit("--project only applies to `start`/`resume`/`shell` and `config`.")
+    if cli_project and verb not in (
+        "config",
+        "start",
+        "resume",
+        "shell",
+        "finish",
+        "rebase",
+        "merge",
+        "diff",
+        None,
+    ):
+        sys.exit(
+            "--project only applies to `start`/`resume`/`shell`, the topic verbs "
+            "(`finish`/`rebase`/`merge`/`diff`), and `config`."
+        )
 
     if verb == "config":
         do_config(script_argv, home, cwd, parsed, topic)
@@ -8412,8 +8439,11 @@ def _main():
 
     # Every other verb gets the config defaults layered under the CLI flags
     # (so e.g. `list` honours a config-set `base`); re-parse so explicit flags win.
-    # Uses the real cwd, before any worktree retargeting below. `resume`/`shell` in
-    # worktree mode also layer that worktree's overlay on top of the project entry;
+    # Uses the real cwd, before any worktree retargeting below. `resume`/`shell` and
+    # the topic verbs (`finish`/`rebase`/`merge`/`diff`) in worktree mode also layer
+    # that worktree's overlay on top of the project entry — so the topic's own
+    # `base`/finish keys apply (matching `list` and the `wip` dashboard) and its
+    # stamped `project` pointer picks the entry when several share the dir.
     # `start` is excluded — it *creates* the overlay from the CLI flags (below), so
     # it must not also consume a stale same-path entry left by a manual removal.
     # `start --project NAME` retargets the launch to the project's primary dir:
@@ -8426,7 +8456,7 @@ def _main():
         cwd = proj_dir
 
     overlay_dir = None
-    if topic and verb in ("resume", "shell"):
+    if topic and verb in ("resume", "shell", "finish", "rebase", "merge", "diff"):
         overlay_dir, _, _ = _worktree_dir(topic, home)
     config_defaults, matched_project_key = load_yolo_config(
         cwd, home, worktree_dir=overlay_dir, project=cli_project

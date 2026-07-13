@@ -10,12 +10,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   optional extra repos (`repos`, via the repeatable `--repo PATH` flag or
   `--add-repo`/`--remove-repo` config edits), plus ordinary config keys. It's
   found by cwd (containment on `dir`) or by name — `yolo start [TOPIC]
-  --project NAME` (also `resume`/`shell`) launches it from any directory, and
+  --project NAME` (also `resume`/`shell` and the topic verbs
+  `finish`/`rebase`/`merge`/`diff`) acts on it from any directory, and
   `yolo config --project NAME` shows/creates/edits it (`--dir` inferred from
   the cwd's repo). The first config write in a directory creates its project,
   named after the directory basename (`--name` overrides). Several projects
   may share a `dir` (distinct repo sets over one primary); a bare launch there
-  asks you to pick with `--project`.
+  asks you to pick with `--project`, while an existing topic's verbs resolve
+  via the pointer its start stamped (and `wip`'s `d` passes the matched name
+  to the `yolo diff` it spawns).
 
   A multi-repo topic gets a same-named worktree+branch in *each* repo, every
   one mounted like the primary (worktree + shared `.git` at their identical

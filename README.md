@@ -364,9 +364,10 @@ That `start` creates branch `fix-auth` and a worktree in **app**, **lib**, and
 proto's mounted alongside and announced to Claude as extra working dirs (plus a
 system-prompt note explaining the layout, so it commits in each repo on the
 shared branch). `yolo start --project chat` (no topic) opens a cwd session in
-`~/work/app` from anywhere, and `resume`/`shell` accept `--project` the same
-way. In `yolo wip`, every project gets a row — `n` starts a worktree from it,
-`c` edits it.
+`~/work/app` from anywhere, and `resume`/`shell` — plus the topic verbs
+`finish`/`rebase`/`merge`/`diff` — accept `--project` the same way. In
+`yolo wip`, every project gets a row — `n` starts a worktree from it, `c`
+edits it.
 
 When creating a project by name, the primary `dir` is inferred from the repo
 you run `yolo config` in; `--dir PATH` overrides it (and is required outside a
