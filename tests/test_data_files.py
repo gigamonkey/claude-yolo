@@ -55,6 +55,27 @@ def test_container_prompt_content(cy):
     assert cy.CONTAINER_PROMPT.startswith("You are running in an ephemeral Ubuntu container")
     # Stripped, so the join in build_claude_args stays byte-identical to before.
     assert cy.CONTAINER_PROMPT == cy.CONTAINER_PROMPT.strip()
+    # Points the agent at the mounted docs dir (and the Dockerfile.yolo guide),
+    # which is the only way it learns about yolo mechanics yolo can't run in-container.
+    assert cy._DOCS_CONTAINER_DIR in cy.CONTAINER_PROMPT
+    assert "custom-dockerfile.md" in cy.CONTAINER_PROMPT
+
+
+def test_docs_dir_is_shipped_and_mount_target_is_absolute(cy):
+    """The reference-docs directory exists beside yolo.py and mounts at a fixed
+    absolute container path the container prompt can point at."""
+    assert cy._DOCS_DATA_DIR == cy._DATA_DIR / "container-docs"
+    assert cy._DOCS_DATA_DIR.is_dir()
+    assert cy._DOCS_CONTAINER_DIR.startswith("/")
+
+
+def test_dockerfile_guide_embeds_the_custom_template(cy):
+    """The mounted Dockerfile.yolo guide must carry the exact template `yolo
+    dockerfile --custom` prints (the agent can't run yolo to fetch it), and the
+    host commands that wire it up. Guards against the two drifting apart."""
+    guide = (ROOT / "container-docs" / "custom-dockerfile.md").read_text()
+    assert cy.CUSTOM_DOCKERFILE.strip() in guide
+    assert "yolo config --dockerfile ./Dockerfile.yolo" in guide
 
 
 def test_read_data_file_missing_is_a_clear_error(cy):
@@ -71,5 +92,11 @@ def test_wheel_ships_the_data_files():
     """
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"]
-    for name in ("yolo.py", "Dockerfile.default", "Dockerfile.custom", "container-prompt.txt"):
+    for name in (
+        "yolo.py",
+        "Dockerfile.default",
+        "Dockerfile.custom",
+        "container-prompt.txt",
+        "container-docs",
+    ):
         assert name in include

@@ -14,9 +14,15 @@ blast radius of "yolo mode" is the whole point: Claude can run unattended inside
 the container without touching the host beyond the bind-mounted working directory.
 
 The runtime is **`yolo.py` plus a few sibling data files** — `Dockerfile.default`,
-`Dockerfile.custom`, and `container-prompt.txt`, loaded by `_read_data_file`
-(which resolves them relative to `__file__`, following a PATH symlink the way
-`_pyproject_version` does). yolo is **runnable two ways** — standalone via its
+`Dockerfile.custom`, `container-prompt.txt`, and the `container-docs/` directory
+of reference docs, loaded by `_read_data_file` (which resolves them relative to
+`__file__`, following a PATH symlink the way `_pyproject_version` does). The
+`container-docs/` directory is bind-mounted read-only into every container at
+`_DOCS_CONTAINER_DIR` (`/opt/yolo/docs`) so the agent can consult yolo-specific
+guidance it can't otherwise discover — yolo isn't installed in the container, so
+e.g. the "how to author a `Dockerfile.yolo`" guide (`custom-dockerfile.md`, which
+the container prompt points at) has to be handed in this way. It's read-only and
+yolo's own data, so it's not a container-writable config source. yolo is **runnable two ways** — standalone via its
 PEP 723 header (`./yolo.py` self-runs under uv) or as an installed console script
 (`uv tool install`, regular or `--editable`); a PATH symlink also works. Either
 way the data files sit beside `yolo.py` (shipped in the wheel via `only-include`,
@@ -142,9 +148,9 @@ it from anywhere:
   resolving the `keyring` dep into that venv. `uv tool upgrade claude-yolo` updates
   it. The console-script wiring is `[project.scripts] yolo = "yolo:main"` in
   `pyproject.toml`; the wheel ships `yolo.py` plus its data files (`Dockerfile.default`,
-  `Dockerfile.custom`, `container-prompt.txt`) via `[tool.hatch.build.targets.wheel]
-  only-include`, so they land beside `yolo.py` in site-packages where
-  `_read_data_file` finds them.
+  `Dockerfile.custom`, `container-prompt.txt`, and the `container-docs/` directory)
+  via `[tool.hatch.build.targets.wheel] only-include`, so they land beside `yolo.py`
+  in site-packages where `_read_data_file` and the docs mount find them.
 - **Standalone**: `chmod +x yolo.py` and symlink it onto PATH
   (`ln -s "$PWD/yolo.py" ~/.local/bin/yolo`); the PEP 723 header makes it self-run,
   and a symlink keeps it tracking the repo with no build step.

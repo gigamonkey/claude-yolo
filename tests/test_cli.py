@@ -783,6 +783,14 @@ def test_default_run_uses_default_dockerfile_tag(cy, run_cli, dirs):
     assert image_tag(argv) == cy._image_tag(cy.DEFAULT_DOCKERFILE, os.getuid())
 
 
+def test_reference_docs_are_mounted_read_only(cy, run_cli, dirs):
+    """Every launch bind-mounts yolo's shipped reference docs read-only at the
+    fixed container path the container prompt points the agent at."""
+    home, work = dirs
+    argv = run_cli([], home=home, cwd=work)
+    assert f"{cy._DOCS_DATA_DIR}:{cy._DOCS_CONTAINER_DIR}:ro" in argv
+
+
 def test_custom_dockerfile_changes_the_image_tag(cy, run_cli, dirs, tmp_path):
     import os
 

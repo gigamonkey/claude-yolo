@@ -1218,7 +1218,18 @@ yolo checks the built image's user and refuses to launch with a clear message if
 it isn't `claude`, so you can't get this subtly wrong.
 
 Run `yolo dockerfile` to print the built-in default — a handy starting point, and
-the thing to read if you want to know exactly what the base provides.
+the thing to read if you want to know exactly what the base provides. `yolo
+dockerfile --custom` prints a ready-to-edit template that already layers on the
+default (the `ARG YOLO_BASE` / `FROM ${YOLO_BASE}` lines, a marked block for your
+steps, the trailing `USER claude`), heavily commented so you know exactly what to
+change. Redirect it to a file — `yolo dockerfile --custom > Dockerfile.yolo` — and
+edit from there.
+
+You can also just ask Claude to do it from inside a session: yolo mounts a short
+guide read-only at `/opt/yolo/docs/custom-dockerfile.md` and the container prompt
+points Claude at it, so it writes a correct `Dockerfile.yolo` (yolo isn't
+installed in the container, so it can't build or apply it — it'll hand you the
+`yolo config --dockerfile` command and remind you to restart the session).
 
 A Dockerfile that does **not** reference `YOLO_BASE` is treated as a full
 replacement and built as-is (the escape hatch for "I want to start over

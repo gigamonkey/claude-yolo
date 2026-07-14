@@ -147,6 +147,17 @@ CUSTOM_DOCKERFILE = _read_data_file("Dockerfile.custom")
 # ssh-agent / forwarded-ports lines stay in build_claude_args, being runtime-gated).
 CONTAINER_PROMPT = _read_data_file("container-prompt.txt").strip()
 
+# Reference docs yolo mounts read-only into every container so the agent can
+# consult yolo-specific guidance it can't otherwise discover: yolo itself isn't
+# installed in the container, so anything the agent needs to know about yolo's own
+# mechanics (how to author a Dockerfile.yolo is the first case) has to be handed in
+# this way. The directory ships beside yolo.py; it's bind-mounted read-only at
+# _DOCS_CONTAINER_DIR, which the container prompt points the agent at. Read-only
+# and yolo's own data (never user config), so nothing here is a config source a
+# container could edit to change what a later session mounts or exposes.
+_DOCS_DATA_DIR = _DATA_DIR / "container-docs"
+_DOCS_CONTAINER_DIR = "/opt/yolo/docs"
+
 # (env var -> container path) redirects applied in a cwd session (opt-out via
 # --no-redirect-build-dirs). Each points a per-OS / build dir at a fixed
 # container-local path *off* the bind mount, so a container running `uv`/`cargo`/
@@ -4887,6 +4898,13 @@ def launch_container(
     if yolorc_host:
         args += ["-v", f"{yolorc_host}:{_YOLORC_CONTAINER_PATH}:ro"]
         args += ["-e", f"YOLO_RC={_YOLORC_CONTAINER_PATH}"]
+
+    # Mount yolo's own reference docs read-only so the agent can read the guidance
+    # the container prompt points it to (notably how to author a Dockerfile.yolo).
+    # yolo isn't installed in the container, so these shipped files are the only way
+    # that yolo-specific knowledge reaches the agent. Read-only: the container can't
+    # edit them, and they're yolo's data — not a host-config source.
+    args += ["-v", f"{_DOCS_DATA_DIR}:{_DOCS_CONTAINER_DIR}:ro"]
 
     if parsed.ssh_agent:
         # Forward the host ssh-agent. The source socket differs by host:

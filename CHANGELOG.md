@@ -3,6 +3,18 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **yolo now mounts its own reference docs into every container** (read-only at
+  `/opt/yolo/docs`) and the container prompt points Claude at them. The first
+  doc is a guide to authoring a `Dockerfile.yolo`: since yolo isn't installed in
+  the container, Claude previously had no reliable way to learn the mechanics —
+  now, asked to create or customize a container image, it reads
+  `/opt/yolo/docs/custom-dockerfile.md`, writes a correct file, and hands you the
+  `yolo config --dockerfile` command (it can't build or apply the image from
+  inside the container). The template `yolo dockerfile --custom` prints is also
+  more thoroughly commented.
+
 ## v0.27.0 — 2026-07-13
 
 - **Projects are now named, and can span several git repos.** A project is a

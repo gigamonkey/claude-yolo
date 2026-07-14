@@ -1,27 +1,42 @@
-# Custom yolo Dockerfile — layers your own steps on top of yolo's built-in image.
+# Custom yolo Dockerfile — layers your own build steps on top of yolo's built-in
+# image. Save it as `Dockerfile.yolo` in your project, then point yolo at it:
 #
-# Use it with:
-#   yolo --dockerfile ./Dockerfile.yolo          # one run
 #   yolo config --dockerfile ./Dockerfile.yolo   # persist it for this project
+#   yolo --dockerfile ./Dockerfile.yolo          # ...or just for one run
 #
-# Because this file references YOLO_BASE, yolo builds its default image first and
-# passes the tag in as the YOLO_BASE build arg, so you inherit the `claude` user
-# (with passwordless sudo), the native Claude install, PATH, and the ENTRYPOINT.
-# Keep the two lines just below.
+# yolo builds the image on the HOST (not inside the container), so an edit here
+# takes effect on the NEXT `yolo` launch — leave the current session and start a
+# new one. `yolo dockerfile --custom` reprints this template; `yolo dockerfile`
+# prints the full default image if you want to see exactly what you inherit.
+#
+# --- how it works -----------------------------------------------------------
+# The two lines just below are load-bearing: referencing YOLO_BASE is what makes
+# yolo build its default image first and pass that tag in as the YOLO_BASE build
+# arg. That's how you inherit everything the default provides — the `claude` user
+# (with passwordless sudo), the native Claude install, PATH, and the ENTRYPOINT —
+# without repeating any of it. Keep both lines.
 
 ARG YOLO_BASE
 FROM ${YOLO_BASE}
 
-# The base leaves you as the `claude` user, which has passwordless sudo. Bake in
-# cross-cutting tools you want in every session here; project-specific or heavy
-# ones are better installed on demand inside the container. For example:
+# --- add your customizations below ------------------------------------------
+# You start as the `claude` user, which has passwordless sudo, so install system
+# packages with `RUN sudo apt-get ...`. Bake in cross-cutting tools you want in
+# every session; leave heavy or project-specific ones to install on demand inside
+# the container. The build context is EMPTY by design (a security property: it
+# stops a Dockerfile from copying host files into the image), so you can't `COPY`
+# files out of your project — fetch what you need during the build (curl/git) or
+# install it at runtime instead. For example:
 #
 #   RUN sudo apt-get update && sudo apt-get install -y postgresql-client
+#   RUN curl -fsSL https://example.com/tool -o /tmp/tool \
+#       && sudo install /tmp/tool /usr/local/bin/tool
 
-# --- your customizations go here ---
 
 
-# Keep this last. yolo passes no -u, so the image's final USER is the runtime
-# user, and it refuses to launch an image that doesn't run as `claude` (a root
-# image would write your bind-mounted files as root).
+# --- keep this last ---------------------------------------------------------
+# yolo passes no `-u` to `docker run`, so the image's final USER is the container's
+# runtime user, and yolo refuses to launch an image whose user isn't `claude` (a
+# root image would write your bind-mounted files as root). If you `USER root` to do
+# work above, switch back here.
 USER claude
