@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `yolo wip` config editor can now rename a project.** On a registered
+  project entry, `r` prompts for a new name and renames it in place —
+  re-pointing its worktree overlays — the same operation as
+  `yolo config --project OLD --name NEW` on the CLI, without leaving the
+  dashboard.
+
 - **yolo now mounts its own reference docs into every container** (read-only at
   `/opt/yolo/docs`) and the container prompt points Claude at them. The first
   doc is a guide to authoring a `Dockerfile.yolo`: since yolo isn't installed in

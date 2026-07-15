@@ -7720,6 +7720,26 @@ class _ConfigScope:
         items, _ = _effective_config(self.home, self._base_cwd)
         return [(k, v, s) for (k, v, s) in items if k not in editable]
 
+    @property
+    def name(self) -> str:
+        """The scope's entry key — for a project entry, its project name."""
+        return self._entry_key
+
+    @property
+    def renameable(self) -> bool:
+        """A *registered* project entry (addressed by `--project NAME`) can be
+        renamed in place. Worktree overlays have no name, and a not-yet-registered
+        dir's entry doesn't exist to rename — both are left alone."""
+        return "--project" in self.config_args
+
+    def rebind(self, new_name: str) -> None:
+        """Retarget this project scope at `new_name` after a rename, so later edits
+        in the same editor session address the renamed entry instead of recreating
+        the old one. Only meaningful when `renameable` (a `--project NAME` scope)."""
+        self.label = f"project {new_name}"
+        self._entry_key = new_name
+        self.config_args = ["config", "--project", new_name]
+
 
 def _config_scope(kind, payload, home):
     """Resolve a wip row to its _ConfigScope, or None if it has no editable layer."""
@@ -7959,7 +7979,8 @@ def _draw_config_editor(scope, entry, keys, inherited, sel, msg) -> None:
             print(
                 f"\x1b[90m  {k:<{width}}  {_config_value_display(v)}  [{', '.join(sources)}]\x1b[0m"
             )
-    print("\n\x1b[90mEnter edit · a add key · x remove · e raw flags · q done\x1b[0m")
+    rename = " · r rename" if scope.renameable else ""
+    print(f"\n\x1b[90mEnter edit · a add key · x remove{rename} · e raw flags · q done\x1b[0m")
     print(f"\x1b[1;33m{msg}\x1b[0m" if msg else "")
 
 
@@ -7967,8 +7988,10 @@ def _config_editor_loop(scope, term) -> str:
     """`c`: an interactive editor of one config layer (a worktree overlay or project
     entry). Shows the current values + the inherited lower layers (read-only), and
     edits/adds/removes keys — each change run through `yolo config`, reusing its
-    validation and persistence. Returns a footer for the dashboard; plain Enter then
-    launches with the saved config (the dashboard re-resolves config live).
+    validation and persistence. On a registered project entry, `r` renames the
+    project itself (re-pointing its worktree overlays, then rebinding this scope to
+    the new name). Returns a footer for the dashboard; plain Enter then launches
+    with the saved config (the dashboard re-resolves config live).
     """
     sel, msg = 0, ""
     while True:
@@ -7998,6 +8021,20 @@ def _config_editor_loop(scope, term) -> str:
         elif k == "x" and keys:
             if term.confirm(f"unset {keys[sel]}?"):
                 msg = _config_apply(scope, ["--unset", keys[sel]])[1]
+        elif k == "r" and scope.renameable:
+            # Rename the project entry itself (not a key). Runs `yolo config
+            # --project OLD --name NEW`, which re-points its worktree overlays;
+            # rebind the scope so subsequent edits target the new name rather than
+            # recreating the old entry.
+            old = scope.name
+            new = term.prompt_line(f"rename project '{old}' to: ")
+            if not new or new == old:
+                msg = "cancelled."
+            else:
+                ok, msg = _config_apply(scope, ["--name", new])
+                if ok:
+                    scope.rebind(new)
+                    msg = f"renamed project '{old}' to '{new}'."
         elif k == "e":
             raw = term.prompt_line("raw config flags: ")
             if raw:

@@ -1026,6 +1026,62 @@ def test_c_shows_current_values_and_inherited(cy, monkeypatch, tmp_path, capsys)
     assert "inherited" in out and "base" in out and "main" in out  # read-only lower layer
 
 
+def test_c_rename_project_entry(cy, monkeypatch, tmp_path, capsys):
+    # `r` on a registered project entry renames it via `config --project OLD
+    # --name NEW`, then rebinds the scope so later edits target the new name.
+    calls = _stub_config_run(cy, monkeypatch)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    scope = cy._config_scope("project", {"path": str(proj), "name": "old"}, tmp_path)
+    assert scope.renameable
+    msg = cy._config_editor_loop(scope, FakeTerm(["r", "q"], lines=["fresh"]))
+    ((cmd, cwd),) = calls
+    assert cmd == ["yolo", "config", "--project", "old", "--name", "fresh"]
+    assert cwd == str(proj)
+    # the scope rebinds, so a subsequent edit would hit `--project fresh`, not `old`
+    assert scope.name == "fresh"
+    assert scope.config_args == ["config", "--project", "fresh"]
+    out = capsys.readouterr().out
+    assert "r rename" in out  # the hint shows for a renameable scope
+    assert "renamed project 'old' to 'fresh'." in out  # the confirmation frame
+    assert "project fresh" in msg  # final footer reflects the new label
+
+
+def test_c_rename_cancel_on_blank_or_same(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    scope = cy._config_scope("project", {"path": str(proj), "name": "old"}, tmp_path)
+    cy._config_editor_loop(scope, FakeTerm(["r", "r", "q"], lines=["", "old"]))
+    assert calls == []  # neither a blank nor an unchanged name runs config
+    assert scope.name == "old"
+
+
+def test_c_rename_failure_keeps_old_name(cy, monkeypatch, tmp_path, capsys):
+    _stub_config_run(cy, monkeypatch, returncode=2, stderr="a project named 'taken' already exists.")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    scope = cy._config_scope("project", {"path": str(proj), "name": "old"}, tmp_path)
+    cy._config_editor_loop(scope, FakeTerm(["r", "q"], lines=["taken"]))
+    assert scope.name == "old"  # no rebind on a failed rename
+    assert "already exists" in capsys.readouterr().out
+
+
+def test_c_rename_not_offered_on_non_project_scopes(cy, monkeypatch, tmp_path, capsys):
+    # Worktree overlays have no name; an unregistered recent dir has no entry — `r`
+    # is inert on both, and the hint is absent.
+    calls = _stub_config_run(cy, monkeypatch)
+    wt = cy._config_scope("worktree", WT_PAYLOAD, tmp_path)
+    assert not wt.renameable
+    cy._config_editor_loop(wt, FakeTerm(["r", "q"]))  # `r` falls through, no subprocess
+    proj = tmp_path / "p"
+    proj.mkdir()
+    unreg = cy._config_scope("project", {"path": str(proj)}, tmp_path)  # no name
+    assert not unreg.renameable
+    assert calls == []
+    assert "r rename" not in capsys.readouterr().out
+
+
 # --- config-editor units ----------------------------------------------------
 
 
