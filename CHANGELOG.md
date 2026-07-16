@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.28.1 — 2026-07-16
 
 - **A background shell no longer pins a session at `agenting`.** The `Stop`
   hook's still-running-background-work test counted *every* running background
