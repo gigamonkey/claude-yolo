@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.28.0 — 2026-07-16
 
 - **New session state: `agenting` — a session waiting on its own background
   agents.** Previously a session whose turn ended while background agents or
