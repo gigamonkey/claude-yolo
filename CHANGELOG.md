@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The custom-Dockerfile template no longer emits a BuildKit lint warning.**
+  A layering `Dockerfile.yolo` (`ARG YOLO_BASE` / `FROM ${YOLO_BASE}`) tripped
+  BuildKit's `InvalidDefaultArgInFrom` check — cosmetic, since yolo always
+  injects the base tag as a build arg, but alarming to see. The template (and
+  its embedded copy in the custom-Dockerfile guide) now carries a
+  `# check=skip=InvalidDefaultArgInFrom` directive on line 1 to silence it.
+  Existing `Dockerfile.yolo` files can add that same line to quiet the warning.
+
 - **`Esc` now cancels the `yolo wip` line prompts.** Pressing `Esc` while
   entering a new-worktree topic (or any other dashboard prompt — port, config
   values, project rename) cancels the action instead of waiting for `Enter`.

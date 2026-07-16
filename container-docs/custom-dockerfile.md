@@ -27,6 +27,11 @@ Write this to `Dockerfile.yolo` in the project root and edit the marked block.
 This is exactly what `yolo dockerfile --custom` prints on the host:
 
 ```dockerfile
+# check=skip=InvalidDefaultArgInFrom
+# ^ Keep on line 1. Silences a harmless BuildKit lint warning: YOLO_BASE has no
+#   default because yolo always injects the base-image tag as a build arg, but the
+#   linter evaluates `FROM ${YOLO_BASE}` with the empty default and flags it.
+#
 # Custom yolo Dockerfile — layers your own build steps on top of yolo's built-in
 # image. Save it as `Dockerfile.yolo` in your project, then point yolo at it:
 #
