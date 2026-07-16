@@ -3762,7 +3762,10 @@ PARSER.add_argument(
     action="store_true",
     default=False,
     dest="rebuild_image",
-    help="Force a Docker image rebuild from scratch (passes --no-cache to docker build).",
+    help="Force a from-scratch Docker image rebuild (passes --no-cache to docker "
+    "build). On a launch (start/resume/shell) it rebuilds that session's image; "
+    "`yolo wip --rebuild-image` rebuilds the default image on its own (the dashboard's "
+    "`B` key spawns exactly that).",
 )
 PARSER.add_argument(
     "-v",
@@ -7140,7 +7143,7 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     # q only works (and is only advertised) once no sessions are running — see
     # the quit guard in _wip_loop.
     quit_hint = "" if sections["session"] else " · q quit"
-    print(f"\x1b[90mupdated {now} · a add-project · j/k move{quit_hint}\x1b[0m")
+    print(f"\x1b[90mupdated {now} · a add-project · B rebuild-image · j/k move{quit_hint}\x1b[0m")
     print(
         f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m" if not footer else f"\x1b[1;33m{footer}\x1b[0m"
     )
@@ -7317,6 +7320,11 @@ def _wip_action(key, item, home, session, term) -> str:
             except YoloError as e:
                 return str(e)
         return _wip_add_project(home, term)
+    if key == "B":  # rebuild the default image from scratch (global; no row needed)
+        try:
+            return _wip_rebuild_image(session, term)
+        except YoloError as e:
+            return str(e)
     if item is None:
         return ""
     kind, p = item.kind, item.payload
@@ -8124,6 +8132,44 @@ def _wip_add_project(home, term) -> str:
         return str(e)
 
 
+def _wip_rebuild_image(session, term) -> str:
+    """`B`: rebuild the default image from scratch (docker build --no-cache).
+
+    A global action — no selected row needed. Because image tags are content-addressed
+    on the Dockerfile text, the fresh image lands under the very tag every subsequent
+    launch already resolves to, so new sessions pick it up via a normal cache hit with
+    no flag to propagate. Customs that layer on YOLO_BASE rebuild on their next launch
+    too (their `FROM` resolves to the new base image id); a fully-custom image (no
+    YOLO_BASE) is decoupled and unaffected — rebuild it with `yolo start --rebuild-image`.
+    Spawned into its own window (running `yolo wip --rebuild-image`) so the build streams
+    there and the dashboard stays put.
+    """
+    if not term.confirm("Rebuild the default yolo image from scratch? (slow)"):
+        return "cancelled."
+    _spawn_window(
+        pathlib.Path.home(),
+        [_self_invocation(), "wip", "--rebuild-image"],
+        "yolo-rebuild-image",
+        session,
+    )
+    return "rebuilding the default image (--no-cache) in a new window…"
+
+
+def do_rebuild_image() -> None:
+    """`yolo wip --rebuild-image`: rebuild the default image with --no-cache, then exit.
+
+    The dashboard's `B` key spawns this into a window, but it also stands alone as a
+    hand-typed command. Builds DEFAULT_DOCKERFILE from scratch under its
+    content-addressed tag, so every subsequent launch that resolves to that tag reuses
+    the fresh image via a normal cache hit. No tmux needed — it just builds and prints.
+    """
+    uid = os.getuid()
+    tag = _image_tag(DEFAULT_DOCKERFILE, uid)
+    print(f"Rebuilding the default yolo image {tag} from scratch (--no-cache)…\n")
+    build_docker_image(DEFAULT_DOCKERFILE, tag, uid, no_cache=True)
+    print("\nDone — new sessions will use the freshly built image.")
+
+
 def do_wip(home, *, dashboard, tmux_session) -> None:
     """`wip` verb: open (or run) the tmux dashboard for managing yolo work.
 
@@ -8633,6 +8679,9 @@ def _main():
     # Terminal verbs (no credential config needed) — handle and return.
     if verb == "ps":
         do_ps(home, watch=parsed.watch)
+        return
+    if verb == "wip" and parsed.rebuild_image:
+        do_rebuild_image()
         return
     if verb == "wip":
         do_wip(home, dashboard=parsed.wip_dashboard, tmux_session=parsed.tmux_session)

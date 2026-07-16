@@ -5,6 +5,18 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip` can now rebuild the default image, and `yolo wip --rebuild-image`
+  finally does something.** The dashboard's new **`B`** key rebuilds the default
+  image from scratch (`docker build --no-cache`, after a confirm) in its own
+  window — handy when a baked-in tool such as Claude Code has gone stale.
+  Standalone, `yolo wip --rebuild-image` does the same and exits (previously the
+  flag was silently ignored on `wip`, since it only ever took effect on a launch
+  verb). Because image tags are content-addressed on the Dockerfile text, the
+  fresh image lands under the tag every subsequent launch already resolves to, so
+  new sessions pick it up via a normal cache hit — no flag to pass. Customs that
+  layer on `YOLO_BASE` rebuild on their next launch too; a fully-custom image
+  (no `YOLO_BASE`) still needs `yolo start --rebuild-image` in its own session.
+
 - **The custom-Dockerfile template no longer emits a BuildKit lint warning.**
   A layering `Dockerfile.yolo` (`ARG YOLO_BASE` / `FROM ${YOLO_BASE}`) tripped
   BuildKit's `InvalidDefaultArgInFrom` check — cosmetic, since yolo always

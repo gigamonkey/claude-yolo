@@ -593,6 +593,7 @@ the selected row:
 | `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (confirms) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row — and a name, defaulting to the dir basename) |
+| `B`     | anything                         | rebuild the default image from scratch (`docker build --no-cache`, confirms) in a new window — new sessions pick up the fresh image with no flag to pass, since image tags are content-addressed (see below) |
 | `q`     | anything                         | quit the dashboard — only once **no sessions are running** (the footer explains the refusal otherwise; stop them with `s` first). If the dashboard window is nonetheless gone while the tmux session lives on, `yolo wip` respawns it. |
 
 `f` and `r` won't interrupt an actively `working` session: applied to a worktree
@@ -1359,7 +1360,15 @@ A few flags are deliberately *not* config keys:
 
 - **`--rebuild-image`** — pass `--no-cache` to `docker build`, forcing a full
   image rebuild (useful when a baked-in tool such as Claude Code itself is
-  stale).
+  stale). On a launch (`start`/`resume`/`shell`) it rebuilds that session's
+  image; **`yolo wip --rebuild-image`** rebuilds the *default* image on its own
+  and exits — the same thing the dashboard's `B` key spawns. Because image tags
+  are content-addressed on the Dockerfile text, the fresh image lands under the
+  very tag every subsequent launch already resolves to, so new sessions pick it
+  up via a normal cache hit with no flag to pass. Custom Dockerfiles that layer
+  on `YOLO_BASE` rebuild on their next launch too (their `FROM` resolves to the
+  new base image); a fully-custom image (no `YOLO_BASE`) is decoupled — rebuild
+  it with `yolo start --rebuild-image` in its own session.
 
 - **`--verbose` / `-v`** — print the full `docker run` command before launching.
   It's hidden by default (it's long and rarely legible); this brings it back for

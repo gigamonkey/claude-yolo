@@ -1058,7 +1058,9 @@ def test_c_rename_cancel_on_blank_or_same(cy, monkeypatch, tmp_path):
 
 
 def test_c_rename_failure_keeps_old_name(cy, monkeypatch, tmp_path, capsys):
-    _stub_config_run(cy, monkeypatch, returncode=2, stderr="a project named 'taken' already exists.")
+    _stub_config_run(
+        cy, monkeypatch, returncode=2, stderr="a project named 'taken' already exists."
+    )
     proj = tmp_path / "proj"
     proj.mkdir()
     scope = cy._config_scope("project", {"path": str(proj), "name": "old"}, tmp_path)
@@ -1219,6 +1221,64 @@ def test_add_project_on_registered_still_prompts(cy, monkeypatch, tmp_path):
     }
     run_loop(cy, monkeypatch, sections, ["a", "q"], lines=[str(d), "mylabel"])
     assert registered == [(str(d.resolve()), "mylabel")]
+
+
+# --- rebuild-image (the `B` key) --------------------------------------------
+
+
+def test_draw_wip_advertises_rebuild_image_key(cy, capsys):
+    empty = {"session": [], "worktree": [], "project": []}
+    cy._draw_wip(empty, None, "")
+    assert "B rebuild-image" in capsys.readouterr().out
+
+
+def test_B_confirmed_spawns_rebuild_window(cy, monkeypatch):
+    # `B` (global — works with no selected row) spawns `yolo wip --rebuild-image`
+    # in a dedicated window after a confirm.
+    monkeypatch.setattr(cy, "_self_invocation", lambda: "yolo")
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_window", lambda cwd, cmd, name, sess, **k: spawned.append((cmd, name))
+    )
+    sections = {"session": [], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["B", "q"], confirms=[True])
+    ((cmd, name),) = spawned
+    assert cmd == ["yolo", "wip", "--rebuild-image"]
+    assert name == "yolo-rebuild-image"
+    assert "rebuilding the default image" in frames[-1][1]
+
+
+def test_B_cancelled_does_not_spawn(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
+    sections = {"session": [], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["B", "q"], confirms=[False])
+    assert spawned == []
+    assert "cancelled" in frames[-1][1]
+
+
+def test_do_rebuild_image_builds_default_no_cache(cy, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cy, "build_docker_image", lambda text, tag, uid, **k: calls.append((text, tag, uid, k))
+    )
+    cy.do_rebuild_image()
+    ((text, tag, uid, kw),) = calls
+    assert text == cy.DEFAULT_DOCKERFILE
+    assert tag == cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)  # content-addressed, unchanged
+    assert kw == {"no_cache": True}
+
+
+def test_wip_rebuild_image_flag_routes_to_rebuild(cy, run_cli, monkeypatch, tmp_path):
+    # `yolo wip --rebuild-image` rebuilds the default image and exits — it never
+    # falls through to the dashboard bootstrap (do_wip).
+    called = []
+    monkeypatch.setattr(cy, "do_rebuild_image", lambda: called.append("rebuild"))
+    monkeypatch.setattr(cy, "do_wip", lambda *a, **k: called.append("wip"))
+    home = tmp_path / "home"
+    home.mkdir()
+    run_cli(["wip", "--rebuild-image"], home=home, cwd=tmp_path)
+    assert called == ["rebuild"]
 
 
 # --- bootstrap / dashboard role ---------------------------------------------
