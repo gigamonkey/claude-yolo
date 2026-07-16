@@ -6520,48 +6520,52 @@ def _complete_path(text):
 
 
 class _PickerTerm:
-    """The terminal surface a picker loop draws on: key input + cooked prompts.
+    """The terminal surface a picker loop draws on: key input + line prompts.
 
-    Wraps the cbreak-mode stdin fd so the loop can read keys (`wait_key`), drop
-    briefly back to cooked mode for a line of input (`prompt_line`, the `wip`
-    dashboard's topic/port prompts), read a directory path with hand-rolled
-    Tab-completion (`prompt_path`), and ask a one-key yes/no (`confirm`). A small
-    object rather than loose functions so a test can inject a fake with scripted
-    inputs, exactly as the loops take an injectable key source.
+    Wraps the cbreak-mode stdin fd so the loop can read keys (`wait_key`), read a
+    line of input (`prompt_line`, the `wip` dashboard's topic/port prompts), read a
+    directory path with hand-rolled Tab-completion (`prompt_path`), and ask a
+    one-key yes/no (`confirm`). The line prompts stay in cbreak and read keys raw
+    (`_prompt_raw`) so Esc cancels immediately. A small object rather than loose
+    functions so a test can inject a fake with scripted inputs, exactly as the loops
+    take an injectable key source.
     """
 
-    def __init__(self, fd: int, saved):
+    def __init__(self, fd: int):
         self.fd = fd
-        self.saved = saved
 
     def wait_key(self, timeout: float) -> str | None:
         return _wait_key(self.fd, timeout)
 
     def prompt_line(self, prompt: str) -> str:
-        """Read one cooked line (echoing, with the cursor shown), then re-cbreak."""
-        import termios
-        import tty
+        """Read one line in cbreak mode; Esc/Ctrl-C cancel → "". No Tab completion.
 
-        sys.stdout.write("\x1b[?25h")  # show the cursor for typing
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
-        try:
-            return input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            return ""
-        finally:
-            tty.setcbreak(self.fd)
-            sys.stdout.write("\x1b[?25l")
+        Reads keys raw (via `_prompt_raw`) rather than dropping to cooked `input()`,
+        so Esc cancels the prompt the instant it's pressed — cooked input can't see
+        Esc until Enter, which is why the `wip` dashboard's topic/port/config prompts
+        couldn't be escaped out of before.
+        """
+        return self._prompt_raw(prompt)
 
     def prompt_path(self, prompt: str) -> str:
         """Read a directory path with shell-style Tab-completion, in cbreak mode.
 
-        Deliberately does *not* use readline/`input()`: the macOS Python uv ships
-        links libedit, whose Tab completion never engages here (Tab just self-inserts
-        a literal tab). Instead we read keys raw — the terminal is already in cbreak
-        mode for the picker — echo them ourselves, and complete directories via
-        `_complete_path`. Handles Backspace, Enter (done), and Esc/Ctrl-C (cancel →
-        ""). Cursor stays at end of line (no mid-line editing); redraws the whole
-        line each keystroke. Returns the entered path (stripped), or "" if cancelled.
+        A `_prompt_raw` with `_complete_path` bound to Tab. Deliberately does *not*
+        use readline/`input()`: the macOS Python uv ships links libedit, whose Tab
+        completion never engages here (Tab just self-inserts a literal tab).
+        """
+        return self._prompt_raw(prompt, complete=_complete_path)
+
+    def _prompt_raw(self, prompt: str, complete=None) -> str:
+        """Read a line of input with the terminal already in cbreak mode.
+
+        We read keys raw and echo them ourselves — the only way Esc can cancel the
+        instant it's pressed (cooked `input()` can't see Esc until Enter). `complete`,
+        when given, is a `text -> (new_text, options)` function bound to Tab (used by
+        `prompt_path` for directory completion); without it Tab is ignored. Handles
+        Backspace, Enter (done), and Esc/Ctrl-C (cancel → ""). Cursor stays at end of
+        line (no mid-line editing); redraws the whole line each keystroke. Returns the
+        entered text (stripped), or "" if cancelled.
         """
         buf = ""
 
@@ -6587,8 +6591,8 @@ class _PickerTerm:
                     buf = buf[:-1]
                     redraw()
                     continue
-                if ch == b"\t":
-                    buf, options = _complete_path(buf)
+                if ch == b"\t" and complete:
+                    buf, options = complete(buf)
                     if options:
                         sys.stdout.write("\r\n" + "  ".join(options) + "\r\n")
                     redraw()
@@ -6629,7 +6633,7 @@ def _run_picker(body) -> None:
     tty.setcbreak(fd)
     sys.stdout.write("\x1b[?25l")  # hide the cursor; restored in the finally
     try:
-        body(_PickerTerm(fd, saved))
+        body(_PickerTerm(fd))
     except KeyboardInterrupt:
         pass
     finally:

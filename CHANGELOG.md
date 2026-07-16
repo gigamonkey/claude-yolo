@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`Esc` now cancels the `yolo wip` line prompts.** Pressing `Esc` while
+  entering a new-worktree topic (or any other dashboard prompt — port, config
+  values, project rename) cancels the action instead of waiting for `Enter`.
+  The line prompts now read keys raw in cbreak mode, the same way the
+  Tab-completing path prompt already did, so `Esc`/`Ctrl-C` back out
+  immediately.
+
 - **The `yolo wip` config editor can now rename a project.** On a registered
   project entry, `r` prompts for a new name and renames it in place —
   re-pointing its worktree overlays — the same operation as
