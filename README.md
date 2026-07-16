@@ -215,8 +215,9 @@ and otherwise starts a fresh throwaway container; either way the prompt is
 flagged so you know where you are (`yolo:<dir>$`). `stop` stops the running
 container for this directory (or a worktree's, with a name); the session
 transcript is kept, so you can `yolo resume` it later. `stop` won't cut off a
-session that's actively working unless you pass `--force` (an idle session, or
-one you've only opened a `yolo shell` into, stops without complaint).
+session that's actively working — or `agenting`, waiting on background agents it
+launched — unless you pass `--force` (an idle session, or one you've only opened
+a `yolo shell` into, stops without complaint).
 
 ### Worktree mode
 
@@ -267,8 +268,8 @@ Verb details:
   if the worktree has uncommitted changes (`git rebase` needs a clean tree). A
   *running* container is handled by session activity, not refused outright: if
   the session is idle (`waiting`, per `yolo ps`) the rebase goes through; if it's
-  actively `working` (or can't be confirmed idle) it's refused unless you pass
-  `--force`. A rebase that hits conflicts is left in-progress in the worktree for
+  actively `working` or `agenting` (or can't be confirmed idle) it's refused
+  unless you pass `--force`. A rebase that hits conflicts is left in-progress in the worktree for
   you to `git rebase --continue` or `git rebase --abort`.
 
 - **`merge TOPIC`** merges the worktree's branch into `--base` (default `HEAD`)
@@ -297,7 +298,7 @@ Verb details:
 
 - **`finish TOPIC`** stops a running container for you first — as `yolo stop`
   would — so a quiescent session can be closed and cleaned up in one step; an
-  actively `working` session is refused unless you pass `--force`. It also
+  actively `working` (or `agenting`) session is refused unless you pass `--force`. It also
   refuses if there are uncommitted changes (override with `--force`). What it
   does with the branch after removing the worktree is set by
   [`--finish-action`](#finish-action---finish-action-mode-default-delete-if-merged)
@@ -529,9 +530,13 @@ to that terminal, or exit the session and resume again (or use `yolo shell` for 
 second view into it).
 
 The **STATE** column tells you which sessions need you: `working 12s` while
-Claude is busy (time since your last prompt), or `waiting 5m` once it has
-finished responding and is sitting at the prompt (time since it stopped). This is driven by Claude Code **hooks** that yolo
-injects into each session — a `Stop` hook records when Claude finishes, a
+Claude is busy (time since your last prompt), `waiting 5m` once it has
+finished responding and is sitting at the prompt (time since it stopped), or
+`agenting 3m` when its turn ended but background agents or tasks it launched are
+still running — it doesn't need you yet; it will wake up and act again on its
+own when they finish. This is driven by Claude Code **hooks** that yolo
+injects into each session — a `Stop` hook records when Claude finishes (and
+checks for still-running background agents to tell `waiting` from `agenting`), a
 `UserPromptSubmit` hook records when you reply — so it reflects the real
 conversation state, not container CPU. A session that hasn't interacted yet (or
 one started by an older yolo) shows `-`. Injecting these hooks has one
@@ -558,7 +563,8 @@ in three sections:
 - **Sessions** — every running yolo session across all repos, in one table
   (SESSION / TOPIC / CREATED / PORTS / STATE). Rows are grouped by state — unknown
   (a `yolo shell`, or a session that hasn't taken a turn) first, then **waiting**,
-  then **working** — and within each group sorted by least-recent activity first,
+  then **agenting**, then **working** — and within each group sorted by
+  least-recent activity first,
   so reading top to bottom runs from "longest idle / least recently touched" toward
   "busy right now". The groups are told apart by color rather than blank lines.
 - **Worktrees** — every worktree across all repos (a la `yolo list --all`),
@@ -596,9 +602,9 @@ the selected row:
 | `B`     | anything                         | rebuild the default image from scratch (`docker build --no-cache`, confirms) in a new window — new sessions pick up the fresh image with no flag to pass, since image tags are content-addressed (see below) |
 | `q`     | anything                         | quit the dashboard — only once **no sessions are running** (the footer explains the refusal otherwise; stop them with `s` first). If the dashboard window is nonetheless gone while the tmux session lives on, `yolo wip` respawns it. |
 
-`f` and `r` won't interrupt an actively `working` session: applied to a worktree
-(or an idle `waiting` session) they go through, but a worktree whose session is
-busy refuses in the footer — stop it with `s` first. This is the same
+`f` and `r` won't interrupt an actively `working` (or `agenting`) session:
+applied to a worktree (or an idle `waiting` session) they go through, but a
+worktree whose session is busy refuses in the footer — stop it with `s` first. This is the same
 not-interrupt-active-work stance `yolo stop`/`yolo rebase` take on the command
 line. Each worktree's base and finish settings come from **its own repo's config**
 (that repo's `projects.json` entry + worktree overlay + global `~/.yolo.json`),
@@ -1314,7 +1320,8 @@ modes:
 - **`keep`** — leave the branch alone (just clean up the worktree).
 
 Every mode first stops a running container (refusing only an actively `working`
-session unless `--force`) and refuses on uncommitted changes (unless `--force`).
+or `agenting` session unless `--force`) and refuses on uncommitted changes
+(unless `--force`).
 Set it in config to make e.g. `merge` your default `finish`, or pass
 `--finish-action` for a one-off.
 
@@ -1659,11 +1666,14 @@ launch, so you can see exactly what's happening.
   tool provides. (A `/doctor` sandbox note may still appear; that's expected.)
 
 - **Session-state hooks (the `ps` STATE column).** To know whether a session is
-  `working 12s` or `waiting 5m`, claude-yolo injects two Claude Code hooks into every
-  session via that same `--settings` overlay: a `Stop` hook that records when
-  Claude finishes responding and a `UserPromptSubmit` hook that records when you
-  reply. Each writes a tiny timestamp file under `<config-dir>/.yolo-status/`,
-  which `ps` reads back. Because `--settings` *replaces* the whole `hooks` key
+  `working 12s`, `waiting 5m`, or `agenting 3m`, claude-yolo injects two Claude
+  Code hooks into every session via that same `--settings` overlay: a `Stop` hook
+  that records when Claude finishes responding (checking its hook input's
+  `background_tasks` for still-running background agents/tasks to tell `agenting`
+  from plain `waiting` — needs `jq` in the image and Claude Code ≥2.1.198; without
+  either it just records `waiting`) and a `UserPromptSubmit` hook that records
+  when you reply. Each writes a tiny timestamp file under
+  `<config-dir>/.yolo-status/`, which `ps` reads back. Because `--settings` *replaces* the whole `hooks` key
   rather than merging it (only `permissions` merges across settings sources),
   claude-yolo reads the `hooks` from the mounted `settings.json` /
   `settings.local.json` and folds yolo's onto them so your own hooks still fire;

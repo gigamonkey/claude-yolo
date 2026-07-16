@@ -1460,7 +1460,7 @@ def _repo_slug_or_none() -> str | None:
 
 
 # Per-session activity state (see _read_session_state / build_claude_args hooks):
-# a session's Stop/UserPromptSubmit hooks write waiting/working + a timestamp to
+# a session's Stop/UserPromptSubmit hooks write waiting/agenting/working + a timestamp to
 # <config-dir>/.yolo-status/<cwd-slug>.state, which `ps` reads back. The dir lives
 # under the config dir because that's the one host-writable bind mount available
 # from inside the container (the project tree would pollute the repo, and
@@ -4181,8 +4181,16 @@ def build_claude_args(
     settings: dict = {"sandbox": {"enabled": False}}
     if status_state_path:
         # Session-activity hooks, each writing "<state> <epoch>" to the status file
-        # `ps`/`wip` read. Two turn-boundary events: Stop = "now waiting for input",
-        # UserPromptSubmit = "working again". Plus the AskUserQuestion tool, which
+        # `ps`/`wip` read. Two turn-boundary events: Stop = the turn ended,
+        # UserPromptSubmit = "working again". Stop tells apart two kinds of ending
+        # from its stdin JSON: when `background_tasks` (Claude Code ≥2.1.198) still
+        # lists a running background agent/task, the session will wake and act again
+        # on its own, so it's marked "agenting" rather than "waiting" — and when
+        # that auto-resumed turn ends, Stop fires again and flips it to plain
+        # "waiting" once nothing is left running. jq does the inspection; if it's
+        # missing (a custom image) or the field is absent (an older claude), the
+        # test fails closed to "waiting" — the pre-agenting behavior, no regression.
+        # Plus the AskUserQuestion tool, which
         # blocks *mid-turn* for the user's answer without ending the turn — so Stop
         # never fires and the session would otherwise still read "working" while it
         # actually waits. Its PreToolUse marks waiting (the question is about to
@@ -4199,7 +4207,11 @@ def build_claude_args(
         hooks: dict = {}
         for event, groups in (extra_hooks or {}).items():
             hooks.setdefault(event, []).extend(groups)
-        hooks.setdefault("Stop", []).append({"hooks": [_mark("waiting")]})
+        stop_cmd = (
+            "s=waiting; jq -e '[.background_tasks[]?|select(.status==\"running\")]|length>0' "
+            f'>/dev/null 2>&1 && s=agenting; printf \'%s %s\' "$s" "$(date +%s)" > {target}'
+        )
+        hooks.setdefault("Stop", []).append({"hooks": [{"type": "command", "command": stop_cmd}]})
         hooks.setdefault("UserPromptSubmit", []).append({"hooks": [_mark("working")]})
         # Matcher applies (unlike Stop/UserPromptSubmit, where it's ignored): only
         # AskUserQuestion, the tool that waits on the user, flips the state.
@@ -5215,7 +5227,7 @@ def do_finish(
 
     A running container holds the worktree's mount, so finish first **stops it as
     `yolo stop` would** (`_stop_container`) — an idle session is stopped through,
-    an actively `working` one is refused unless --force — letting you finish a
+    a `working` or `agenting` one is refused unless --force — letting you finish a
     quiescent session in one step. Then it guards against the other loss vector,
     uncommitted changes (unless --force), and removes the worktree. What happens
     to the branch is controlled by `action` (--finish-action):
@@ -5272,8 +5284,8 @@ def finish_worktree(
     if cid:
         # The worktree can't be removed while a container holds its mount, so stop
         # the session first — exactly as `yolo stop` would. An idle (`waiting`)
-        # session is stopped through; an actively `working` one is refused unless
-        # --force (so finish can't cut off a running task).
+        # session is stopped through; a `working` or `agenting` one is refused
+        # unless --force (so finish can't cut off a running task).
         msgs.append(stop_session(cid, f"for '{topic}'", home, force=force))
 
     # Guard phase, across the whole set before touching anything: a dirty worktree
@@ -5531,7 +5543,8 @@ def rebase_worktree(
     session is. When a container is running we read the session-activity state file
     the hooks write (via the container's own labels, the same source
     `stop`/`finish` use): a `waiting` session (idle at a prompt) is rebased through;
-    a `working` one — or an unknown state (`-`: a `yolo shell`, no hooks, or a
+    a `working` or `agenting` one (still acting, or about to when its background
+    agents finish) — or an unknown state (`-`: a `yolo shell`, no hooks, or a
     session yet to take a turn) — is refused unless `force`. The one residual race
     (a prompt landing between the check and the rebase) needs the user driving the
     session from two places at once, so in practice it's a non-issue.
@@ -5562,7 +5575,7 @@ def rebase_worktree(
     cid = running_container_for(slug, topic)
     if cid:
         state = _container_session_state(cid, home)
-        activity = state.split()[0]  # "waiting" | "working" | "-"
+        activity = state.split()[0]  # "waiting" | "agenting" | "working" | "-"
         if activity == "waiting":
             msgs.append(f"Session for '{topic}' is idle ({state}); rebasing.")
         elif force:
@@ -5570,7 +5583,7 @@ def rebase_worktree(
         else:
             detail = (
                 f"its session is active ({state})"
-                if activity == "working"
+                if activity in ("working", "agenting")
                 else f"can't confirm its session is idle (state: {state})"
             )
             raise YoloError(
@@ -5951,9 +5964,9 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: 
     `yolo stop` can't cut off a running task. Activity comes from the same
     session-state file `ps`/`rebase` use, located via the container's *own*
     `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on this invocation's
-    config). Unlike `rebase`, only `working` is guarded: an idle (`waiting`)
-    session, a `yolo shell`, or a not-yet-started session (unknown state) all stop
-    freely — the point is just not to interrupt active work.
+    config). Unlike `rebase`, only `working`/`agenting` are guarded: an idle
+    (`waiting`) session, a `yolo shell`, or a not-yet-started session (unknown
+    state) all stop freely — the point is just not to interrupt active work.
     """
     if topic:
         _, _, slug = _worktree_dir(topic, home)
@@ -5969,7 +5982,7 @@ def do_stop(topic: str | None, home: pathlib.Path, cwd: pathlib.Path, *, force: 
 
 
 def _container_session_state(cid: str, home: pathlib.Path) -> str:
-    """A running container's session activity state ("waiting"/"working"/"-").
+    """A running container's session activity state ("waiting"/"agenting"/"working"/"-").
 
     Reads the status file via the container's *own* `yolo.config-dir`/`yolo.cwd`
     labels, so the answer doesn't depend on which `--config-dir` the verb was
@@ -5988,10 +6001,11 @@ def stop_session(cid: str, where: str, home: pathlib.Path, *, force: bool) -> st
     """Stop (and, since `--rm`, remove) a running yolo container; return a message.
 
     The in-process core shared by the `stop` and `finish` verbs and the `wip`
-    dashboard. An actively **working** session is refused (raises `YoloError`)
-    unless `force`, so a stray stop can't cut off a running task; an idle
-    (`waiting`) session, a `yolo shell`, or a not-yet-started session (unknown
-    state) all stop freely. Activity is read from the container's *own*
+    dashboard. An actively **working** session — or an **agenting** one (its turn
+    ended but background agents/tasks are still running; it will act again when
+    they finish) — is refused (raises `YoloError`) unless `force`, so a stray stop
+    can't cut off a running task; an idle (`waiting`) session, a `yolo shell`, or
+    a not-yet-started session (unknown state) all stop freely. Activity is read from the container's *own*
     `yolo.config-dir`/`yolo.cwd` labels (so it doesn't depend on the caller's
     config). `where` is a human phrase for messages (e.g. "for 'fix-auth'").
     Returns a one-line result the caller prints (CLI) or shows in the footer
@@ -5999,7 +6013,7 @@ def stop_session(cid: str, where: str, home: pathlib.Path, *, force: bool) -> st
     """
     state = _container_session_state(cid, home)
     note = ""
-    if state.split()[0] == "working":
+    if state.split()[0] in ("working", "agenting"):
         if not force:
             raise YoloError(
                 f"the session {where} is active ({state}); wait for it to finish, or "
@@ -6310,8 +6324,10 @@ def _session_activity(path: pathlib.Path, now: float) -> tuple[str, int] | None:
     """A session's raw activity from its status file: `(state, age_secs)` or None.
 
     The file (written by the Stop/UserPromptSubmit hooks) holds "<state> <epoch>".
-    `state` is "waiting" (since the main agent last finished) or "working" (since
-    the last user prompt); `age_secs` is the elapsed seconds since that transition.
+    `state` is "waiting" (since the main agent last finished), "agenting" (the turn
+    ended with background agents/tasks still running — the session will resume on
+    its own when they finish), or "working" (since the last user prompt);
+    `age_secs` is the elapsed seconds since that transition.
     Returns None for anything missing/unparseable or a state outside that pair —
     the "unknown" case (`-` in the display). The raw form lets callers sort/group
     by age (the `wip` dashboard) where _read_session_state only renders a string.
@@ -6327,7 +6343,7 @@ def _session_activity(path: pathlib.Path, now: float) -> tuple[str, int] | None:
         age = max(0, int(now - int(ts)))
     except ValueError:
         return None
-    if state in ("waiting", "working"):
+    if state in ("waiting", "agenting", "working"):
         return state, age
     return None
 
@@ -6804,17 +6820,21 @@ def _wip_sessions(home: pathlib.Path) -> list:
 
 
 def _order_sessions(sessions: list) -> list:
-    """Group sessions unknown → waiting → working, each by least-recent activity.
+    """Group sessions unknown → waiting → agenting → working, by least-recent activity.
 
     The unknown/`-` ones (a `yolo shell` or a session that hasn't taken a turn)
     lead, oldest-created first; then waiting sessions, longest-idle first; then
+    agenting (waiting on their own background agents), longest first; then
     working, longest-working first. So reading top-to-bottom runs from least to
     most recently active. Ties break by name for refresh stability.
     """
     unknown = sorted((s for s in sessions if s.state is None), key=lambda s: (s.created_at, s.name))
     waiting = sorted((s for s in sessions if s.state == "waiting"), key=lambda s: (-s.age, s.name))
+    agenting = sorted(
+        (s for s in sessions if s.state == "agenting"), key=lambda s: (-s.age, s.name)
+    )
     working = sorted((s for s in sessions if s.state == "working"), key=lambda s: (-s.age, s.name))
-    return unknown + waiting + working
+    return unknown + waiting + agenting + working
 
 
 def _wip_projects(home: pathlib.Path, sessions: list) -> list:
@@ -7013,7 +7033,7 @@ def _wip_items(home: pathlib.Path) -> dict:
 _GREY, _RED, _GREEN, _YELLOW, _BLUE, _MAGENTA, _CYAN = 90, 31, 32, 33, 34, 35, 36
 # Per-status-group accent for a session's SESSION/STATE cells (the cue that
 # replaces the old blank lines between groups).
-_SESSION_GROUP = {None: _GREY, "waiting": _GREEN, "working": _YELLOW}
+_SESSION_GROUP = {None: _GREY, "waiting": _GREEN, "agenting": _CYAN, "working": _YELLOW}
 
 
 def _fg(s: str, code: int) -> str:
@@ -7113,8 +7133,9 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     """One dashboard frame: the colored sections plus a status/help footer.
 
     The running sessions render as one SESSIONS table, ordered unknown → waiting →
-    working by _order_sessions — no blank lines between groups anymore; the
-    SESSION/STATE color (grey / green / yellow) is the group cue instead. Then the
+    agenting → working by _order_sessions — no blank lines between groups anymore;
+    the SESSION/STATE color (grey / green / cyan / yellow) is the group cue instead.
+    Then the
     worktrees and projects, each column colored by _color_*_row.
     """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
@@ -7334,16 +7355,16 @@ def _wip_action(key, item, home, session, term) -> str:
         if key == "b" and kind == "session":
             return _wip_browse(p, term)
         if key == "s" and kind == "session":
-            working = p["state"] == "working"
+            active = p["state"] in ("working", "agenting")
             label = p["topic"] or p["name"]
             prompt = (
-                f"Session '{label}' is working — stop anyway?"
-                if working
+                f"Session '{label}' is {p['state']} — stop anyway?"
+                if active
                 else f"Stop session '{label}'?"
             )
             if not term.confirm(prompt):
                 return "cancelled."
-            return stop_session(p["cid"], f"for '{label}'", home, force=working)
+            return stop_session(p["cid"], f"for '{label}'", home, force=active)
         if key == "S" and kind == "session":
             return _wip_shell(p, session)
         if key == "l" and kind == "session":

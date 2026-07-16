@@ -5,6 +5,20 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **New session state: `agenting` — a session waiting on its own background
+  agents.** Previously a session whose turn ended while background agents or
+  tasks were still running showed `waiting`, indistinguishable from one idle at
+  the prompt — even though it will wake up and keep going on its own. The
+  injected `Stop` hook now inspects its hook input's `background_tasks` (Claude
+  Code ≥2.1.198): with anything still running it records `agenting` instead of
+  `waiting`, and the auto-resumed turn's own `Stop` flips it back once nothing
+  is left. `ps` and the `wip` dashboard show the new state (its own group,
+  ordered between waiting and working, tinted cyan), and `stop`/`finish`/
+  `rebase` treat `agenting` like `working` — active work they refuse to
+  interrupt without `--force`. Needs `jq` in the image (the default image has
+  it); without it, or on an older Claude Code, everything reads `waiting` as
+  before.
+
 - **`yolo wip` can now rebuild the default image, and `yolo wip --rebuild-image`
   finally does something.** The dashboard's new **`B`** key rebuilds the default
   image from scratch (`docker build --no-cache`, after a confirm) in its own

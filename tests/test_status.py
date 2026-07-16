@@ -49,7 +49,12 @@ def test_launch_injects_stop_and_userpromptsubmit_hooks(cy, run_cli, dirs):
     work_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
     slug = cy._cwd_slug(work)
     target = f"/home/claude/.claude/.yolo-status/{slug}.state"
-    assert stop_cmd == f"printf 'waiting %s' \"$(date +%s)\" > {target}"
+    # Stop inspects its stdin JSON: background agents/tasks still running →
+    # "agenting", else "waiting"; jq missing or the field absent → "waiting".
+    assert stop_cmd == (
+        "s=waiting; jq -e '[.background_tasks[]?|select(.status==\"running\")]|length>0' "
+        f'>/dev/null 2>&1 && s=agenting; printf \'%s %s\' "$s" "$(date +%s)" > {target}'
+    )
     assert work_cmd == f"printf 'working %s' \"$(date +%s)\" > {target}"
 
 
@@ -133,7 +138,7 @@ def test_user_hooks_on_same_event_concatenate(cy, run_cli, dirs):
     stop_groups = settings_obj(cy, argv)["hooks"]["Stop"]
     cmds = [h["command"] for g in stop_groups for h in g["hooks"]]
     assert "mine" in cmds  # user's Stop hook kept
-    assert any("waiting %s" in c for c in cmds)  # yolo's appended
+    assert any("s=waiting" in c for c in cmds)  # yolo's appended
 
 
 def test_read_settings_hooks_merges_settings_and_local(cy, tmp_path):
@@ -179,6 +184,13 @@ def test_read_session_state_working(cy, tmp_path):
     f = tmp_path / "s.state"
     f.write_text("working 1000")
     assert cy._read_session_state(f, 1000 + 5) == "working 5s"
+
+
+def test_read_session_state_agenting(cy, tmp_path):
+    # written by the Stop hook when background agents/tasks were still running
+    f = tmp_path / "s.state"
+    f.write_text("agenting 1000")
+    assert cy._read_session_state(f, 1000 + 120) == "agenting 2m"
 
 
 def test_read_session_state_clamps_future_timestamp(cy, tmp_path):

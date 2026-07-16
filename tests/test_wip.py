@@ -131,7 +131,7 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
 # --- data layer -------------------------------------------------------------
 
 
-def test_order_sessions_unknown_then_waiting_then_working(cy):
+def test_order_sessions_unknown_then_waiting_then_agenting_then_working(cy):
     def mk(name, state, age, created_at=""):
         return cy.WipSession("c", name, "", "/c", "", "", "1m", state, age, created_at)
 
@@ -139,19 +139,24 @@ def test_order_sessions_unknown_then_waiting_then_working(cy):
         [
             mk("w-short", "working", 5),
             mk("idle-short", "waiting", 5),
+            mk("agent-short", "agenting", 3),
             mk("unknown-new", None, 0, "2026-06-20 10:00:00 +0000 UTC"),
             mk("unknown-old", None, 0, "2026-06-20 09:00:00 +0000 UTC"),
             mk("idle-long", "waiting", 99),
+            mk("agent-long", "agenting", 70),
             mk("w-long", "working", 50),
         ]
     )
     names = [s.name for s in ordered]
-    # unknown (oldest-created first), then waiting (longest first), then working
+    # unknown (oldest-created first), then waiting, agenting, and working
+    # (each longest first)
     assert names == [
         "unknown-old",
         "unknown-new",
         "idle-long",
         "idle-short",
+        "agent-long",
+        "agent-short",
         "w-long",
         "w-short",
     ]
@@ -190,7 +195,7 @@ def test_draw_wip_renders_one_sessions_table_grouped(cy, capsys):
 
 def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
     # No blank lines between status groups anymore — they're distinguished by the
-    # SESSION/STATE color (green waiting, yellow working) instead.
+    # SESSION/STATE color (green waiting, cyan agenting, yellow working) instead.
     sections = {
         "session": [
             session_item(
@@ -198,6 +203,12 @@ def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
                 key="session:w1",
                 payload={"state": "waiting"},
                 cols=("w1", "-", "1m", "-", "waiting 9m"),
+            ),
+            session_item(
+                cy,
+                key="session:a1",
+                payload={"state": "agenting"},
+                cols=("a1", "-", "1m", "-", "agenting 3m"),
             ),
             session_item(
                 cy,
@@ -212,9 +223,11 @@ def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
     cy._draw_wip(sections, None, "")
     lines = capsys.readouterr().out.splitlines()
     w1 = next(i for i, ln in enumerate(lines) if "w1" in ln)
+    a1 = next(i for i, ln in enumerate(lines) if "a1" in ln)
     k1 = next(i for i, ln in enumerate(lines) if "k1" in ln)
-    assert k1 == w1 + 1  # adjacent rows, no blank line between groups
+    assert (a1, k1) == (w1 + 1, w1 + 2)  # adjacent rows, no blank line between groups
     assert f"\x1b[{cy._GREEN}m" in lines[w1]  # waiting row tinted green
+    assert f"\x1b[{cy._CYAN}m" in lines[a1]  # agenting row tinted cyan
     assert f"\x1b[{cy._YELLOW}m" in lines[k1]  # working row tinted yellow
 
 
@@ -700,6 +713,21 @@ def test_stop_working_session_uses_force(cy, monkeypatch):
     )
     sections = {
         "session": [session_item(cy, payload={"state": "working"})],
+        "worktree": [],
+        "project": [],
+    }
+    run_loop(cy, monkeypatch, sections, ["s"], confirms=[True])
+    assert stopped == [True]
+
+
+def test_stop_agenting_session_uses_force(cy, monkeypatch):
+    # agenting (waiting on its own background agents) is active work: confirm + force
+    stopped = []
+    monkeypatch.setattr(
+        cy, "stop_session", lambda cid, where, home, *, force: stopped.append(force) or "ok"
+    )
+    sections = {
+        "session": [session_item(cy, payload={"state": "agenting"})],
         "worktree": [],
         "project": [],
     }

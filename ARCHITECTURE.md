@@ -1196,12 +1196,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   resume` still works afterward. Nothing running is a **friendly no-op**, not an
   error (idempotent in spirit, safe to script), and a `TOPIC` doesn't require the
   worktree dir to exist (the match is by label, so an odd-state container is still
-  stoppable). A session that's actively **`working`** is refused unless `--force`,
-  so a stray `stop` can't cut off a running task — activity read from the same
-  session-state file `ps`/`rebase` use, located via the container's *own*
-  `yolo.config-dir`/`yolo.cwd` labels (so it's independent of this invocation's
-  config). Unlike `rebase`, only `working` is guarded — `waiting`, a `yolo shell`,
-  and a not-yet-started session (unknown `-`) all stop freely, since the point is
+  stoppable). A session that's actively **`working`** — or **`agenting`** (its turn
+  ended with background agents/tasks still running; it will act again when they
+  finish) — is refused unless `--force`, so a stray `stop` can't cut off a running
+  task — activity read from the same session-state file `ps`/`rebase` use, located
+  via the container's *own* `yolo.config-dir`/`yolo.cwd` labels (so it's
+  independent of this invocation's config). Unlike `rebase`, only
+  `working`/`agenting` are guarded — `waiting`, a `yolo shell`, and a
+  not-yet-started session (unknown `-`) all stop freely, since the point is
   just not to interrupt active work. The counterpart to `finish`, which refuses
   while a container runs: `stop` is how you clear that.
 - **`finish TOPIC`** — `git worktree remove` the worktree, then handle the branch
@@ -1261,9 +1263,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   resolves the state file through the container's *own* `yolo.config-dir`/`yolo.cwd`
   labels (not this invocation's `--config-dir`), so a session started under a
   different config dir is still read correctly. A `waiting`
-  session (idle at a prompt) is rebased **through**; a `working` one — or an
-  unknown state (`-`: a `yolo shell`, which runs no hooks, or a session that hasn't
-  taken a turn yet) — is **refused unless `force`**. The one residual race (the
+  session (idle at a prompt) is rebased **through**; a `working` or `agenting` one
+  — or an unknown state (`-`: a `yolo shell`, which runs no hooks, or a session
+  that hasn't taken a turn yet) — is **refused unless `force`**. The one residual race (the
   user prompting the session in the gap between the check and the rebase) needs
   them driving the same session from two places at once, so it's a non-issue in
   practice. The **dirty-tree refusal is independent and absolute** — no `force`
@@ -1370,8 +1372,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   session's `<config-dir>/.yolo-status/<cwd-slug>.state` file
   (`_read_session_state`): `working <age>` (since the last `UserPromptSubmit` or
   `AskUserQuestion` answer), `waiting <age>` (since the `Stop` hook fired or an
-  `AskUserQuestion` began blocking), or `-` (no file / older
-  container). Both render via `_humanize_secs`. The config dir comes from the
+  `AskUserQuestion` began blocking), `agenting <age>` (the turn ended with
+  background agents/tasks still running — the session resumes on its own when
+  they finish), or `-` (no file / older container). Both render via `_humanize_secs`. The config dir comes from the
   `yolo.config-dir` label (falls back to `~/.claude`); no extra docker calls.
   `--watch` redraws every `PS_WATCH_INTERVAL` (2s). It's an ordinary verb usable
   anywhere; run interactively *inside tmux* (stdin a TTY + `$TMUX` set),
@@ -1389,13 +1392,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   by-hand kill, so there's always a way back in). Requires tmux.
   Sections (`_wip_items`): **running sessions** (`_wip_sessions` — one
   `docker ps` carrying the cid + labels, ordered by `_order_sessions`:
-  unknown→waiting→working, each by *least-recent activity first* — unknown
+  unknown→waiting→agenting→working, each by *least-recent activity first* — unknown
   oldest-created first (its sortable `CreatedAt`, carried as the WipSession
-  `created_at` field), waiting longest-idle first, working longest-working first,
+  `created_at` field), then each of the other groups longest first,
   so reading down runs from least to most recently active) — which `_draw_wip`
   renders as **one SESSIONS table** (no blank lines between the groups; the
-  SESSION/STATE color — grey unknown / green waiting / yellow working — is the
-  group cue instead); then
+  SESSION/STATE color — grey unknown / green waiting / cyan agenting / yellow
+  working — is the group cue instead); then
   **worktrees** (the `_worktree_rows` extracted from `do_list` — *every* worktree,
   including ones with a running session, which also appear as a session row;
   `running_paths`, from the same single `docker ps`, both marks each `running` in
@@ -1478,8 +1481,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   closes the dashboard's tmux window; with sessions live the press is refused
   with a footer message, the `q quit` hint is dropped from the footer, and the
   loop re-lists live before deciding so a ≤2s-stale frame can't misjudge). `f`/`r`
-  apply to any worktree row and to *waiting* session rows (a `working` session is
-  never offered them); the running-session guard lives in the
+  apply to any worktree row and to *waiting* session rows (a `working` or
+  `agenting` session is never offered them); the running-session guard lives in the
   `finish_worktree`/`rebase_worktree` cores, so a worktree row with a `working`
   session refuses in the footer while an idle one is finished/rebased through —
   the CLI and dashboard share that one policy. **Quick ops run in-process** via the cores below and surface their
@@ -1620,9 +1623,17 @@ Implementation shape:
   an isolated copy, so the line is omitted there.
 - **Session-activity hooks** (`build_claude_args` + `_read_session_state`). The
   `--settings` overlay (which already disables the sandbox) also injects a
-  `Stop` hook (writes `waiting <epoch>` to `/home/claude/.claude/.yolo-status/
-  <cwd-slug>.state`) and a `UserPromptSubmit` hook (writes `working <epoch>`).
-  Those two are *turn-boundary* events; a third case is **mid-turn waiting**: the
+  `Stop` hook (writes to `/home/claude/.claude/.yolo-status/<cwd-slug>.state`)
+  and a `UserPromptSubmit` hook (writes `working <epoch>`). The Stop hook
+  distinguishes *what kind* of stop from its stdin JSON: when `background_tasks`
+  (Claude Code ≥2.1.198; entries carry a `status`) still lists a **running**
+  background agent/task, the session will wake and act again on its own, so it
+  writes `agenting <epoch>` instead of `waiting <epoch>` — and when that
+  auto-resumed turn ends, Stop fires again and flips it to plain `waiting` once
+  nothing is left running. `jq` (in the default image) does the inspection;
+  if it's missing (a custom image) or the field absent (an older claude), the
+  test fails closed to `waiting` — the pre-agenting behavior.
+  Those two hooks are *turn-boundary* events; a third case is **mid-turn waiting**: the
   `AskUserQuestion` tool blocks for the user's answer *without ending the turn*,
   so `Stop` never fires and the session would otherwise still read `working` while
   it actually waits. So a **`PreToolUse` hook matched to `AskUserQuestion`** writes
@@ -1666,7 +1677,7 @@ Implementation shape:
   (config-backed like `base`, so ungated; consumed by `finish`), `--new`
   (resume, worktree-only), `--force` (`finish`, `rebase`, and `stop` — skips the
   uncommitted-changes guard for `finish`, the not-confirmed-idle running container
-  for `rebase`, and the actively-`working` guard for `stop`),
+  for `rebase`, and the active-session (`working`/`agenting`) guard for `stop`),
   `--resume`/`-r` (resume), `--watch` (ps), `--all` (`list` and `secret list`),
   `--project`/`--clipboard` (`secret`), `--print`/`-n`
   (browse), and the
@@ -2160,7 +2171,7 @@ file-protocol submodule checked out host-side when enabled, left empty by
 default, and a no-op without `.gitmodules`), and the `rebase` verb (replaying a branch onto
 the base's new commits, honouring `--base`; the required-topic/missing-worktree/
 dirty-tree refusals; and the session-aware running-container handling — a
-`waiting` session rebases through, `working`/unknown refuse, and `--force`
+`waiting` session rebases through, `working`/`agenting`/unknown refuse, and `--force`
 overrides — driven by a stamped `.yolo-status` state file read through the
 container's own labels, including that a session under an alternate `--config-dir`
 is still read correctly), the `merge` verb (a fast-forward and a diverged
@@ -2255,9 +2266,10 @@ no-pane / capture-failure skips (failure warns but the launch proceeds),
 `_spawn_session_window` prepending `YOLO_STARTUP_LOG=1`, and the plain
 `--tmux` launch window *not* carrying the marker.
 `test_wip.py` covers the `wip` dashboard: the data layer (`_order_sessions`
-unknown→waiting→working grouping with unknown sorted oldest-`created_at`-first,
+unknown→waiting→agenting→working grouping with unknown sorted
+oldest-`created_at`-first,
 `_draw_wip` rendering the sessions as one SESSIONS table with *no* blank lines
-between groups (distinguished by the green/yellow status-group color) and `(none)`
+between groups (distinguished by the green/cyan/yellow status-group color) and `(none)`
 when empty, `_wip_items` listing *every* worktree
 (running ones flagged, also shown as a session) against a real repo,
 the `_worktree_rows` COMMITS counts (`_branch_ahead_behind` against a real
@@ -2277,7 +2289,7 @@ there (cancel on empty, reject a non-dir), `S` shell on a session row spawning t
 `docker exec` window (a worktree-row no-op), `l` startup-log on a session row
 spawning the `less -R` window (the missing-log footer message and the
 worktree-row no-op), `b` browse incl. the
-multi-port prompt, `s` stop with the working-session force + confirm/cancel,
+multi-port prompt, `s` stop with the working/agenting-session force + confirm/cancel,
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), `m` on a worktree *and* a worktree-backed session row
 (confirm/cancel, the core stubbed) calling `merge_worktree` with `capture=True`,
@@ -2330,10 +2342,13 @@ guard, and the config-only gating). The `wip` `c` editor's clones loop is in
 `test_wip.py`.
 `test_status.py` covers the session-activity feature: the injected
 `Stop`/`UserPromptSubmit` hooks in the assembled `--settings` (schema + baked
-status path) plus the `AskUserQuestion`-matched `Pre`/`PostToolUse` waiting/working
+status path + the Stop command's jq `background_tasks` test for
+waiting-vs-agenting) plus the `AskUserQuestion`-matched `Pre`/`PostToolUse`
+waiting/working
 pair (mid-turn waiting), the `yolo.config-dir` label, the stale-status-file reset (and that
 `shell` does neither), the user-hook merge (`_read_settings_hooks` +
-concatenation), and the `_humanize_secs`/`_read_session_state` rendering; the
+concatenation), and the `_humanize_secs`/`_read_session_state` rendering
+(all three states); the
 `ps` STATE column itself is exercised in `test_tmux.py`.
 `test_yolorc.py` covers the `--yolorc` axis: `_resolve_yolorc`
 (relative/absolute/`~`), the `yolorc` config-key parse + `~` expansion, the launch

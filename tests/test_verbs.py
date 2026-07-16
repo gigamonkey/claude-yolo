@@ -224,6 +224,22 @@ def test_stop_refuses_working_session_without_force(cy, run_cli, repo, monkeypat
     assert stops == []  # not stopped
 
 
+def test_stop_refuses_agenting_session_without_force(cy, run_cli, repo, monkeypatch):
+    # agenting = turn over but background agents still running; the session will
+    # act again on its own, so stop treats it like working.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    monkeypatch.setattr(
+        cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid123456789"
+    )
+    monkeypatch.setattr(cy, "_read_session_state", lambda path, now: "agenting 3s")
+    stops = _stop_capture(cy, monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["stop", "topic"], home=home, cwd=r)
+    assert "active" in str(exc.value)
+    assert stops == []  # not stopped
+
+
 def test_stop_force_stops_working_session(cy, run_cli, repo, monkeypatch):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
@@ -526,6 +542,20 @@ def test_finish_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
     assert wt.exists()  # worktree left intact
 
 
+def test_finish_refuses_when_session_agenting(cy, run_cli, repo, monkeypatch):
+    # A session waiting on its own background agents is active work too.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "agenting")
+    stops = _fake_docker_session(cy, monkeypatch, home, wt)
+    with pytest.raises(SystemExit):
+        run_cli(["finish", "topic"], home=home, cwd=r)
+    assert stops == []  # nothing stopped
+    assert wt.exists()  # worktree left intact
+
+
 def test_finish_force_stops_active_session(cy, run_cli, repo, monkeypatch):
     # --force stops even an actively working session, then finishes.
     r, home = repo
@@ -634,6 +664,19 @@ def test_rebase_refuses_when_session_working(cy, run_cli, repo, monkeypatch):
     _fake_docker_session(cy, monkeypatch, home, wt)
     with pytest.raises(SystemExit):
         run_cli(["rebase", "topic"], home=home, cwd=r)
+    assert not (wt / "main.txt").exists()  # not rebased
+
+
+def test_rebase_refuses_when_session_agenting(cy, run_cli, repo, monkeypatch):
+    # agenting = background agents still running; the session will act again, so
+    # rebase refuses just as it would for working.
+    r, home, wt = _rebase_setup_with_main_commit(cy, run_cli, repo)
+    monkeypatch.setattr(cy, "running_container_for", lambda slug, topic=None, cwd=None: "cid")
+    _write_session_state(cy, home, wt, "agenting")
+    _fake_docker_session(cy, monkeypatch, home, wt)
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["rebase", "topic"], home=home, cwd=r)
+    assert "active" in str(exc.value)  # refused as active, not as unconfirmable
     assert not (wt / "main.txt").exists()  # not rebased
 
 
