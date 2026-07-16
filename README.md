@@ -1560,6 +1560,17 @@ It assembles the `docker run` arguments:
 - Forwards your timezone as a `TZ` environment variable (read from the host's
   `$TZ` or `/etc/localtime`), so timestamps inside the container — commit dates,
   log lines — match your clock instead of UTC.
+- Sets a `YOLO_SESSION` environment variable in every container (claude sessions
+  and `yolo shell` alike), so anything running inside — Claude, hooks, your own
+  scripts — can detect it's in a yolo container. Its presence is the "am I in
+  yolo?" test (`[ -n "$YOLO_SESSION" ]`); its value names the session kind:
+  `worktree` for a worktree session, `cwd` for a current-directory one. Useful
+  for CLAUDE.md instructions or scripts that should behave differently inside a
+  yolo session (e.g. "commit on the current branch — the container is already
+  the unit of isolation"). `YOLO_WORKDIR` is exported alongside it: the session
+  working directory (the worktree dir in worktree mode, else the launch cwd),
+  handy for scripts — a `--yolorc` in particular — that `cd` elsewhere and need
+  a way back to the repo.
 - Mounts your config/credentials according to the mode (see above).
 - Sets the container hostname to the project directory name, so Claude Code's
   status line shows it.
