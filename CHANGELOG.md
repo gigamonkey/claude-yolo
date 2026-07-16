@@ -3,6 +3,12 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **README now documents the `YOLO_SESSION` and `YOLO_WORKDIR` env vars** (in
+  the "Wires up the container" list). Both were previously covered only in
+  ARCHITECTURE.md.
+
 ## v0.28.1 — 2026-07-16
 
 - **A background shell no longer pins a session at `agenting`.** The `Stop`
