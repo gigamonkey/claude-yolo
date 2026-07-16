@@ -4187,9 +4187,13 @@ def build_claude_args(
         # lists a running background agent/task, the session will wake and act again
         # on its own, so it's marked "agenting" rather than "waiting" — and when
         # that auto-resumed turn ends, Stop fires again and flips it to plain
-        # "waiting" once nothing is left running. jq does the inspection; if it's
-        # missing (a custom image) or the field is absent (an older claude), the
-        # test fails closed to "waiting" — the pre-agenting behavior, no regression.
+        # "waiting" once nothing is left running. `shell` tasks don't count: a
+        # background shell is typically a server kept running across turns (it
+        # would pin the state at "agenting" forever), unlike agents/workflows/
+        # monitors, which finish and wake the session. jq does the inspection; if
+        # it's missing (a custom image) or the field is absent (an older claude),
+        # the test fails closed to "waiting" — the pre-agenting behavior, no
+        # regression.
         # Plus the AskUserQuestion tool, which
         # blocks *mid-turn* for the user's answer without ending the turn — so Stop
         # never fires and the session would otherwise still read "working" while it
@@ -4208,7 +4212,8 @@ def build_claude_args(
         for event, groups in (extra_hooks or {}).items():
             hooks.setdefault(event, []).extend(groups)
         stop_cmd = (
-            "s=waiting; jq -e '[.background_tasks[]?|select(.status==\"running\")]|length>0' "
+            "s=waiting; jq -e '[.background_tasks[]?"
+            '|select(.status=="running" and .type!="shell")]|length>0\' '
             f'>/dev/null 2>&1 && s=agenting; printf \'%s %s\' "$s" "$(date +%s)" > {target}'
         )
         hooks.setdefault("Stop", []).append({"hooks": [{"type": "command", "command": stop_cmd}]})

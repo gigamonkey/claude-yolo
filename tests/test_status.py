@@ -51,8 +51,11 @@ def test_launch_injects_stop_and_userpromptsubmit_hooks(cy, run_cli, dirs):
     target = f"/home/claude/.claude/.yolo-status/{slug}.state"
     # Stop inspects its stdin JSON: background agents/tasks still running →
     # "agenting", else "waiting"; jq missing or the field absent → "waiting".
+    # `shell` tasks are excluded — a background server would otherwise pin the
+    # state at "agenting" forever.
     assert stop_cmd == (
-        "s=waiting; jq -e '[.background_tasks[]?|select(.status==\"running\")]|length>0' "
+        "s=waiting; jq -e '[.background_tasks[]?"
+        '|select(.status=="running" and .type!="shell")]|length>0\' '
         f'>/dev/null 2>&1 && s=agenting; printf \'%s %s\' "$s" "$(date +%s)" > {target}'
     )
     assert work_cmd == f"printf 'working %s' \"$(date +%s)\" > {target}"

@@ -3,6 +3,16 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **A background shell no longer pins a session at `agenting`.** The `Stop`
+  hook's still-running-background-work test counted *every* running background
+  task, including backgrounded shell processes — so a session keeping a dev
+  server running showed `agenting` indefinitely when it was really `waiting` at
+  the prompt. Running tasks of type `shell` are now excluded; background
+  subagents, workflows, and monitors (which finish and wake the session) still
+  count.
+
 ## v0.28.0 — 2026-07-16
 
 - **New session state: `agenting` — a session waiting on its own background

@@ -534,7 +534,9 @@ Claude is busy (time since your last prompt), `waiting 5m` once it has
 finished responding and is sitting at the prompt (time since it stopped), or
 `agenting 3m` when its turn ended but background agents or tasks it launched are
 still running — it doesn't need you yet; it will wake up and act again on its
-own when they finish. This is driven by Claude Code **hooks** that yolo
+own when they finish. (Background *shell* processes don't count: a server kept
+running across turns is part of a waiting session's steady state, not pending
+work.) This is driven by Claude Code **hooks** that yolo
 injects into each session — a `Stop` hook records when Claude finishes (and
 checks for still-running background agents to tell `waiting` from `agenting`), a
 `UserPromptSubmit` hook records when you reply — so it reflects the real

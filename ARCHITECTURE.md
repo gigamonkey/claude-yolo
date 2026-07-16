@@ -1626,11 +1626,15 @@ Implementation shape:
   `Stop` hook (writes to `/home/claude/.claude/.yolo-status/<cwd-slug>.state`)
   and a `UserPromptSubmit` hook (writes `working <epoch>`). The Stop hook
   distinguishes *what kind* of stop from its stdin JSON: when `background_tasks`
-  (Claude Code ≥2.1.198; entries carry a `status`) still lists a **running**
-  background agent/task, the session will wake and act again on its own, so it
-  writes `agenting <epoch>` instead of `waiting <epoch>` — and when that
-  auto-resumed turn ends, Stop fires again and flips it to plain `waiting` once
-  nothing is left running. `jq` (in the default image) does the inspection;
+  (Claude Code ≥2.1.198; entries carry a `status` and a `type`) still lists a
+  **running** background agent/task, the session will wake and act again on its
+  own, so it writes `agenting <epoch>` instead of `waiting <epoch>` — and when
+  that auto-resumed turn ends, Stop fires again and flips it to plain `waiting`
+  once nothing is left running. Running tasks of `type == "shell"` are excluded
+  from the test: a backgrounded shell is typically a server deliberately kept
+  running across turns (it would pin the state at `agenting` forever), unlike
+  subagents/workflows/monitors, which finish (or fire) and wake the session.
+  `jq` (in the default image) does the inspection;
   if it's missing (a custom image) or the field absent (an older claude), the
   test fails closed to `waiting` — the pre-agenting behavior.
   Those two hooks are *turn-boundary* events; a third case is **mid-turn waiting**: the
