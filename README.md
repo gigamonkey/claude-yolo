@@ -466,6 +466,12 @@ Details:
 - A session with several forwarded ports opens the first-configured one;
   `yolo browse --port 3000` picks another. `--print`/`-n` prints the URL
   without opening a browser.
+- With several ports, give each a **label** (`NAME=`, e.g.
+  `yolo config --add-port web=8000 --add-port api=3000`) and pick by name
+  instead of number: `yolo browse --port api`, or type the label at the `wip`
+  dashboard's port prompt (which lists each port as `web (8000)`). Labels are
+  always optional — the container port number keeps working as a selector —
+  and show up in the `ps`/`wip` PORTS column as `web:55001->8000`.
 - If you run only one session at a time and want a stable, bookmarkable port,
   pin the host side: `--port 8000:8000` (`HOST:CONTAINER`). A second
   concurrent session then fails at launch with address-in-use, as it must.
@@ -477,8 +483,8 @@ Details:
   running container), so after configuring a port, exit the session and
   `yolo resume`.
 
-See the [`ports` config key](#ports---port-hostcontainer-repeatable) for the
-config details.
+See the [`ports` config key](#ports---port-namehostcontainer-repeatable) for
+the config details.
 
 ### tmux mode
 
@@ -594,7 +600,7 @@ the selected row:
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `r` renames the project (on a registered project entry — re-points its worktree overlays too), `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
 | `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
 | `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |
-| `b`     | a session with forwarded ports   | `browse` the port (prompts if there's more than one) |
+| `b`     | a session with forwarded ports   | `browse` the port (with more than one, prompts for the container port or its label) |
 | `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
@@ -926,18 +932,23 @@ about. In config, a string or list of `PATH[:ro|:rw]` specs; the lists
 concatenate across the layers and the CLI (on a same-path ro/rw conflict the
 higher layer wins).
 
-### `ports` (`--port [HOST:]CONTAINER`, repeatable)
+### `ports` (`--port [NAME=][HOST:]CONTAINER`, repeatable)
 
 Container ports the project's server listens on, forwarded to the host — see
 [Port forwarding and `yolo browse`](#port-forwarding-and-yolo-browse). A bare
 container port (`"8000"`, the normal form) gets a docker-assigned host port per
 session, so parallel sessions never collide; `HOST:CONTAINER` (`"8000:8000"`)
-pins a stable host port for single-session use. Forwards are always bound to
+pins a stable host port for single-session use. A `NAME=` prefix
+(`"web=8000"`) labels the port so `browse` and the `wip` dashboard can select
+it by name; a label starts with a letter and uses only letters, digits, `_`,
+and `-` (so it can't be mistaken for a port number), and no two ports may
+share one. Forwards are always bound to
 `127.0.0.1` — a host *address* is deliberately not expressible here, so a config
 file can't put the skip-permissions container's server on your LAN (the raw
 `-- -p` passthrough is the escape hatch if you truly want that). In config, a
 string or list of specs; like `mounts`, the lists concatenate across the layers
-and the CLI (on a same-container-port conflict the higher layer wins).
+and the CLI (on a same-container-port conflict the higher layer wins,
+label and pin included).
 
 ### `secrets` (`--secret NAME[:TARGET]`, repeatable)
 
@@ -1451,10 +1462,11 @@ A few editing flags go beyond whole-key sets:
   require the directory to exist — so a stale mount can always be removed.
 - **`--add-prompt PROMPT` / `--remove-prompt PROMPT`** (repeatable) do the same
   for the `prompts` list (removal is by exact string match).
-- **`--add-port [HOST:]CONTAINER` / `--remove-port CONTAINER`** (repeatable)
-  likewise for the `ports` list. `--add-port` replaces an existing entry for
-  the same container port (so a `HOST:` pin can be added or dropped);
-  `--remove-port` matches by container port, ignoring any pin.
+- **`--add-port [NAME=][HOST:]CONTAINER` / `--remove-port CONTAINER|NAME`**
+  (repeatable) likewise for the `ports` list. `--add-port` replaces an
+  existing entry for the same container port (so a `HOST:` pin or `NAME=`
+  label can be added or dropped); `--remove-port` matches by container port
+  (ignoring any pin or label) or by label.
 - **`--add-repo PATH` / `--remove-repo PATH`** (repeatable) likewise for the
   [`repos`](#repos---repo-path-repeatable) list. `--add-repo` validates the
   path is a git repo and matches by resolved path (a re-add is a no-op);

@@ -2346,8 +2346,14 @@ def _resolve_repos(
     return out
 
 
-def _parse_port_spec(spec: str) -> tuple[int | None, int]:
-    """One --port / `ports` value, `[HOST:]CONTAINER` -> (host or None, container).
+# A port label: starts with a letter, so it can never be all digits (a selection
+# token that's all digits means a container port), and none of the separator
+# characters (`,` joins the yolo.ports docker label; `:`/`=` split port specs).
+_PORT_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _parse_port_spec(spec: str) -> tuple[str | None, int | None, int]:
+    """One --port / `ports` value, `[NAME=][HOST:]CONTAINER` -> (name, host, container).
 
     A bare container port is the normal form: the host side stays 0 so docker
     assigns a free ephemeral port, which is what lets parallel sessions of the
@@ -2356,37 +2362,68 @@ def _parse_port_spec(spec: str) -> tuple[int | None, int]:
     second concurrent session fails at `docker run` with address-in-use. A host
     *address* is deliberately not expressible: forwards are always loopback-bound
     so the skip-permissions container's server never lands on the LAN (the raw
-    `-- -p` passthrough remains the escape hatch).
+    `-- -p` passthrough remains the escape hatch). An optional NAME= labels the
+    port (`web=8000`), so browse/wip can select it by name instead of number.
     """
-    host_part, sep, container_part = spec.rpartition(":")
+    label, sep, rest = spec.partition("=")
+    if not sep:
+        label, rest = None, spec
+    elif not _PORT_LABEL_RE.match(label):
+        sys.exit(
+            "port: a label must start with a letter and contain only letters, "
+            f"digits, `_`, and `-`: {spec!r}"
+        )
+    host_part, sep, container_part = rest.rpartition(":")
     parts = [host_part, container_part] if sep else [container_part]
     if not all(p.isdigit() and 0 < int(p) < 65536 for p in parts):
-        sys.exit(f"port: must be CONTAINER or HOST:CONTAINER (ports 1-65535): {spec!r}")
-    return (int(host_part) if sep else None, int(container_part))
+        sys.exit(f"port: must be [NAME=][HOST:]CONTAINER (ports 1-65535): {spec!r}")
+    return (label, int(host_part) if sep else None, int(container_part))
 
 
-def _resolve_ports(specs: list[str]) -> list[tuple[int | None, int]]:
-    """Parse + dedupe the merged port specs into (host, container) pairs.
+def _resolve_ports(specs: list[str]) -> list[tuple[str | None, int | None, int]]:
+    """Parse + dedupe the merged port specs into (label, host, container) triples.
 
     Keyed by container port, lowest-precedence first (like _resolve_mounts), so
     when two layers forward the same container port the later spec — the higher
-    layer — wins (e.g. a project's `9000:8000` pin over a global `8000`).
-    Insertion order is kept: the first-configured port is `browse`'s default.
+    layer — wins *wholesale*, label included (e.g. a project's `9000:8000` pin
+    over a global `web=8000` drops the label too). Insertion order is kept: the
+    first-configured port is `browse`'s default. One label naming two different
+    container ports would make label selection ambiguous, so that's an error.
     """
-    out: dict[int, int | None] = {}
+    out: dict[int, tuple[str | None, int | None]] = {}
     for spec in specs:
-        host, cport = _parse_port_spec(spec)
-        out[cport] = host
-    return [(host, cport) for cport, host in out.items()]
+        label, host, cport = _parse_port_spec(spec)
+        out[cport] = (label, host)
+    by_label: dict[str, int] = {}
+    for cport, (label, _) in out.items():
+        if label is None:
+            continue
+        if label in by_label:
+            sys.exit(
+                f"port: label {label!r} is used for two container ports "
+                f"({by_label[label]} and {cport}); labels must be unique."
+            )
+        by_label[label] = cport
+    return [(label, host, cport) for cport, (label, host) in out.items()]
 
 
 def _port_container(spec: str) -> str:
-    """The container-port part of a `[HOST:]CONTAINER` port spec.
+    """The container-port part of a `[NAME=][HOST:]CONTAINER` port spec.
 
     Lenient on purpose (no validation), like _spec_path: it's used to *match*
     stored specs for --remove-port, whose point may be deleting a malformed one.
     """
-    return spec.rpartition(":")[2]
+    _, sep, rest = spec.partition("=")
+    return (rest if sep else spec).rpartition(":")[2]
+
+
+def _port_label(spec: str) -> str | None:
+    """The NAME part of a `[NAME=][HOST:]CONTAINER` port spec, None if unlabeled.
+
+    Lenient like _port_container, and for the same reason.
+    """
+    name, sep, _ = spec.partition("=")
+    return name if sep else None
 
 
 def _project_key(cwd: pathlib.Path) -> str:
@@ -2615,13 +2652,19 @@ def _apply_config_edits(
     if parsed.add_ports or parsed.remove_ports:
         ports = _take_list_key(entry, "ports", where)
         for rm in parsed.remove_ports:
-            kept = [s for s in ports if _port_container(s) != _port_container(rm)]
+            # Match by container port (any NAME=/HOST: decoration on the stored
+            # spec ignored) or, when rm is a bare label, by that label.
+            kept = [
+                s
+                for s in ports
+                if _port_container(s) != _port_container(rm) and _port_label(s) != rm
+            ]
             if len(kept) == len(ports):
-                sys.exit(f"--remove-port {rm}: no such port in {where}.")
+                sys.exit(f"--remove-port {rm}: no such port (or label) in {where}.")
             ports = kept
         for add in parsed.add_ports:
             # Same container port already listed -> replace it (so a HOST: pin
-            # can be added or dropped without a remove+add).
+            # or a NAME= label can be added or dropped without a remove+add).
             ports = [s for s in ports if _port_container(s) != _port_container(add)]
             ports.append(add)
         if ports:
@@ -3522,20 +3565,21 @@ PARSER.add_argument(
     dest="add_ports",
     action="append",
     default=[],
-    metavar="[HOST:]CONTAINER",
+    metavar="[NAME=][HOST:]CONTAINER",
     help="For `config`: add one port to the stored `ports` list (or update its "
-    "HOST: pin if the container port is already listed), leaving the rest of "
-    "the list alone — unlike --port, which replaces the whole list. Repeatable.",
+    "NAME= label / HOST: pin if the container port is already listed), leaving "
+    "the rest of the list alone — unlike --port, which replaces the whole list. "
+    "Repeatable.",
 )
 PARSER.add_argument(
     "--remove-port",
     dest="remove_ports",
     action="append",
     default=[],
-    metavar="CONTAINER",
-    help="For `config`: remove a container port's entry from the stored `ports` "
-    "list (any HOST: prefix is ignored). Errors if the port isn't listed. "
-    "Repeatable.",
+    metavar="CONTAINER|NAME",
+    help="For `config`: remove a port's entry from the stored `ports` list, "
+    "matched by container port (any NAME=/HOST: decoration is ignored) or by "
+    "its label. Errors if nothing matches. Repeatable.",
 )
 PARSER.add_argument(
     "--add-secret",
@@ -3819,13 +3863,15 @@ PARSER.add_argument(
     dest="ports",
     action="append",
     default=[],
-    metavar="[HOST:]CONTAINER",
+    metavar="[NAME=][HOST:]CONTAINER",
     help="Forward a container port to the host, bound to 127.0.0.1. With a bare "
     "CONTAINER port docker picks a free host port per session — so parallel "
     "sessions never collide — discoverable with `yolo browse`; HOST: pins a "
-    "stable host port instead. Repeatable; also settable as `ports` in config, "
-    "where the lists concatenate across the layers and the CLI. With the "
-    "`browse` verb: which forwarded container port to open.",
+    "stable host port instead; NAME= labels the port (e.g. `web=8000`) so "
+    "browse/wip can pick it by name. Repeatable; also settable as `ports` in "
+    "config, where the lists concatenate across the layers and the CLI. With "
+    "the `browse` verb: which forwarded port to open, as the container port "
+    "number or its label.",
 )
 PARSER.add_argument(
     "--secret",
@@ -4160,7 +4206,9 @@ def build_claude_args(
         ),
         *(
             [
-                f"Container port(s) {', '.join(str(p) for p in forwarded_ports)} are "
+                "Container port(s) "
+                + ", ".join(f"{p} ({label})" if label else str(p) for label, p in forwarded_ports)
+                + " are "
                 "forwarded to the host: a web server you run on such a port is reachable "
                 "from the host, where the user opens it with `yolo browse` (or `b` in the "
                 "`yolo wip` dashboard). The server must listen on 0.0.0.0, not 127.0.0.1, "
@@ -4770,7 +4818,8 @@ def launch_container(
     the container later. `command` is the args after the image; `entrypoint`
     overrides the image ENTRYPOINT (used to drop into bash for `shell`); `mounts`
     is the resolved (dir, mode) list from --mount / the `mounts` config key;
-    `ports` the resolved (host-or-None, container) pairs from --port / `ports`;
+    `ports` the resolved (label-or-None, host-or-None, container) triples from
+    --port / `ports`;
     `plugin_dirs` the resolved local-plugin dirs from --plugin-dir / `plugin-dirs`;
     `extra_repos` the (worktree, common_git, slug) triples of a multi-repo topic's
     extra repos — each mounted like the primary worktree.
@@ -4908,7 +4957,7 @@ def launch_container(
     # Host port 0 = docker assigns a free ephemeral port, so parallel sessions
     # of the same project can't collide; `docker port` (via `yolo browse`) is
     # the registry of what was assigned — yolo keeps no port state of its own.
-    for host_port, container_port in ports:
+    for _, host_port, container_port in ports:
         args += ["-p", f"127.0.0.1:{host_port or 0}:{container_port}"]
 
     # --yolorc: bind-mount the rc read-only at a fixed path and point YOLO_RC at
@@ -5089,10 +5138,13 @@ def launch_container(
     args += ["--label", f"yolo.config-dir={host_claude_dir}"]
     if ports:
         # The container ports forwarded at launch, in config order (first =
-        # `browse`'s default). The label — not config — is what browse/ps read:
-        # it describes the *actual* container, which can't change after launch,
-        # while config describes the next one.
-        args += ["--label", "yolo.ports=" + ",".join(str(c) for _, c in ports)]
+        # `browse`'s default), each as `[name=]port`. The label — not config —
+        # is what browse/ps read: it describes the *actual* container, which
+        # can't change after launch, while config describes the next one.
+        args += [
+            "--label",
+            "yolo.ports=" + ",".join(f"{label}={c}" if label else str(c) for label, _, c in ports),
+        ]
 
     # Reset the session's activity status file (claude launches only — the
     # `shell` bash entrypoint has no hooks). The Stop/UserPromptSubmit hooks
@@ -6307,17 +6359,27 @@ PS_WATCH_INTERVAL = 2  # seconds between `ps --watch` refreshes
 _PORT_MAP_RE = re.compile(r"(?:[\d.]+:)?(\d+)->(\d+)/")
 
 
-def _condense_ports(raw: str) -> str:
-    """docker ps's PORTS blob as compact `host->container` pairs.
+def _condense_ports(raw: str, port_labels: str = "") -> str:
+    """docker ps's PORTS blob as compact `[label:]host->container` pairs.
 
     `127.0.0.1:55001->8000/tcp, [::]:8000->8000/tcp` -> `55001->8000` — drops
     the address and protocol noise and dedupes the IPv6 twin docker lists for
-    a 0.0.0.0 binding (possible via the raw `-- -p` passthrough).
+    a 0.0.0.0 binding (possible via the raw `-- -p` passthrough). `port_labels`
+    is the session's raw `yolo.ports` label; its `name=port` entries prefix the
+    matching mapping with the name (`web:55001->8000`).
     """
+    labels = {}
+    for entry in port_labels.split(","):
+        name, sep, port = entry.partition("=")
+        if sep:
+            labels[port] = name
     pairs = []
     for part in raw.split(","):
         m = _PORT_MAP_RE.search(part)
-        if m and (pair := f"{m.group(1)}->{m.group(2)}") not in pairs:
+        if not m:
+            continue
+        prefix = f"{labels[m.group(2)]}:" if m.group(2) in labels else ""
+        if (pair := f"{prefix}{m.group(1)}->{m.group(2)}") not in pairs:
             pairs.append(pair)
     return ",".join(pairs)
 
@@ -6392,6 +6454,7 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
             "{{.Ports}}",
             "{{.RunningFor}}",
             '{{.Label "yolo.config-dir"}}',
+            '{{.Label "yolo.ports"}}',
         )
     )
     try:
@@ -6405,11 +6468,11 @@ def _ps_rows(home: pathlib.Path) -> list[tuple[str, str, str, str, str]]:
     now = time.time()
     rows = []
     for line in out.splitlines():
-        name, topic, rawcwd, ports, up, cfgdir = (line.split("\t") + [""] * 6)[:6]
+        name, topic, rawcwd, ports, up, cfgdir, portlbl = (line.split("\t") + [""] * 7)[:7]
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(rawcwd)}.state"
         state = _read_session_state(state_file, now)
-        rows.append((name, topic or "-", _condense_ports(ports) or "-", up, state))
+        rows.append((name, topic or "-", _condense_ports(ports, portlbl) or "-", up, state))
     return rows
 
 
@@ -6794,6 +6857,7 @@ def _wip_sessions(home: pathlib.Path) -> list:
             "{{.RunningFor}}",
             "{{.CreatedAt}}",
             '{{.Label "yolo.extra-repos"}}',
+            '{{.Label "yolo.ports"}}',
         )
     )
     try:
@@ -6807,9 +6871,9 @@ def _wip_sessions(home: pathlib.Path) -> list:
     now = time.time()
     sessions = []
     for line in out.splitlines():
-        cid, name, topic, cwd, cfgdir, ports, up, created_at, extra = (line.split("\t") + [""] * 9)[
-            :9
-        ]
+        cid, name, topic, cwd, cfgdir, ports, up, created_at, extra, portlbl = (
+            line.split("\t") + [""] * 10
+        )[:10]
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(cwd)}.state"
         activity = _session_activity(state_file, now)
@@ -6821,7 +6885,7 @@ def _wip_sessions(home: pathlib.Path) -> list:
                 topic,
                 cwd,
                 cfgdir,
-                _condense_ports(ports),
+                _condense_ports(ports, portlbl),
                 up,
                 state,
                 age,
@@ -7572,18 +7636,25 @@ def _wip_startup_log(p, session) -> str:
 
 
 def _wip_browse(p, term) -> str:
-    """`b`: open a session's forwarded port, prompting to pick when there's >1."""
-    ports = _forwarded_ports(p["cid"])
-    if not ports:
+    """`b`: open a session's forwarded port, prompting to pick when there's >1.
+
+    The prompt shows each port as `label (port)` (bare port when unlabeled) and
+    accepts either the container port number or the label.
+    """
+    forwarded = _forwarded_ports(p["cid"])
+    if not forwarded:
         return "no forwarded ports for this session."
-    select = None
-    if len(ports) > 1:
-        choice = term.prompt_line(f"Which port? {', '.join(str(x) for x in ports)}: ")
+    select: int | str | None = None
+    if len(forwarded) > 1:
+        choice = term.prompt_line(f"Which port? {_describe_forwarded(forwarded)}: ")
         if not choice:
             return "cancelled."
-        if not choice.isdigit() or int(choice) not in ports:
+        if choice.isdigit() and int(choice) in [port for _, port in forwarded]:
+            select = int(choice)
+        elif choice in [label for label, _ in forwarded if label]:
+            select = choice
+        else:
             return f"not a forwarded port: {choice}"
-        select = int(choice)
     return f"opened {browse_session(p['cid'], select=select)}"
 
 
@@ -7928,7 +7999,7 @@ def _prompt_list_element(term, key):
             mode = _pick_one(term, "mount mode:", ["ro", "rw"])
             return f"{path}:{mode}" if mode else None
         return path
-    hint = {"ports": "[HOST:]CONTAINER", "secrets": "NAME[:TARGET]"}.get(key, "text")
+    hint = {"ports": "[NAME=][HOST:]CONTAINER", "secrets": "NAME[:TARGET]"}.get(key, "text")
     return term.prompt_line(f"{key} ({hint}): ") or None
 
 
@@ -8299,7 +8370,7 @@ def do_browse(
     home: pathlib.Path,
     cwd: pathlib.Path,
     *,
-    select: int | None = None,
+    select: int | str | None = None,
     print_only: bool = False,
 ) -> None:
     """`browse` verb: open the host browser at a running session's forwarded port.
@@ -8307,7 +8378,8 @@ def do_browse(
     The discoverability counterpart to the docker-assigned host ports: finds the
     session's container by the same label query `shell` uses (yolo.worktree for a
     TOPIC, yolo.cwd otherwise), reads the yolo.ports label for which container
-    ports were forwarded at launch (first = default; --port N selects another),
+    ports were forwarded at launch (first = default; --port selects another, by
+    container port number or label),
     resolves the assigned host port with `docker port`, prints the URL — always,
     so it's copy-pasteable — and opens it. No poll for the server actually
     listening: browse may legitimately run before Claude has started the server,
@@ -8326,22 +8398,36 @@ def do_browse(
     print(url)  # always, so it's copy-pasteable even when we also open it
 
 
-def _forwarded_ports(cid: str) -> list[int]:
-    """The container ports a session forwarded at launch (its `yolo.ports` label)."""
+def _forwarded_ports(cid: str) -> list[tuple[str | None, int]]:
+    """The (label, container-port) pairs a session forwarded at launch.
+
+    Parsed from the `yolo.ports` label, whose entries are `[name=]port` — bare
+    entries (all a pre-label yolo stamped) parse as unlabeled.
+    """
     label = _container_label(cid, "yolo.ports")
-    return [int(p) for p in label.split(",")] if label else []
+    out = []
+    for part in label.split(",") if label else []:
+        name, sep, port = part.partition("=")
+        out.append((name, int(port)) if sep else (None, int(part)))
+    return out
 
 
-def browse_session(cid: str, *, select: int | None = None, open_browser: bool = True) -> str:
+def _describe_forwarded(forwarded: list[tuple[str | None, int]]) -> str:
+    """`web (8000), 3000` — forwarded ports for prompts and error messages."""
+    return ", ".join(f"{label} ({port})" if label else str(port) for label, port in forwarded)
+
+
+def browse_session(cid: str, *, select: int | str | None = None, open_browser: bool = True) -> str:
     """Resolve a session's forwarded URL (and optionally open it); return the URL.
 
     The in-process core behind the `browse` verb and the dashboard's `b` action.
     Reads the container's `yolo.ports` label for what was forwarded at launch
-    (first = default; `select` picks another), resolves the assigned host port via
-    `docker port`, and returns `http://127.0.0.1:PORT/`. Opens it in the host
-    browser unless `open_browser` is False (the `--print`/`-n` case). Raises
-    `YoloError` when nothing was forwarded or `select` isn't among the forwarded
-    ports — so the dashboard can surface it instead of dying.
+    (first = default; `select` picks another, as a container port number or a
+    label), resolves the assigned host port via `docker port`, and returns
+    `http://127.0.0.1:PORT/`. Opens it in the host browser unless `open_browser`
+    is False (the `--print`/`-n` case). Raises `YoloError` when nothing was
+    forwarded or `select` isn't among the forwarded ports — so the dashboard can
+    surface it instead of dying.
     """
     forwarded = _forwarded_ports(cid)
     if not forwarded:
@@ -8350,12 +8436,23 @@ def browse_session(cid: str, *, select: int | None = None, open_browser: bool = 
             "add a port mapping to a running container. Configure one (e.g. "
             "`yolo config --add-port 8000`), exit the session, and `yolo resume`."
         )
-    port = select if select is not None else forwarded[0]
-    if port not in forwarded:
-        joined = ",".join(str(p) for p in forwarded)
-        raise YoloError(
-            f"container port {port} isn't forwarded for this session (forwarded: {joined})."
-        )
+    if select is None:
+        port = forwarded[0][1]
+    elif isinstance(select, str):
+        by_label = {label: port for label, port in forwarded if label}
+        if select not in by_label:
+            raise YoloError(
+                f"no forwarded port labeled {select!r} for this session "
+                f"(forwarded: {_describe_forwarded(forwarded)})."
+            )
+        port = by_label[select]
+    else:
+        port = select
+        if port not in [p for _, p in forwarded]:
+            raise YoloError(
+                f"container port {port} isn't forwarded for this session "
+                f"(forwarded: {_describe_forwarded(forwarded)})."
+            )
     url = f"http://127.0.0.1:{_docker_port(cid, port)}/"
     if open_browser:
         _open_url(url)
@@ -8724,14 +8821,22 @@ def _main():
         # Selection comes from cli_ports (the pre-config parse), NOT parsed.ports:
         # after the re-parse the config layers' `ports` list is mixed in, and a
         # configured port must not masquerade as an explicit selection.
-        select = None
+        select: int | str | None = None
         if cli_ports:
-            if len(cli_ports) > 1 or not cli_ports[0].isdigit():
+            if len(cli_ports) > 1:
                 sys.exit(
                     "browse: pass at most one --port, as the bare *container* port "
-                    "to open (e.g. `yolo browse --port 3000`)."
+                    "or the label to open (e.g. `yolo browse --port 3000`)."
                 )
-            select = int(cli_ports[0])
+            if cli_ports[0].isdigit():
+                select = int(cli_ports[0])
+            elif _PORT_LABEL_RE.match(cli_ports[0]):
+                select = cli_ports[0]
+            else:
+                sys.exit(
+                    "browse: --port takes the bare *container* port or the label to "
+                    "open (e.g. `yolo browse --port 3000` or `--port web`)."
+                )
         do_browse(topic, home, cwd, select=select, print_only=parsed.print_url)
         return
     if verb == "tokens":
@@ -8840,7 +8945,7 @@ def _main():
     # mounted file is still bind-mounted, just not announced as a working dir.
     mount_dirs = [path for path, _ in mounts if path.is_dir()]
     ports = _resolve_ports(parsed.ports)
-    container_ports = [c for _, c in ports]
+    forwarded_port_pairs = [(label, c) for label, _, c in ports]
     # Local plugin dirs: bind-mounted ro (in launch_container) and passed to
     # claude as --plugin-dir (in build_claude_args), so their bundled skills load
     # for yolo sessions only.
@@ -9028,7 +9133,7 @@ def _main():
             resume=parsed.resume,
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
-            forwarded_ports=container_ports,
+            forwarded_ports=forwarded_port_pairs,
             multi_repo_dirs=extra_worktree_dirs,
             cwd_mode=worktree_name is None,
             status_state_path=session_status_path,
@@ -9054,7 +9159,7 @@ def _main():
                 name=session_name,
                 add_dirs=mount_dirs,
                 plugin_dirs=plugin_dirs,
-                forwarded_ports=container_ports,
+                forwarded_ports=forwarded_port_pairs,
                 cwd_mode=worktree_name is None,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
@@ -9070,7 +9175,7 @@ def _main():
                 name=session_name,
                 add_dirs=mount_dirs,
                 plugin_dirs=plugin_dirs,
-                forwarded_ports=container_ports,
+                forwarded_ports=forwarded_port_pairs,
                 cwd_mode=worktree_name is None,
                 status_state_path=session_status_path,
                 extra_hooks=session_hooks,
@@ -9083,7 +9188,7 @@ def _main():
             name=session_name,
             add_dirs=mount_dirs,
             plugin_dirs=plugin_dirs,
-            forwarded_ports=container_ports,
+            forwarded_ports=forwarded_port_pairs,
             multi_repo_dirs=extra_worktree_dirs,
             cwd_mode=worktree_name is None,
             status_state_path=session_status_path,

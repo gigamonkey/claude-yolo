@@ -12,6 +12,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   `/etc/timezone`) at session start — from the claude launch wrapper and from
   `.bashrc` for `yolo shell` — as a silent no-op when `TZ` is unset or unknown.
 
+- **Forwarded ports can carry a label** — the port spec grows an optional
+  `NAME=` prefix (`--port web=8000`, `web=9000:8000` with a host pin), and
+  everywhere a forwarded port is picked now takes the label or the container
+  port number: `yolo browse --port web`, and the `wip` dashboard's `b` prompt,
+  which lists ports as `web (8000)`. Labels also show in the `ps`/`wip` PORTS
+  column (`web:55001->8000`) and in the container system prompt, so Claude
+  knows which service belongs on which port. `config --remove-port` matches by
+  label too, and `--add-port` on an already-listed container port
+  attaches/renames its label. Labels are always optional; unlabeled specs and
+  numeric selection work exactly as before.
+
 - **README now documents the `YOLO_SESSION` and `YOLO_WORKDIR` env vars** (in
   the "Wires up the container" list). Both were previously covered only in
   ARCHITECTURE.md.

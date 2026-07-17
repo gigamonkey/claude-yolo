@@ -36,11 +36,32 @@ def system_prompt(cy, argv):
 
 
 def test_parse_port_spec_bare_and_pinned(cy):
-    assert cy._parse_port_spec("8000") == (None, 8000)
-    assert cy._parse_port_spec("9000:8000") == (9000, 8000)
+    assert cy._parse_port_spec("8000") == (None, None, 8000)
+    assert cy._parse_port_spec("9000:8000") == (None, 9000, 8000)
 
 
-@pytest.mark.parametrize("bad", ["nope", "0", "65536", ":8000", "8000:", "1.2.3.4:80", "a:80"])
+def test_parse_port_spec_labeled(cy):
+    assert cy._parse_port_spec("web=8000") == ("web", None, 8000)
+    assert cy._parse_port_spec("web-2=9000:8000") == ("web-2", 9000, 8000)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "nope",
+        "0",
+        "65536",
+        ":8000",
+        "8000:",
+        "1.2.3.4:80",
+        "a:80",
+        "80=8000",  # an all-digits label would be ambiguous with a port number
+        "=8000",
+        "a b=8000",
+        "web=",
+        "a=b=8000",
+    ],
+)
 def test_parse_port_spec_rejects_malformed(cy, bad):
     with pytest.raises(SystemExit, match="port"):
         cy._parse_port_spec(bad)
@@ -49,7 +70,21 @@ def test_parse_port_spec_rejects_malformed(cy, bad):
 def test_resolve_ports_dedupes_by_container_port_later_wins(cy):
     # same container port across layers: the later (higher-precedence) spec wins,
     # but the first occurrence keeps its position (it stays browse's default)
-    assert cy._resolve_ports(["8000", "3000", "9000:8000"]) == [(9000, 8000), (None, 3000)]
+    assert cy._resolve_ports(["8000", "3000", "9000:8000"]) == [
+        (None, 9000, 8000),
+        (None, None, 3000),
+    ]
+
+
+def test_resolve_ports_later_spec_replaces_label_too(cy):
+    # the higher layer's spec wins wholesale: a bare re-spec drops the label
+    assert cy._resolve_ports(["web=8000", "8000"]) == [(None, None, 8000)]
+    assert cy._resolve_ports(["8000", "web=9000:8000"]) == [("web", 9000, 8000)]
+
+
+def test_resolve_ports_rejects_duplicate_label_across_ports(cy):
+    with pytest.raises(SystemExit, match="label 'web'"):
+        cy._resolve_ports(["web=8000", "web=3000"])
 
 
 # --- launch assembly --------------------------------------------------------
@@ -77,6 +112,15 @@ def test_port_host_pin(cy, run_cli, flag_values, dirs):
     home, work = dirs
     argv = run_cli(["--port", "8000:8000"], home=home, cwd=work)
     assert flag_values(argv, "-p") == ["127.0.0.1:8000:8000"]
+
+
+def test_labeled_port_stamps_label_and_names_it_in_prompt(cy, run_cli, flag_values, dirs):
+    home, work = dirs
+    argv = run_cli(["--port", "web=8000", "--port", "3000"], home=home, cwd=work)
+    # the label never reaches the -p publishing, only the yolo.ports label
+    assert flag_values(argv, "-p") == ["127.0.0.1:0:8000", "127.0.0.1:0:3000"]
+    assert "yolo.ports=web=8000,3000" in flag_values(argv, "--label")
+    assert "8000 (web), 3000" in system_prompt(cy, argv)
 
 
 def test_malformed_port_spec_exits(cy, run_cli, dirs):
@@ -147,6 +191,33 @@ def test_config_remove_port_ignores_host_pin(cy, run_cli, dirs):
     run_cli(["config", "--port", "9000:8000", "--port", "3000"], home=home, cwd=work)
     run_cli(["config", "--remove-port", "8000"], home=home, cwd=work)
     assert entry(home, work) == {"ports": ["3000"]}
+
+
+def test_config_add_port_attaches_label_to_listed_port(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--port", "8000"], home=home, cwd=work)
+    run_cli(["config", "--add-port", "web=8000"], home=home, cwd=work)
+    assert entry(home, work) == {"ports": ["web=8000"]}
+
+
+def test_config_remove_port_by_label(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--port", "web=8000", "--port", "3000"], home=home, cwd=work)
+    run_cli(["config", "--remove-port", "web"], home=home, cwd=work)
+    assert entry(home, work) == {"ports": ["3000"]}
+
+
+def test_config_remove_labeled_port_by_number(cy, run_cli, dirs):
+    home, work = dirs
+    run_cli(["config", "--port", "web=8000", "--port", "3000"], home=home, cwd=work)
+    run_cli(["config", "--remove-port", "8000"], home=home, cwd=work)
+    assert entry(home, work) == {"ports": ["3000"]}
+
+
+def test_launch_rejects_duplicate_labels(cy, run_cli, dirs):
+    home, work = dirs
+    with pytest.raises(SystemExit, match="label 'web'"):
+        run_cli(["--port", "web=8000", "--port", "web=3000"], home=home, cwd=work)
 
 
 def test_config_remove_absent_port_errors(cy, run_cli, dirs):
@@ -220,8 +291,33 @@ def test_browse_rejects_multiple_or_pinned_port_selections(cy, run_cli, dirs, br
     home, work = dirs
     with pytest.raises(SystemExit, match="at most one"):
         run_cli(["browse", "--port", "8000", "--port", "3000"], home=home, cwd=work)
-    with pytest.raises(SystemExit, match="at most one"):
+    with pytest.raises(SystemExit, match="container.*port or the label"):
         run_cli(["browse", "--port", "9000:8000"], home=home, cwd=work)
+
+
+@pytest.fixture
+def labeled_browse_env(cy, browse_env, monkeypatch):
+    """browse_env, but the session's yolo.ports label carries `web=8000`."""
+    monkeypatch.setattr(cy, "_container_label", lambda cid, key: "web=8000,3000")
+    return browse_env
+
+
+def test_browse_selects_by_label(cy, run_cli, dirs, labeled_browse_env):
+    home, work = dirs
+    run_cli(["browse", "--port", "web"], home=home, cwd=work)
+    assert labeled_browse_env == ["http://127.0.0.1:55001/"]
+
+
+def test_browse_labeled_port_still_selects_by_number(cy, run_cli, dirs, labeled_browse_env):
+    home, work = dirs
+    run_cli(["browse", "--port", "8000"], home=home, cwd=work)
+    assert labeled_browse_env == ["http://127.0.0.1:55001/"]
+
+
+def test_browse_unknown_label_errors_listing_forwarded(cy, run_cli, dirs, labeled_browse_env):
+    home, work = dirs
+    with pytest.raises(SystemExit, match=r"labeled 'api'.*web \(8000\), 3000"):
+        run_cli(["browse", "--port", "api"], home=home, cwd=work)
 
 
 def test_browse_without_running_container_errors(cy, run_cli, dirs, browse_env, monkeypatch):
@@ -255,6 +351,58 @@ def test_print_only_applies_to_browse(cy, run_cli, dirs):
     home, work = dirs
     with pytest.raises(SystemExit, match="--print"):
         run_cli(["start", "--print"], home=home, cwd=work)
+
+
+# --- the wip dashboard's port picker ----------------------------------------
+
+
+class _Term:
+    """A stub of the dashboard terminal: canned prompt_line answer, prompt capture."""
+
+    def __init__(self, answer=""):
+        self.answer = answer
+        self.prompts = []
+
+    def prompt_line(self, prompt):
+        self.prompts.append(prompt)
+        return self.answer
+
+
+@pytest.fixture
+def wip_browse_env(cy, monkeypatch):
+    """Stub the docker queries behind _wip_browse; returns the opened-URL capture."""
+    opened = []
+    monkeypatch.setattr(cy, "_container_label", lambda cid, key: "web=8000,3000")
+    monkeypatch.setattr(cy, "_docker_port", lambda cid, port: {8000: 55001, 3000: 55002}[port])
+    monkeypatch.setattr(cy, "_open_url", lambda url: opened.append(url))
+    return opened
+
+
+def test_wip_browse_prompt_shows_labels_and_accepts_one(cy, wip_browse_env):
+    term = _Term("web")
+    assert "55001" in cy._wip_browse({"cid": "abc123"}, term)
+    assert term.prompts == ["Which port? web (8000), 3000: "]
+    assert wip_browse_env == ["http://127.0.0.1:55001/"]
+
+
+def test_wip_browse_still_accepts_a_port_number(cy, wip_browse_env):
+    assert "55002" in cy._wip_browse({"cid": "abc123"}, _Term("3000"))
+    assert wip_browse_env == ["http://127.0.0.1:55002/"]
+
+
+def test_wip_browse_rejects_unknown_choice(cy, wip_browse_env):
+    assert cy._wip_browse({"cid": "abc123"}, _Term("api")) == "not a forwarded port: api"
+    assert wip_browse_env == []
+
+
+# --- the ps/wip PORTS column ------------------------------------------------
+
+
+def test_condense_ports_prefixes_labeled_mappings(cy):
+    raw = "127.0.0.1:55001->8000/tcp, 127.0.0.1:55002->3000/tcp"
+    assert cy._condense_ports(raw, "web=8000,3000") == "web:55001->8000,55002->3000"
+    # an old-style all-bare label leaves the rendering unchanged
+    assert cy._condense_ports(raw, "8000,3000") == "55001->8000,55002->3000"
 
 
 # --- the docker port query --------------------------------------------------

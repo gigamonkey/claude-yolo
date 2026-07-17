@@ -59,8 +59,10 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py dockerfile               # print the built-in default Dockerfile (a starting point)
 ./yolo.py --port 8000              # forward container port 8000 (docker picks the host port)
 ./yolo.py --port 8000:8000         # ...or pin host port 8000 (single-session)
+./yolo.py --port web=8000          # ...or label it, for selection by name
 ./yolo.py browse                   # open the browser at this session's forwarded port
 ./yolo.py browse fix-auth          # ...or at a worktree session's
+./yolo.py browse --port web        # ...or a specific port, by label or container port
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
 ./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
 ./yolo.py forget-token             # delete this config dir's token (local only)
@@ -316,7 +318,7 @@ on top of whichever auth is chosen:
   dups deduped; on a same-path ro/rw conflict the higher layer wins). A `shell`
   exec'd into a *running* container necessarily joins it with the mounts it was
   started with — docker can't add mounts to a live container.
-- **`--port [HOST:]CONTAINER`** (repeatable; `ports` in config) → forward a
+- **`--port [NAME=][HOST:]CONTAINER`** (repeatable; `ports` in config) → forward a
   container port to the host, always **loopback-bound** (`-p 127.0.0.1:…`; a host
   *address* is deliberately not expressible, so config can't put the container's
   server on the LAN — the raw `-- -p` passthrough is the escape hatch). A bare
@@ -324,11 +326,16 @@ on top of whichever auth is chosen:
   port per session, so parallel sessions of one project never collide, and
   `docker port` (via `yolo browse`) is the registry of what was assigned — yolo
   keeps no port state. `HOST:` pins a stable host port (single-session;
-  a concurrent second session fails at `docker run` with address-in-use). Port
+  a concurrent second session fails at `docker run` with address-in-use).
+  `NAME=` labels the port (`web=8000`), so `browse`/`wip` can select it by
+  name; labels match `[A-Za-z][A-Za-z0-9_-]*` (never all-digits, none of the
+  `,`/`:`/`=` separators) and must be unique across a session's ports. Port
   lists concatenate across layers/CLI like `mounts` (same-container-port
-  conflict → higher layer wins; first-configured port is `browse`'s default).
-  Each launch with ports stamps a **`yolo.ports`** label (container ports,
-  config order) — what `browse`/`ps` read, describing the *actual* container —
+  conflict → higher layer wins *wholesale*, label and pin included;
+  first-configured port is `browse`'s default).
+  Each launch with ports stamps a **`yolo.ports`** label (`[name=]port`
+  entries, config order) — what `browse`/`ps` read, describing the *actual*
+  container —
   and adds a system-prompt line telling Claude servers must bind **0.0.0.0**
   (loopback-bound servers are unreachable through docker's forward), that
   the user opens them with `yolo browse` (or `b` in the `wip` dashboard), and to
@@ -1448,7 +1455,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   on `<run-dir>/<name>/startup.log` in a new `log-<name>` window — the log exists
   only for sessions yolo spawned into tmux; see the startup-log paragraph in the
   tmux section), `b` browses a
-  forwarded port (prompting if >1), `s`
+  forwarded port (prompting if >1, by container port number or label), `s`
   stops, `f` finishes, `r` rebases, `m` on a worktree row (or any worktree-backed
   session row, even a `working` one — the merge only reads the branch's committed
   tip, so it has no idle guard) **merges** the branch into its base while keeping
@@ -1533,8 +1540,9 @@ gracefully outside one — there's just no repo slug to label/find by).
 - **`browse [TOPIC]`** — open the host browser at a running session's forwarded
   port (`do_browse`): find the container by the same label query `shell` uses
   (worktree label with a `TOPIC`, cwd label without), read its `yolo.ports`
-  label for what was forwarded *at launch* (first = default; `--port N` selects
-  another — read from the **first** parse's CLI-only values, so a config
+  label for what was forwarded *at launch* (first = default; `--port` selects
+  another, by container port number or label — read from the **first** parse's
+  CLI-only values, so a config
   `ports` list can't masquerade as a selection), resolve the assigned host port
   via `docker port` (`_docker_port`), print `http://127.0.0.1:PORT/` (always —
   copy-pasteable), and `open` it (`_open_url`, the test seam; `--print`/`-n`
@@ -2326,11 +2334,13 @@ freshly-edited global `~/.yolo.json` *and* from the worktree's own repo entry
 overriding global; `None` home → built-in defaults), and `_complete_path`
 (single-match full-fill, multi-match common-prefix + basename options, `~`
 expansion, no-match unchanged) + `_wip_items` appending the `+` row.
-`test_ports.py` covers the `--port`/`ports` axis (spec parsing, launch
-assembly + the `yolo.ports` label + the 0.0.0.0 prompt line, layer
-concatenation, the `config` port edits) and the `browse` verb (the docker
-queries stubbed at `running_container_for`/`_container_label`/`_docker_port`
-and the `_open_url` seam).
+`test_ports.py` covers the `--port`/`ports` axis (spec parsing incl. `NAME=`
+labels, launch assembly + the `yolo.ports` label + the 0.0.0.0 prompt line,
+layer concatenation, the `config` port edits incl. remove-by-label), the
+`browse` verb (the docker queries stubbed at
+`running_container_for`/`_container_label`/`_docker_port` and the `_open_url`
+seam; selection by port number or label), the `wip` port picker
+(`_wip_browse`), and `_condense_ports`' label prefixes.
 `test_plugin_dirs.py` covers the `--plugin-dir`/`plugin-dirs` axis: spec parsing
 (`_parse_plugin_dir_spec` resolve/missing, `_resolve_plugin_dirs` dedup), launch
 assembly (the read-only `-v` at the identical path + the `--plugin-dir` claude

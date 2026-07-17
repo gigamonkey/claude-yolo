@@ -687,7 +687,7 @@ def test_browse_session_one_port(cy, monkeypatch):
 
 
 def test_browse_session_prompts_for_multiple_ports(cy, monkeypatch):
-    monkeypatch.setattr(cy, "_forwarded_ports", lambda cid: [8000, 3000])
+    monkeypatch.setattr(cy, "_forwarded_ports", lambda cid: [(None, 8000), (None, 3000)])
     seen = []
     monkeypatch.setattr(cy, "browse_session", lambda cid, select=None: seen.append(select) or "ok")
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
