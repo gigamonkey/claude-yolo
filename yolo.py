@@ -6855,7 +6855,7 @@ WipSession = collections.namedtuple(
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
 WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
-WIP_WORKTREE_HEADERS = ("REPO", "TOPIC", "STATUS", "COMMITS", "DIRECTORY")
+WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS", "DIRECTORY")
 WIP_PROJECT_HEADERS = ("REPO", "DIRECTORY")
 
 
@@ -7048,6 +7048,9 @@ def _wip_items(home: pathlib.Path) -> dict:
         running_paths=running_paths,
         base_resolver=lambda root, wt: _worktree_config(home, root, wt)[0],
     )
+    # The dashboard leads with TOPIC, so order to match (topic, then repo) rather
+    # than _worktree_rows' repo-first order.
+    worktrees.sort(key=lambda w: (w.topic, w.repo_name))
     projects = _wip_projects(home, sessions)
 
     session_items = []
@@ -7080,7 +7083,7 @@ def _wip_items(home: pathlib.Path) -> dict:
         WipItem(
             "worktree",
             f"worktree:{w.slug}:{w.topic}",
-            (w.repo_name, w.topic_label, w.status, w.commits, w.directory),
+            (w.topic_label, w.repo_name, w.status, w.commits, w.directory),
             {
                 "worktree": w.worktree,
                 "main_root": w.main_root,
@@ -7179,10 +7182,10 @@ def _color_commits(commits: str) -> str:
 
 
 def _color_worktree_row(it) -> tuple:
-    repo, topic, status, commits, directory = it.cols
+    topic, repo, status, commits, directory = it.cols
     return (
-        _fg(repo, _CYAN),
         _fg(topic, _BLUE),
+        _fg(repo, _CYAN),
         _color_status(status),
         _color_commits(commits),
         _fg(directory, _GREY),
