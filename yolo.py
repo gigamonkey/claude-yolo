@@ -1391,8 +1391,11 @@ def timezone_args() -> list[str]:
 
     The container image is otherwise UTC, so timestamps Claude produces (commit
     dates, log lines, "what time is it") drift from the user's clock. A TZ env
-    var is enough: glibc, git, Python, and Node all honor it, and the Ubuntu base
-    image ships tzdata. Host detection: an explicit host $TZ wins; otherwise the
+    var covers glibc, git, Python, and Node (the Ubuntu base image ships tzdata);
+    for the odd tool that reads /etc/localtime directly instead, the baked
+    /etc/yolo/set-timezone.sh — run at session start by the claude launch wrapper
+    and .bashrc — repoints that symlink at the same zone.
+    Host detection: an explicit host $TZ wins; otherwise the
     IANA zone name is read off the /etc/localtime symlink (macOS points it into
     /var/db/timezone/zoneinfo/, Linux into /usr/share/zoneinfo/), falling back to
     Debian-style /etc/timezone when /etc/localtime is a plain file copy. Returns
@@ -5114,7 +5117,11 @@ def launch_container(
     # is the common path), `clones`, and/or --yolorc — drop into bash to do it before
     # exec'ing the reconstructed claude command. claude isn't a shell, so it never
     # reads .bashrc (where `yolo shell` gets the secrets/rc) — the wrapper is how a
-    # claude session picks them up. The order is **secrets → clones → rc → claude**:
+    # claude session picks them up. The order is **timezone → secrets → clones → rc
+    # → claude**:
+    #   - the timezone fix-up (the baked /etc/yolo/set-timezone.sh, pointing
+    #     /etc/localtime at the forwarded $TZ) goes first — it's independent of the
+    #     rest and container-global, so everything after it sees the right clock;
     #   - secrets (`source`, not run, so the exports reach claude's env) go first so a
     #     clone over --ssh-agent-rewritten HTTPS — or anything else needing a secret —
     #     can authenticate;
@@ -5139,6 +5146,7 @@ def launch_container(
         entrypoint = "/bin/bash"
         command = [
             "-c",
+            "[ -f /etc/yolo/set-timezone.sh ] && bash /etc/yolo/set-timezone.sh; "
             "[ -f /etc/yolo/load-secrets.sh ] && . /etc/yolo/load-secrets.sh; "
             f"{clone_cmds}"
             '[ -f "$YOLO_RC" ] && { . "$YOLO_RC" || '

@@ -31,6 +31,10 @@ def test_default_dockerfile_markers(cy):
     assert "FROM ubuntu:26.04" in df
     assert "useradd -m -s /bin/bash --uid ${HOST_UID} -G root claude" in df
     assert 'ENTRYPOINT ["claude", "--dangerously-skip-permissions"]' in df
+    # the baked timezone fix-up: written while root, run from .bashrc for shells
+    # (the claude launch wrapper in yolo.py runs it for claude sessions)
+    assert "> /etc/yolo/set-timezone.sh" in df
+    assert "bash /etc/yolo/set-timezone.sh" in df
 
 
 def test_secrets_loader_uses_real_newlines(cy):

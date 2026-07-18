@@ -38,6 +38,15 @@ RUN mkdir -p /etc/yolo && printf '%s\n'   '[ -d /run/secrets ] || return 0'   'f
 # expand $1/$(...); run via `bash` so the opts array works. claude has NOPASSWD sudo.
 RUN mkdir -p /etc/yolo && printf '%s\n'   'url="$1"; dir="$2"; depth="$3"'   '[ -e "$dir" ] && { echo "yolo: $dir already exists, skipping clone of $url" >&2; exit 0; }'   'parent="$(dirname "$dir")"'   '[ -d "$parent" ] || sudo mkdir -p "$parent"'   '[ -w "$parent" ] || sudo chown "$(id -u):$(id -g)" "$parent"'   'opts=(); [ -n "$depth" ] && opts=(--depth "$depth")'   'git clone "${opts[@]}" "$url" "$dir" || echo "yolo: clone failed: $url -> $dir" >&2'   > /etc/yolo/clone.sh
 
+# `bash /etc/yolo/set-timezone.sh`: point /etc/localtime (and /etc/timezone) at the
+# forwarded $TZ so tools that read the file directly instead of honoring the env var
+# agree with the host clock. Run at session start from the claude launch wrapper and
+# from .bashrc (for `yolo shell`). A silent no-op when TZ is unset, not a zone the
+# image's tzdata knows, or passwordless sudo is unavailable (`sudo -n` so a custom
+# image without it fails fast instead of prompting). Single-quoted so the build
+# shell doesn't expand $TZ/$tz.
+RUN mkdir -p /etc/yolo && printf '%s\n'   'tz="${TZ#:}"'   '[ -n "$tz" ] && [ -f "/usr/share/zoneinfo/$tz" ] || exit 0'   'sudo -n ln -sfn "/usr/share/zoneinfo/$tz" /etc/localtime 2>/dev/null || exit 0'   'printf "%s\n" "$tz" | sudo -n tee /etc/timezone >/dev/null 2>&1 || true'   > /etc/yolo/set-timezone.sh
+
 USER claude
 # Use the native installer (~/.local/bin/claude), NOT `npm install -g`. The npm global
 # install lands at /usr/local/bin/claude, which Claude Code's `/doctor` flags as a broken
@@ -53,6 +62,11 @@ RUN echo 'if [ -n "$YOLO_PS1" ]; then PS1="$YOLO_PS1"; fi' >> /home/claude/.bash
 # nested subshells from re-running it; claude launches source it via the launch
 # wrapper (claude isn't a shell, so .bashrc never runs for it).
 RUN echo 'if [ -z "$YOLO_SECRETS_SOURCED" ] && [ -f /etc/yolo/load-secrets.sh ]; then export YOLO_SECRETS_SOURCED=1; . /etc/yolo/load-secrets.sh; fi' >> /home/claude/.bashrc
+# Fix up /etc/localtime from $TZ once per interactive shell tree, so a standalone
+# `yolo shell` container (which never runs the claude launch wrapper) gets it too.
+# Idempotent, so re-running in an exec'd shell is harmless; the sentinel just skips
+# the redundant sudo in nested subshells.
+RUN echo 'if [ -z "$YOLO_TZ_SET" ] && [ -f /etc/yolo/set-timezone.sh ]; then export YOLO_TZ_SET=1; bash /etc/yolo/set-timezone.sh; fi' >> /home/claude/.bashrc
 # Source the --yolorc file (mounted at $YOLO_RC) once per interactive shell tree,
 # so `yolo shell` gets the same per-session setup claude launches do. The sentinel
 # keeps nested subshells from re-running it. claude launches don't read .bashrc;

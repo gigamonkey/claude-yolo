@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`/etc/localtime` inside the container now follows the host timezone.**
+  Timezone forwarding previously set only the `TZ` env var, so the rare tool
+  that reads `/etc/localtime` directly still saw UTC. A baked
+  `/etc/yolo/set-timezone.sh` now repoints the symlink (and writes
+  `/etc/timezone`) at session start — from the claude launch wrapper and from
+  `.bashrc` for `yolo shell` — as a silent no-op when `TZ` is unset or unknown.
+
 - **README now documents the `YOLO_SESSION` and `YOLO_WORKDIR` env vars** (in
   the "Wires up the container" list). Both were previously covered only in
   ARCHITECTURE.md.

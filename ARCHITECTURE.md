@@ -474,8 +474,8 @@ on top of whichever auth is chosen:
   bind-mounted **read-only** at the fixed `/home/claude/.yolorc`
   (`_YOLORC_CONTAINER_PATH`) and `YOLO_RC` is pointed at it. **Two source paths,
   one per session kind:** a *claude* launch is command-wrapped — yolo overrides the
-  entrypoint to `/bin/bash` and runs `<load-secrets>; <clones>; . "$YOLO_RC"; exec
-  claude …` (so the rc is sourced *after* any clones, since an rc commonly starts a
+  entrypoint to `/bin/bash` and runs `<set-timezone>; <load-secrets>; <clones>;
+  . "$YOLO_RC"; exec claude …` (so the rc is sourced *after* any clones, since an rc commonly starts a
   server depending on a clone; claude isn't a shell, so `.bashrc` never runs for
   it); the claude args are passed positionally
   to `"$@"` so the `--settings` JSON and OAuth token need no re-quoting. A `yolo
@@ -2063,8 +2063,13 @@ request shouldn't silently become a fresh session).
   explicit host `$TZ` wins, else the IANA zone name is read off the
   `/etc/localtime` symlink (macOS and Linux point it into a `zoneinfo/` tree),
   else Debian-style `/etc/timezone`. If none resolves, nothing is forwarded and
-  the container stays on UTC. A `TZ` env var is sufficient because glibc, git,
-  Python, and Node all honor it and the Ubuntu base image ships tzdata.
+  the container stays on UTC. A `TZ` env var covers glibc, git, Python, and Node
+  (the Ubuntu base image ships tzdata); for tools that read `/etc/localtime`
+  directly instead of honoring `$TZ`, the baked `/etc/yolo/set-timezone.sh`
+  repoints that symlink (and writes `/etc/timezone`) at session start — run from
+  the claude launch wrapper and from `.bashrc` (for `yolo shell`), a silent no-op
+  when `$TZ` is unset, unknown to the image's tzdata, or passwordless sudo is
+  missing.
 - **`YOLO_SESSION` is exported into every container** (in `launch_container`'s
   shared arg list, so it covers claude sessions and `yolo shell` alike; a `docker
   exec`-ed shell inherits it too). It's a deterministic marker that code running

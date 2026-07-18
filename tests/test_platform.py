@@ -259,3 +259,18 @@ def test_timezone_undeterminable_forwards_nothing(cy, monkeypatch):
     monkeypatch.delenv("TZ", raising=False)
     _stub_localtime(cy, monkeypatch)
     assert cy.timezone_args() == []
+
+
+def test_timezone_wrapper_runs_set_timezone_script(cy, run_cli, tmp_path):
+    # The container-side half of TZ forwarding: a wrapped claude launch (the
+    # default oauth-token mode wraps) runs the baked set-timezone.sh — which
+    # repoints /etc/localtime at $TZ — before the secrets loader.
+    home, work = tmp_path / "home", tmp_path / "work"
+    home.mkdir()
+    work.mkdir()
+    argv = run_cli([], home=home, cwd=work)
+    i = next(i for i, a in enumerate(argv) if a.startswith(cy.DOCKER_IMAGE_REPO + ":"))
+    assert argv[i + 1] == "-c"
+    wrapper = argv[i + 2]
+    assert "/etc/yolo/set-timezone.sh" in wrapper
+    assert wrapper.index("set-timezone.sh") < wrapper.index("load-secrets.sh")
