@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The diff-stat picker scrolls when the stat outgrows the terminal.** A diff
+  touching more files than the window has rows used to overflow the screen,
+  leaving the selection bar (and the title) pushed off the top. The picker now
+  draws a viewport that starts at the top of the list and follows the selection
+  as it moves past either edge, with a `selected/total` position cue in the
+  title while the list overflows.
+
 - **`/etc/localtime` inside the container now follows the host timezone.**
   Timezone forwarding previously set only the `TZ` env var, so the rare tool
   that reads `/etc/localtime` directly still saw UTC. A baked

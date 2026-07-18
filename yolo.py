@@ -5913,20 +5913,31 @@ def _git_lines(cwd: pathlib.Path, *args) -> list:
     ).stdout.splitlines()
 
 
-def _draw_diff_stat(topic: str, base: str, stat_lines: list, nfiles: int, selected: int) -> None:
+def _draw_diff_stat(
+    topic: str, base: str, stat_lines: list, nfiles: int, selected: int, top: int, body: int
+) -> None:
     """One diff-stat frame: title, the stat lines (file lines `0..nfiles-1`
     selectable, the trailing summary dim), and a key hint. The selected file line is
-    a reverse-video bar."""
+    a reverse-video bar.
+
+    Only `stat_lines[top:top+body]` are drawn — the viewport `_diff_stat_loop`
+    maintains — so a stat taller than the terminal scrolls with the selection
+    instead of pushing the bar off-screen. When it does, the title carries a
+    `selected/nfiles` position cue. The footer is printed without a trailing
+    newline so the frame's last row can't nudge the title off the top.
+    """
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
-    print(f"\x1b[1;36mdiff\x1b[0m \x1b[90m{topic} vs {base}\x1b[0m\n")
-    for i, line in enumerate(stat_lines):
+    pos = f" · {selected + 1}/{nfiles}" if len(stat_lines) > body else ""
+    print(f"\x1b[1;36mdiff\x1b[0m \x1b[90m{topic} vs {base}{pos}\x1b[0m\n")
+    for i in range(top, min(top + body, len(stat_lines))):
+        line = stat_lines[i]
         if i >= nfiles:  # the "N files changed, …" summary
             print(f"\x1b[90m{line}\x1b[0m")
         elif i == selected:
             print(f"\x1b[7m{line}\x1b[0m")
         else:
             print(line)
-    print("\n\x1b[90mj/k move · Enter/Space open file diff · q quit\x1b[0m")
+    print("\n\x1b[90mj/k move · Enter/Space open file diff · q quit\x1b[0m", end="", flush=True)
 
 
 def _diff_stat_loop(files, stat_lines, worktree, diff_from, session, topic, base, term) -> None:
@@ -5936,10 +5947,20 @@ def _diff_stat_loop(files, stat_lines, worktree, diff_from, session, topic, base
     <file>` in a new tmux window (paged), q/Esc returns (the picker window closes).
     The two-dot `diff_from` (a merge-base) diffs against the working tree, so a
     file's uncommitted changes show alongside its committed ones.
+
+    `top` is the viewport's first stat line: it stays put while the selection
+    moves inside the visible slice and follows it past either edge, so long stat
+    lists scroll instead of overflowing the screen. The terminal height is
+    re-read every frame, so a resize just reshapes the next draw.
     """
-    selected = 0
+    selected = top = 0
     while True:
-        _draw_diff_stat(topic, base, stat_lines, len(files), selected)
+        rows = shutil.get_terminal_size((80, 24)).lines
+        body = max(1, rows - 4)  # minus title + blank above, blank + key hint below
+        top = max(0, min(top, len(stat_lines) - body, selected))
+        if selected >= top + body:
+            top = selected - body + 1
+        _draw_diff_stat(topic, base, stat_lines, len(files), selected, top, body)
         key = term.wait_key(86400)  # block for a key; the stat is static, no refresh
         if key in ("q", "\x1b"):
             return

@@ -9,6 +9,7 @@ itself is covered in test_tmux (the `wip --_dashboard` command).
 
 import contextlib
 import json
+import os
 import pathlib
 import subprocess
 import types
@@ -1171,11 +1172,36 @@ def test_diff_stat_loop_enter_opens_and_q_quits_without_spawn(cy, monkeypatch):
 
 
 def test_draw_diff_stat_highlights_file_and_dims_summary(cy, capsys):
-    cy._draw_diff_stat("topic", "HEAD", DIFF_STAT, 3, 1)  # 3 files, b.py selected
+    cy._draw_diff_stat("topic", "HEAD", DIFF_STAT, 3, 1, 0, 20)  # 3 files, b.py selected
     out = capsys.readouterr().out
     assert "\x1b[7m b.py" in out  # selected file line is a reverse-video bar
     assert "\x1b[90m 3 files changed" in out  # the summary line is dim
     assert " a.py" in out and " c.py" in out  # other files shown plainly
+    assert "2/3" not in out  # everything fits → no position cue in the title
+
+
+def test_draw_diff_stat_windows_to_viewport(cy, capsys):
+    # Only stat_lines[top:top+body] render; the title gains a selected/nfiles cue.
+    cy._draw_diff_stat("topic", "HEAD", DIFF_STAT, 3, 2, 1, 2)  # viewport = b.py, c.py
+    out = capsys.readouterr().out
+    assert " a.py" not in out and "3 files changed" not in out  # outside the viewport
+    assert " b.py" in out and "\x1b[7m c.py" in out
+    assert "3/3" in out  # position cue when the stat overflows
+
+
+def test_diff_stat_loop_scrolls_viewport_with_selection(cy, monkeypatch):
+    frames = []
+    monkeypatch.setattr(cy, "_draw_diff_stat", lambda *a: frames.append((a[4], a[5], a[6])))
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 6))
+    )
+    files = [f"f{i}.py" for i in range(5)]
+    stat = [f" f{i}.py | 1 +" for i in range(5)] + [" 5 files changed, 5 insertions(+)"]
+    term = FakeTerm(["j", "j", "j", "k", "q"])
+    cy._diff_stat_loop(files, stat, "/wt", "S", "yolo", "t", "HEAD", term)
+    # 6 rows - 4 chrome = 2-line viewport: (selected, top, body) per frame.
+    # top follows the selection down past the bottom edge, then holds on the way up.
+    assert frames == [(0, 0, 2), (1, 0, 2), (2, 1, 2), (3, 2, 2), (2, 2, 2)]
 
 
 def test_tmux_window_command_env_prefixes_assignments(cy):
