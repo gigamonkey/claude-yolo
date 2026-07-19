@@ -5,6 +5,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Fewer confirmation prompts in the `wip` dashboard.** Confirms now guard
+  only actions that can lose unrecoverable state: `f` (finish — deletes the
+  worktree, including gitignored files) and `s` on an *actively working*
+  session (the confirm doubles as the CLI's `--force`). Everything recoverable
+  is now immediate: `s` on an idle session (the transcript persists; `resume`
+  reconnects), `m` (a conflicted merge aborts cleanly, a landed one is
+  reflog-revertable — matching `r`, which never confirmed), `B` (the rebuild
+  burns only time, in a killable window), and `x` in the config editor, which
+  instead echoes the removed value in the footer so an accidental unset can be
+  retyped.
+
 - **The diff-stat picker scrolls when the stat outgrows the terminal.** A diff
   touching more files than the window has rows used to overflow the screen,
   leaving the selection bar (and the title) pushed off the top. The picker now

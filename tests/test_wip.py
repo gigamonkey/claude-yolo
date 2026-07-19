@@ -696,14 +696,17 @@ def test_browse_session_prompts_for_multiple_ports(cy, monkeypatch):
     assert seen == [3000]
 
 
-def test_stop_confirms_then_calls_core(cy, monkeypatch):
+def test_stop_idle_session_no_confirm(cy, monkeypatch):
+    # A waiting session stops without a confirm (nothing unrecoverable is lost:
+    # the transcript persists and `resume` reconnects). No confirms are scripted,
+    # so if one were asked FakeTerm would decline it and the stop wouldn't run.
     stopped = []
     monkeypatch.setattr(
         cy, "stop_session", lambda cid, where, home, *, force: stopped.append((cid, force)) or "ok"
     )
     sections = {"session": [session_item(cy)], "worktree": [], "project": []}
     # waiting session -> force False
-    run_loop(cy, monkeypatch, sections, ["s"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["s"])
     assert stopped == [("cid0", False)]
 
 
@@ -736,10 +739,15 @@ def test_stop_agenting_session_uses_force(cy, monkeypatch):
     assert stopped == [True]
 
 
-def test_stop_cancelled_does_nothing(cy, monkeypatch):
+def test_stop_active_session_cancelled_does_nothing(cy, monkeypatch):
+    # Declining the active-session confirm (the only one `s` still asks) is a no-op.
     stopped = []
     monkeypatch.setattr(cy, "stop_session", lambda *a, **k: stopped.append(1) or "ok")
-    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    sections = {
+        "session": [session_item(cy, payload={"state": "working"})],
+        "worktree": [],
+        "project": [],
+    }
     frames = run_loop(cy, monkeypatch, sections, ["s"], confirms=[False])
     assert stopped == []
     assert "cancelled" in frames[-1][1]
@@ -812,7 +820,10 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     assert frames[-1][1] == "rebased"
 
 
-def test_merge_worktree_confirms_then_calls_core(cy, monkeypatch):
+def test_merge_worktree_calls_core_without_confirm(cy, monkeypatch):
+    # No confirm on `m`: the core aborts on conflict and a landed merge is
+    # reflog-revertable. No confirms are scripted, so if one were asked FakeTerm
+    # would decline it and the merge wouldn't run.
     calls = []
     monkeypatch.setattr(
         cy,
@@ -820,18 +831,9 @@ def test_merge_worktree_confirms_then_calls_core(cy, monkeypatch):
         lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "merged",
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[True])
+    frames = run_loop(cy, monkeypatch, sections, ["m", "q"])
     assert calls == [("old", {"capture": True, "single_repo": True})]
     assert frames[-1][1] == "merged"
-
-
-def test_merge_cancelled_at_confirm(cy, monkeypatch):
-    calls = []
-    monkeypatch.setattr(cy, "merge_worktree", lambda *a, **k: calls.append(1) or "x")
-    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["m", "q"], confirms=[False])
-    assert calls == []  # declined at the confirm prompt
-    assert frames[-1][1] == "cancelled."
 
 
 def test_merge_on_worktree_session_row(cy, monkeypatch):
@@ -845,7 +847,7 @@ def test_merge_on_worktree_session_row(cy, monkeypatch):
     )
     working = session_item(cy, payload={"state": "working"})
     sections = {"session": [working], "worktree": [], "project": []}
-    run_loop(cy, monkeypatch, sections, ["m"], confirms=[True])
+    run_loop(cy, monkeypatch, sections, ["m"])
     assert calls == ["topic"]
 
 
@@ -978,14 +980,16 @@ def test_c_raw_flags_project_scope(cy, monkeypatch, tmp_path):
     assert cwd == str(proj)
 
 
-def test_c_edit_scalar_unsets_via_picker(cy, monkeypatch, tmp_path):
-    # An existing scalar key: 'x' on it unsets (after a confirm).
+def test_c_edit_scalar_unsets_via_picker(cy, monkeypatch, tmp_path, capsys):
+    # An existing scalar key: 'x' on it unsets immediately (no confirm), and the
+    # footer echoes the removed value so an accidental unset is restorable.
     calls = _stub_config_run(cy, monkeypatch)
     _seed_worktree_entry(tmp_path, {"auth": "bedrock"})
-    term = FakeTerm(["x", "q"], confirms=[True])
+    term = FakeTerm(["x", "q"])
     cy._wip_config("worktree", WT_PAYLOAD, tmp_path, term)
     ((cmd, _),) = calls
     assert cmd == ["yolo", "config", "old", "--unset", "auth"]
+    assert "(was bedrock)" in capsys.readouterr().out  # shown in the next frame
 
 
 def test_c_add_mount_element_with_mode(cy, monkeypatch, tmp_path):
@@ -1286,29 +1290,21 @@ def test_draw_wip_advertises_rebuild_image_key(cy, capsys):
     assert "B rebuild-image" in capsys.readouterr().out
 
 
-def test_B_confirmed_spawns_rebuild_window(cy, monkeypatch):
+def test_B_spawns_rebuild_window(cy, monkeypatch):
     # `B` (global — works with no selected row) spawns `yolo wip --rebuild-image`
-    # in a dedicated window after a confirm.
+    # in a dedicated window, no confirm (the build burns only time, in a killable
+    # window). No confirms are scripted, so a prompt would decline and not spawn.
     monkeypatch.setattr(cy, "_self_invocation", lambda: "yolo")
     spawned = []
     monkeypatch.setattr(
         cy, "_spawn_window", lambda cwd, cmd, name, sess, **k: spawned.append((cmd, name))
     )
     sections = {"session": [], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["B", "q"], confirms=[True])
+    frames = run_loop(cy, monkeypatch, sections, ["B", "q"])
     ((cmd, name),) = spawned
     assert cmd == ["yolo", "wip", "--rebuild-image"]
     assert name == "yolo-rebuild-image"
     assert "rebuilding the default image" in frames[-1][1]
-
-
-def test_B_cancelled_does_not_spawn(cy, monkeypatch):
-    spawned = []
-    monkeypatch.setattr(cy, "_spawn_window", lambda *a, **k: spawned.append(a))
-    sections = {"session": [], "worktree": [], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["B", "q"], confirms=[False])
-    assert spawned == []
-    assert "cancelled" in frames[-1][1]
 
 
 def test_do_rebuild_image_builds_default_no_cache(cy, monkeypatch):

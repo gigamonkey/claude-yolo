@@ -828,7 +828,7 @@ def test_wip_merge_on_primary_row_merges_only_that_repo(cy, run_cli, repos):
         git(wt, "add", ".")
         git(wt, "commit", "-qm", "work")
     payload = {"worktree": awt, "main_root": app, "slug": awt.parent.name, "topic": "feat"}
-    msg = cy._wip_merge("worktree", payload, home, FakeTerm([], confirms=[True]))
+    msg = cy._wip_merge("worktree", payload, home, FakeTerm([]))
     assert "Merged 'feat'" in msg
     assert (app / "a-wt.txt").exists()
     assert not (lib / "l-wt.txt").exists()  # the extra repo untouched

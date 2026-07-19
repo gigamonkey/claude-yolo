@@ -7444,7 +7444,7 @@ def _wip_action(key, item, home, session, term) -> str:
         return _wip_add_project(home, term)
     if key == "B":  # rebuild the default image from scratch (global; no row needed)
         try:
-            return _wip_rebuild_image(session, term)
+            return _wip_rebuild_image(session)
         except YoloError as e:
             return str(e)
     if item is None:
@@ -7456,14 +7456,12 @@ def _wip_action(key, item, home, session, term) -> str:
         if key == "b" and kind == "session":
             return _wip_browse(p, term)
         if key == "s" and kind == "session":
+            # Stopping an idle session loses nothing (the transcript persists on
+            # the host; `resume` reconnects), so no confirm. An active one is
+            # mid-task — the confirm doubles as the dashboard's --force gate.
             active = p["state"] in ("working", "agenting")
             label = p["topic"] or p["name"]
-            prompt = (
-                f"Session '{label}' is {p['state']} — stop anyway?"
-                if active
-                else f"Stop session '{label}'?"
-            )
-            if not term.confirm(prompt):
+            if active and not term.confirm(f"Session '{label}' is {p['state']} — stop anyway?"):
                 return "cancelled."
             return stop_session(p["cid"], f"for '{label}'", home, force=active)
         if key == "S" and kind == "session":
@@ -7759,14 +7757,16 @@ def _wip_merge(kind, p, home, term) -> str:
     worktree's* own config (`_worktree_config`).
 
     Per-repo by construction (`single_repo=True`): a row is one repo, so on a
-    multi-repo topic only that repo's branch merges (the confirm names the repo) —
-    `yolo merge TOPIC` is the whole-set spelling."""
+    multi-repo topic only that repo's branch merges — `yolo merge TOPIC` is the
+    whole-set spelling.
+
+    No confirm: the core refuses a base that isn't the checkout and aborts on any
+    conflict (nothing is left half-merged), and a merge that lands anyway keeps
+    the branch + worktree and is one `git reset --hard ORIG_HEAD` from undone —
+    same recoverability class as `r`, which never confirmed."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
-        repo = pathlib.Path(p["main_root"]).name
-        if not term.confirm(f"Merge '{p['topic']}' into its base in {repo} (keep the worktree)?"):
-            return "cancelled."
         base, _, _, _ = _worktree_config(home, p["main_root"], p["worktree"])
         return merge_worktree(
             p["worktree"],
@@ -8160,8 +8160,12 @@ def _config_editor_loop(scope, term) -> str:
             if chosen:
                 msg = _config_edit_key(scope, chosen, term)
         elif k == "x" and keys:
-            if term.confirm(f"unset {keys[sel]}?"):
-                msg = _config_apply(scope, ["--unset", keys[sel]])[1]
+            # No confirm — instead echo the removed value in the footer, so an
+            # accidental unset is restorable by retyping what it shows.
+            was = _config_value_display(entry[keys[sel]])
+            ok, msg = _config_apply(scope, ["--unset", keys[sel]])
+            if ok:
+                msg = f"{msg} (was {was})"
         elif k == "r" and scope.renameable:
             # Rename the project entry itself (not a key). Runs `yolo config
             # --project OLD --name NEW`, which re-points its worktree overlays;
@@ -8261,7 +8265,7 @@ def _wip_add_project(home, term) -> str:
         return str(e)
 
 
-def _wip_rebuild_image(session, term) -> str:
+def _wip_rebuild_image(session) -> str:
     """`B`: rebuild the default image from scratch (docker build --no-cache).
 
     A global action — no selected row needed. Because image tags are content-addressed
@@ -8271,10 +8275,9 @@ def _wip_rebuild_image(session, term) -> str:
     too (their `FROM` resolves to the new base image id); a fully-custom image (no
     YOLO_BASE) is decoupled and unaffected — rebuild it with `yolo start --rebuild-image`.
     Spawned into its own window (running `yolo wip --rebuild-image`) so the build streams
-    there and the dashboard stays put.
+    there and the dashboard stays put. No confirm: nothing is lost — the build burns
+    only time, in a window that can simply be killed.
     """
-    if not term.confirm("Rebuild the default yolo image from scratch? (slow)"):
-        return "cancelled."
     _spawn_window(
         pathlib.Path.home(),
         [_self_invocation(), "wip", "--rebuild-image"],

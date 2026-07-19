@@ -1459,7 +1459,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   stops, `f` finishes, `r` rebases, `m` on a worktree row (or any worktree-backed
   session row, even a `working` one — the merge only reads the branch's committed
   tip, so it has no idle guard) **merges** the branch into its base while keeping
-  the worktree + branch (`_wip_merge` → the `merge_worktree` core, confirmed first;
+  the worktree + branch (`_wip_merge` → the `merge_worktree` core, no confirm —
+  the core aborts on conflict and a landed merge is reflog-revertable;
   base from `_worktree_config`), `d` on a worktree row (or any worktree-backed
   session row, even a `working` one — diff is read-only) spawns `yolo diff
   <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
@@ -2306,17 +2307,19 @@ there (cancel on empty, reject a non-dir), `S` shell on a session row spawning t
 `docker exec` window (a worktree-row no-op), `l` startup-log on a session row
 spawning the `less -R` window (the missing-log footer message and the
 worktree-row no-op), `b` browse incl. the
-multi-port prompt, `s` stop with the working/agenting-session force + confirm/cancel,
+multi-port prompt, `s` stop (idle stops with no confirm; a working/agenting
+session gets the force confirm, cancellable),
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
 cores, which own the guard), `m` on a worktree *and* a worktree-backed session row
-(confirm/cancel, the core stubbed) calling `merge_worktree` with `capture=True`,
+(no confirm, the core stubbed) calling `merge_worktree` with `capture=True`,
 `d` on a worktree *and* a worktree-backed session row
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
 `git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
 summary), `c` opening the config editor (`_config_editor_loop` / `_config_scope`: the
 raw-flags `e` hatch composing `yolo config [TOPIC] <flags>` from the right dir for
-worktree and project scope, `x`+confirm unsetting a scalar, the `_config_list_loop`
+worktree and project scope, `x` unsetting a scalar (no confirm — the footer
+echoes the removed value), the `_config_list_loop`
 add-mount path+ro/rw-pick and remove-element flows, the `_config_clones_loop`
 add-with-depth (routed via `_config_edit_key`), add-without-depth, and remove-by-dir
 flows, the error surfacing in the

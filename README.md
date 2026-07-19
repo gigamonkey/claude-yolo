@@ -601,13 +601,13 @@ the selected row:
 | `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
 | `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |
 | `b`     | a session with forwarded ports   | `browse` the port (with more than one, prompts for the container port or its label) |
-| `s`     | a running session                | stop it (confirms; an active session needs a second confirm) |
+| `s`     | a running session                | stop it (immediate when idle — the transcript persists and `resume` reconnects; an actively working session asks for a confirm first) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
-| `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (confirms) |
+| `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (no confirm — a conflicted merge aborts cleanly, a landed one is `git reset --hard ORIG_HEAD` away from undone) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row — and a name, defaulting to the dir basename) |
-| `B`     | anything                         | rebuild the default image from scratch (`docker build --no-cache`, confirms) in a new window — new sessions pick up the fresh image with no flag to pass, since image tags are content-addressed (see below) |
+| `B`     | anything                         | rebuild the default image from scratch (`docker build --no-cache`) in a new window — new sessions pick up the fresh image with no flag to pass, since image tags are content-addressed (see below) |
 | `q`     | anything                         | quit the dashboard — only once **no sessions are running** (the footer explains the refusal otherwise; stop them with `s` first). If the dashboard window is nonetheless gone while the tmux session lives on, `yolo wip` respawns it. |
 
 `f` and `r` won't interrupt an actively `working` (or `agenting`) session:
