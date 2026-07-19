@@ -8057,16 +8057,33 @@ def _config_apply(scope, flags) -> tuple:
 
 
 def _pick_one(term, title, options):
-    """A minimal j/k+Enter vertical picker over a short option list; None on cancel."""
+    """A minimal j/k+Enter vertical picker over an option list; None on cancel.
+
+    A list taller than the terminal scrolls rather than overflowing: only
+    `options[top:top+body]` is drawn, with the viewport staying put while the
+    selection moves inside it and following it past either edge — the same
+    scheme as the diff-stat picker — plus a `sel/total` position cue in the
+    title while the list overflows. Terminal height is re-read every frame, so
+    a resize just reshapes the next draw. Matters for `R`'s finished-topic
+    list on a long-lived project and the config editor's key list; the short
+    fixed choice lists never overflow and draw exactly as before.
+    """
     if not options:
         return None
-    sel = 0
+    sel = top = 0
     while True:
+        rows = shutil.get_terminal_size((80, 24)).lines
+        body = max(1, rows - 4)  # minus title + blank above, blank + key hint below
+        top = max(0, min(top, len(options) - body, sel))
+        if sel >= top + body:
+            top = sel - body + 1
         print("\x1b[H\x1b[2J", end="")
-        print(f"\x1b[1;36m{title}\x1b[0m\n")
-        for i, opt in enumerate(options):
-            print(f"\x1b[7m› {opt}\x1b[0m" if i == sel else f"  {opt}")
-        print("\n\x1b[90mj/k move · Enter select · q cancel\x1b[0m")
+        pos = f" · {sel + 1}/{len(options)}" if len(options) > body else ""
+        print(f"\x1b[1;36m{title}\x1b[0m\x1b[90m{pos}\x1b[0m\n")
+        for i in range(top, min(top + body, len(options))):
+            print(f"\x1b[7m› {options[i]}\x1b[0m" if i == sel else f"  {options[i]}")
+        # no trailing newline: the frame's last row must not nudge the title off
+        print("\n\x1b[90mj/k move · Enter select · q cancel\x1b[0m", end="")
         sys.stdout.flush()
         key = term.wait_key(86400)
         if key in ("q", "\x1b"):

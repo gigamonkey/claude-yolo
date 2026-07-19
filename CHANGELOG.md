@@ -20,7 +20,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   topics (newest transcript first) alongside `(this directory)` — picking one
   revives it — and `n` with a previously-used topic name spawns `resume`
   instead of `start`, so retyping an old topic reconnects its session rather
-  than starting an amnesiac fresh one.
+  than starting an amnesiac fresh one. The picker scrolls when a project's
+  topic history outgrows the terminal (the diff-stat viewport scheme, with a
+  position cue in the title) — as does every other `_pick_one` list, e.g. the
+  config editor's add-key menu.
 
 - **Fewer confirmation prompts in the `wip` dashboard.** Confirms now guard
   only actions that can lose unrecoverable state: `f` (finish — deletes the

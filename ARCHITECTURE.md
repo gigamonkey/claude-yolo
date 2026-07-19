@@ -1450,7 +1450,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   offers the repo's **finished topics** (`_finished_topics`: transcript buckets
   under `~/.claude/projects/` whose slugified-worktree-path name round-trips and
   whose worktree is gone, newest first, from the project's own claude dir via
-  `_project_claude_dir`) in a `_pick_one` alongside `(this directory)`; picking
+  `_project_claude_dir`) in a `_pick_one` (which scrolls past a terminal-full,
+  via the diff-stat picker's viewport scheme + a `sel/total` title cue, so a
+  long-lived project's topic history pages instead of overflowing) alongside
+  `(this directory)`; picking
   a topic spawns `resume TOPIC`, which revives it — and since a revived topic is
   its own container, the topics stay pickable even while a session runs in the
   project dir (only `(this directory)` is withheld then). `n` on a project
@@ -2353,7 +2356,8 @@ add-with-depth (routed via `_config_edit_key`), add-without-depth, and remove-by
 flows, the error surfacing in the
 editor frame, the current-values + inherited-pane display, and the units
 `_config_value_flags` (bool `--key`/`--no-key`), `_prompt_config_value` kind
-routing, and `_pick_one` navigation/cancel; a session row is the no-op message),
+routing, and `_pick_one` navigation/cancel plus its long-list viewport scroll
+and short-list no-cue cases; a session row is the no-op message),
 a raised `YoloError` landing in the
 footer instead of killing the loop, `a` add-project, and the quit guard — `q`
 returning only with no sessions, `q`/Esc refused with the footer message while

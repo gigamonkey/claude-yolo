@@ -715,6 +715,32 @@ def test_R_running_project_still_offers_finished_topics(cy, monkeypatch):
     assert spawned == [["resume", "feat", "--no-tmux"]]
 
 
+def test_pick_one_scrolls_long_lists(cy, monkeypatch, capsys):
+    # A 10-row terminal leaves a 6-row body; 20 options scroll with the
+    # selection (the diff-stat viewport scheme) and the title carries a
+    # position cue while the list overflows.
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 10))
+    )
+    opts = [f"t{i:02}" for i in range(20)]
+    term = FakeTerm(["j"] * 7 + ["\r"])
+    assert cy._pick_one(term, "resume:", opts) == "t07"
+    frames = capsys.readouterr().out.split("\x1b[H\x1b[2J")
+    # first frame: viewport at the top — t00..t05 visible, t06 beyond the body
+    assert "t00" in frames[1] and "t05" in frames[1] and "t06" not in frames[1]
+    # last frame: the selection crossed the bottom edge → the viewport followed
+    assert "\x1b[7m› t07" in frames[-1] and "t02" in frames[-1] and "t01" not in frames[-1]
+    assert "8/20" in frames[-1]
+
+
+def test_pick_one_short_list_has_no_position_cue(cy, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24))
+    )
+    assert cy._pick_one(FakeTerm(["\r"]), "resume:", ["a", "b"]) == "a"
+    assert "1/2" not in capsys.readouterr().out
+
+
 def test_finished_topics_from_transcript_buckets(cy, repo):
     # Enumerated from ~/.claude/projects/: buckets under the repo's worktree-base
     # slug whose worktree is gone, newest transcript first; live topics, empty
