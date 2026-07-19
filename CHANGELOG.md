@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`dir TOPIC` takes an optional project directory.** `yolo dir TOPIC DIR`
+  resolves the topic against the repo containing `DIR` instead of the current
+  directory, so `yolo dir fix-auth ~/hacks/whatever` prints the same path from
+  anywhere that `yolo dir fix-auth` prints from inside that project.
+
 - **`resume TOPIC` revives a finished topic.** Finishing removes the worktree,
   but the topic's Claude transcripts (keyed by the worktree's deterministic
   path) and — depending on the finish action — its branch survive; resume now

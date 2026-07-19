@@ -111,7 +111,8 @@ with each other. The only positional args are an optional `verb`
 (`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`merge`/`diff`/`list`/`ps`/`wip`/`dir`/
 `dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
 `secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
-trailing positional); see [Workflow verbs](#workflow-verbs).
+trailing positional; `dir` takes an optional project directory as its trailing
+positional); see [Workflow verbs](#workflow-verbs).
 
 Defaults for most flags can also live in **host-side config** — global
 `~/.yolo.json` plus a per-project entry in `~/.claude-yolo/projects.json`,
@@ -1561,11 +1562,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   the server starts. Pointed errors for no running container and for a
   container launched without ports (mappings can't be added live — exit and
   `resume`).
-- **`dir [TOPIC]`** — print a session's working directory and exit (`do_dir`),
-  for `cd "$(yolo dir TOPIC)"`. *With `TOPIC`:* the worktree's root dir
-  (`_worktree_dir`), erroring if that worktree doesn't exist so the `cd` fails
-  loudly rather than landing somewhere wrong. *No `TOPIC`:* the current
-  directory. Only the path is written to **stdout** (errors go to stderr); it's
+- **`dir [TOPIC [DIR]]`** — print a session's working directory and exit
+  (`do_dir`), for `cd "$(yolo dir TOPIC)"`. *With `TOPIC`:* the worktree's root
+  dir (`_worktree_dir`), erroring if that worktree doesn't exist so the `cd`
+  fails loudly rather than landing somewhere wrong. *No `TOPIC`:* the current
+  directory. An optional trailing `DIR` (the one trailing positional any verb
+  besides `secret` accepts) resolves the topic against the repo containing
+  `DIR` instead of the cwd — same output as running `yolo dir TOPIC` in `DIR`.
+  Only the path is written to **stdout** (errors go to stderr); it's
   dispatched *before* `load_yolo_config` specifically so the config provenance
   note doesn't pollute the command-substitution output. A terminal verb — no
   container.

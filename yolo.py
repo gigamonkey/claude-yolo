@@ -1416,13 +1416,14 @@ def timezone_args() -> list[str]:
     return ["-e", f"TZ={tz}"] if tz else []
 
 
-def _repo_paths() -> tuple[pathlib.Path, pathlib.Path, str]:
-    """Return (common_git, main_root, slug) for the repo containing the cwd.
+def _repo_paths(cwd: pathlib.Path | None = None) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Return (common_git, main_root, slug) for the repo containing `cwd`
+    (default: the process cwd).
 
-    Exits if the cwd isn't in a git repo. `slug` is the main repo path run through
-    the same scheme Claude Code uses for ~/.claude/projects/ buckets; it keys both
-    the worktree state dir (~/.claude-yolo/worktrees/<slug>/) and the docker labels
-    used to find a topic's container.
+    Exits if the directory isn't in a git repo. `slug` is the main repo path run
+    through the same scheme Claude Code uses for ~/.claude/projects/ buckets; it
+    keys both the worktree state dir (~/.claude-yolo/worktrees/<slug>/) and the
+    docker labels used to find a topic's container.
     """
     try:
         common_git_out = subprocess.run(
@@ -1430,9 +1431,14 @@ def _repo_paths() -> tuple[pathlib.Path, pathlib.Path, str]:
             capture_output=True,
             text=True,
             check=True,
+            cwd=cwd,
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
-        sys.exit("must be run from inside a git repository.")
+        sys.exit(
+            f"{cwd} is not inside a git repository."
+            if cwd
+            else "must be run from inside a git repository."
+        )
     common_git = pathlib.Path(common_git_out)
     main_root = common_git.parent
     return common_git, main_root, re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
@@ -3447,7 +3453,8 @@ PARSER.add_argument(
     "tmux dashboard for managing everything — running sessions, inactive "
     "worktrees, and projects — with launch/stop/finish/rebase/merge/diff/browse actions; 'dir' prints a "
     "session's directory (a worktree's root with a TOPIC, else the current "
-    "directory) for `cd $(yolo dir TOPIC)`; 'config' "
+    "directory) for `cd $(yolo dir TOPIC)` — an optional trailing DIR resolves the "
+    "topic against that project's repo instead of the cwd; 'config' "
     "shows this project's ~/.claude-yolo/projects.json entry (or ~/.yolo.json "
     "with --global), or — given config flags — persists exactly those flags into "
     "it (see also --unset, --add-mount/--remove-mount, --add-prompt/"
@@ -3471,7 +3478,8 @@ PARSER.add_argument(
     nargs="*",
     metavar="ARGS",
     help="Trailing positionals. Used by `secret set NAME` / `secret rm NAME` for "
-    "the secret name; not accepted by other verbs.",
+    "the secret name and by `dir TOPIC [DIR]` for the optional project directory; "
+    "not accepted by other verbs.",
 )
 PARSER.add_argument(
     "--base",
@@ -6020,16 +6028,25 @@ def _print_table(headers: tuple, rows: list) -> None:
         print(line)
 
 
-def do_dir(topic: str | None, home: pathlib.Path, cwd: pathlib.Path) -> None:
+def do_dir(
+    topic: str | None, home: pathlib.Path, cwd: pathlib.Path, root: str | None = None
+) -> None:
     """`dir` verb: print a session's working directory (only the path, on stdout).
 
     With a TOPIC, the worktree's root dir — erroring if it doesn't exist, so
     `cd $(yolo dir TOPIC)` fails loudly instead of cd-ing somewhere wrong. With no
-    TOPIC, the current directory (the main checkout). Nothing else is written to
-    stdout, so it composes cleanly in command substitution.
+    TOPIC, the current directory (the main checkout). An optional trailing DIR
+    resolves the topic against that project's repo instead of the cwd, so
+    `yolo dir TOPIC ~/other/project` works from anywhere. Nothing else is written
+    to stdout, so it composes cleanly in command substitution.
     """
+    if root is not None:
+        root_path = pathlib.Path(os.path.expanduser(root)).resolve()
+        if not root_path.is_dir():
+            sys.exit(f"not a directory: {root}")
+        cwd = root_path
     if topic:
-        worktree, _, _ = _worktree_dir(topic, home)
+        worktree, _, _ = _worktree_dir(topic, home, cwd=cwd if root is not None else None)
         if not worktree.is_dir():
             sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
         print(worktree)
@@ -8665,9 +8682,14 @@ def do_forget_token(config_dir: str | None) -> None:
     )
 
 
-def _worktree_dir(topic: str, home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:
-    """(worktree_path, main_root, slug) for an existing topic; doesn't create it."""
-    common_git, main_root, slug = _repo_paths()
+def _worktree_dir(
+    topic: str, home: pathlib.Path, cwd: pathlib.Path | None = None
+) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """(worktree_path, main_root, slug) for an existing topic; doesn't create it.
+
+    The repo is the one containing `cwd` (default: the process cwd).
+    """
+    common_git, main_root, slug = _repo_paths(cwd)
     return home / ".claude-yolo" / "worktrees" / slug / topic, main_root, slug
 
 
@@ -8783,10 +8805,12 @@ def _main():
         "secret",
     ):
         sys.exit(f"unexpected argument: {topic!r}")
-    # Only `secret` consumes trailing positionals (the secret NAME); for any other
-    # verb they're a mistake.
-    if parsed.extra_args and verb != "secret":
+    # Only `secret` (the secret NAME) and `dir` (an optional project DIR) consume
+    # trailing positionals; for any other verb they're a mistake.
+    if parsed.extra_args and verb not in ("secret", "dir"):
         sys.exit(f"unexpected argument: {parsed.extra_args[0]!r}")
+    if verb == "dir" and len(parsed.extra_args) > 1:
+        sys.exit(f"unexpected argument: {parsed.extra_args[1]!r}")
     if parsed.new and verb != "resume":
         sys.exit("--new only applies to `resume`.")
     if parsed.new and not topic:
@@ -8869,7 +8893,7 @@ def _main():
     # config load so its stdout is *only* the path (the provenance note goes to
     # stderr, but keeping it out entirely is cleaner for `cd $(yolo dir TOPIC)`).
     if verb == "dir":
-        do_dir(topic, home, cwd)
+        do_dir(topic, home, cwd, root=parsed.extra_args[0] if parsed.extra_args else None)
         return
 
     # `secret` manages keychain-backed secrets and launches no container; it needs

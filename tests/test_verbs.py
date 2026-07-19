@@ -1420,3 +1420,39 @@ def test_dir_unknown_topic_errors(cy, run_cli, repo):
     r, home = repo
     with pytest.raises(SystemExit):
         run_cli(["dir", "nope"], home=home, cwd=r)
+
+
+def test_dir_explicit_project_root(cy, run_cli, repo, tmp_path, capsys):
+    # `yolo dir TOPIC DIR` from an unrelated cwd matches `yolo dir TOPIC` run in DIR
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("alpha"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    capsys.readouterr()  # clear
+    argv = run_cli(["dir", "alpha", str(r)], home=home, cwd=elsewhere)
+    assert argv is None
+    assert capsys.readouterr().out.strip() == str(wt)
+
+
+def test_dir_explicit_root_not_a_directory(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit) as e:
+        run_cli(["dir", "alpha", str(r / "nope")], home=home, cwd=r)
+    assert "not a directory" in str(e.value)
+
+
+def test_dir_explicit_root_not_a_repo(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(SystemExit) as e:
+        run_cli(["dir", "alpha", str(plain)], home=home, cwd=r)
+    assert "not inside a git repository" in str(e.value)
+
+
+def test_dir_rejects_second_extra_arg(cy, run_cli, repo):
+    r, home = repo
+    with pytest.raises(SystemExit) as e:
+        run_cli(["dir", "alpha", str(r), "extra"], home=home, cwd=r)
+    assert "unexpected argument" in str(e.value)

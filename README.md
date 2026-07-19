@@ -327,9 +327,12 @@ Verb details:
   the container. `list --all` widens the view to every worktree on the machine,
   across all repos, regardless of the current directory.
 
-- **`dir [TOPIC]`** prints a session's directory — the worktree's root with a
-  `TOPIC` (it errors if that worktree doesn't exist), or the current directory
-  without one — and nothing else, so it composes in `cd "$(yolo dir TOPIC)"`.
+- **`dir [TOPIC [DIR]]`** prints a session's directory — the worktree's root
+  with a `TOPIC` (it errors if that worktree doesn't exist), or the current
+  directory without one — and nothing else, so it composes in
+  `cd "$(yolo dir TOPIC)"`. An optional trailing `DIR` resolves the topic
+  against that project's repo instead of the current directory, so
+  `yolo dir fix-auth ~/hacks/whatever` works from anywhere.
 
 Because the worktree directory **and** the repo's shared `.git` are both
 mounted, **nothing is lost when the container exits**: commits land in the
