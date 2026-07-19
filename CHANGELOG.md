@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.29.0 — 2026-07-19
 
 - **`dir TOPIC` takes an optional project directory.** `yolo dir TOPIC DIR`
   resolves the topic against the repo containing `DIR` instead of the current
@@ -24,6 +24,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   topic history outgrows the terminal (the diff-stat viewport scheme, with a
   position cue in the title) — as does every other `_pick_one` list, e.g. the
   config editor's add-key menu.
+
+- **The `wip` dashboard's WORKTREES table leads with `TOPIC`.** The column
+  order is now `TOPIC, REPO, …` (was `REPO, TOPIC, …`) and the rows sort by
+  topic then repo, so a multi-repo topic's worktrees group together under the
+  name you think of them by.
 
 - **Fewer confirmation prompts in the `wip` dashboard.** Confirms now guard
   only actions that can lose unrecoverable state: `f` (finish — deletes the
