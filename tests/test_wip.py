@@ -641,6 +641,121 @@ def test_n_on_project_cancels_on_empty_topic(cy, monkeypatch):
     assert frames[-1][1] == "cancelled."
 
 
+def test_n_with_history_resumes_instead_of_starting(cy, monkeypatch):
+    # Typing a previously-used topic under `n` spawns `resume`, not `start`:
+    # a finished topic revives with its old Claude session, and a live
+    # worktree/branch resumes instead of tripping `start`'s already-exists guard.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
+    )
+    monkeypatch.setattr(cy, "_topic_history", lambda home, path, topic: topic == "old-feat")
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"])
+    assert spawned == [["resume", "old-feat", "--no-tmux"]]
+    assert "resuming worktree 'old-feat'" in frames[-1][1]
+
+
+def test_R_on_project_offers_finished_topics(cy, monkeypatch):
+    # With finished topics on record, `R` on a project row opens a picker:
+    # "(this directory)" first, then the topics newest-first; picking a topic
+    # spawns `resume <topic>`, which revives it (worktree + old Claude session).
+    spawned = []
+    monkeypatch.setattr(
+        cy,
+        "_spawn_session_window",
+        lambda repo, argv, name, sess: spawned.append((repo, argv, name)),
+    )
+    monkeypatch.setattr(cy, "_finished_topics", lambda home, path: ["feat-a", "feat-b"])
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    run_loop(cy, monkeypatch, sections, ["R", "j", "\r", "q"])  # j past "(this directory)"
+    ((repo, argv, name),) = spawned
+    assert repo == "/work/proj"
+    assert argv == ["resume", "feat-a", "--no-tmux"]
+    assert name == "proj-feat-a"
+
+
+def test_R_finished_topic_picker_this_directory_keeps_plain_picker(cy, monkeypatch):
+    # Enter on "(this directory)" falls through to the plain `resume -r` spawn.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
+    )
+    monkeypatch.setattr(cy, "_finished_topics", lambda home, path: ["feat"])
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/p")]}
+    run_loop(cy, monkeypatch, sections, ["R", "\r", "q"])
+    assert spawned == [["resume", "-r", "--no-tmux"]]
+
+
+def test_R_finished_topic_picker_cancel(cy, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_finished_topics", lambda home, path: ["feat"])
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/p")]}
+    frames = run_loop(cy, monkeypatch, sections, ["R", "q", "q"])
+    assert spawned == []
+    assert frames[-1][1] == "cancelled."
+
+
+def test_R_running_project_still_offers_finished_topics(cy, monkeypatch):
+    # A live session in the project dir blocks the dir's own picker but not a
+    # finished topic (its session is a separate container): "(this directory)"
+    # is withheld and the topics remain pickable.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
+    )
+    monkeypatch.setattr(cy, "_finished_topics", lambda home, path: ["feat"])
+    sections = {
+        "session": [],
+        "worktree": [],
+        "project": [project_item(cy, path="/p", window="@3")],
+    }
+    run_loop(cy, monkeypatch, sections, ["R", "\r", "q"])  # the first option IS the topic
+    assert spawned == [["resume", "feat", "--no-tmux"]]
+
+
+def test_finished_topics_from_transcript_buckets(cy, repo):
+    # Enumerated from ~/.claude/projects/: buckets under the repo's worktree-base
+    # slug whose worktree is gone, newest transcript first; live topics, empty
+    # buckets, other repos' buckets, and the home=None loop default are excluded.
+    r, home = repo
+    slug = cy._repo_root_of(r)[2]
+    base = home / ".claude-yolo" / "worktrees" / slug
+    (base / "live").mkdir(parents=True)
+
+    def bucket(topic, mtime):
+        d = home / ".claude" / "projects" / cy._cwd_slug(base / topic)
+        d.mkdir(parents=True)
+        f = d / "s.jsonl"
+        f.write_text("{}\n")
+        os.utime(f, (mtime, mtime))
+
+    bucket("live", 100)  # worktree still exists → excluded
+    bucket("done-old", 200)
+    bucket("done-new", 300)
+    (home / ".claude" / "projects" / cy._cwd_slug(base / "empty")).mkdir()  # no *.jsonl
+    (home / ".claude" / "projects" / "unrelated-bucket").mkdir()  # another repo's
+    assert cy._finished_topics(home, r) == ["done-new", "done-old"]
+    assert cy._finished_topics(None, r) == []
+
+
+def test_topic_history_worktree_branch_or_transcript(cy, repo):
+    r, home = repo
+    slug = cy._repo_root_of(r)[2]
+    base = home / ".claude-yolo" / "worktrees" / slug
+    assert not cy._topic_history(home, r, "nope")
+    d = home / ".claude" / "projects" / cy._cwd_slug(base / "done")
+    d.mkdir(parents=True)
+    (d / "s.jsonl").write_text("{}\n")
+    assert cy._topic_history(home, r, "done")  # a finished topic's transcript
+    git(r, "branch", "kept")
+    assert cy._topic_history(home, r, "kept")  # a surviving branch
+    (base / "live").mkdir(parents=True)
+    assert cy._topic_history(home, r, "live")  # a live worktree
+    assert not cy._topic_history(None, r, "done")  # home=None (loop default)
+
+
 def _newsession_item(cy):
     return cy.WipItem("newsession", "newsession:+", ("+",), {})
 

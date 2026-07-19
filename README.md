@@ -259,7 +259,13 @@ Verb details:
 - **`resume TOPIC`** continues that worktree's most recent session (`-r` for a
   specific one); `--new` starts a fresh named session there instead. If there's no
   session to continue (none was ever started, or it expired), it quietly starts a
-  fresh one rather than erroring.
+  fresh one rather than erroring. It also **revives a finished topic**: a finish
+  removes the worktree, but the topic's Claude transcripts (keyed by the
+  worktree's path, which is deterministic) — and, depending on the finish
+  action, its branch — survive it, so `resume TOPIC` recreates the worktree
+  (reattaching the surviving branch, else fresh off `--base`) and continues the
+  old session right where it left off. A topic with no worktree, branch, *or*
+  transcript (a typo) still errors.
 
 - **`rebase TOPIC`** rebases the worktree's branch onto `--base` (default
   `HEAD`, the same ref `start` branches off and `finish`/`list` judge against),
@@ -595,8 +601,8 @@ the selected row:
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
 | `Enter` | the `+` row                      | prompt for a directory and start a session there — Tab completes the path (fills the common prefix, lists matches), `~` works like a shell |
 | `N`     | a worktree or project            | start a **fresh** session here (not a resume of the latest) — `start` for a project, `resume TOPIC --new` for a worktree; refuses if one is already running (Enter switches to it) |
-| `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent |
-| `n`     | a project                        | prompt for a topic, start a new worktree session there |
+| `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent; on a project with **finished topics** (removed worktrees whose transcripts survive) it first offers those — picking one revives the topic, old session included |
+| `n`     | a project                        | prompt for a topic, start a new worktree session there — a previously-used topic (live worktree, surviving branch, or finished topic's transcript) resumes instead of starting fresh |
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `r` renames the project (on a registered project entry — re-points its worktree overlays too), `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
 | `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
 | `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |

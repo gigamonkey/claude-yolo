@@ -1445,10 +1445,20 @@ gracefully outside one — there's just no repo slug to label/find by).
   (`_wip_resume_pick`: `resume -r` / `resume TOPIC -r`) in a new window to resume a
   non-most-recent session — both refuse on a row with a live `window` (one session
   per dir/worktree; Enter switches instead) and otherwise shell out via
-  `_wip_spawn_target`'s repo/name (same as Enter). `n` on a project prompts for a
-  topic and starts a **new worktree** session
-  there (`_wip_new_worktree`; topic validation is left to the spawned `yolo start
-  <topic>`, surfacing in the new window like Enter's launch errors), `S` on a
+  `_wip_spawn_target`'s repo/name (same as Enter). On a project row `R` first
+  offers the repo's **finished topics** (`_finished_topics`: transcript buckets
+  under `~/.claude/projects/` whose slugified-worktree-path name round-trips and
+  whose worktree is gone, newest first, from the project's own claude dir via
+  `_project_claude_dir`) in a `_pick_one` alongside `(this directory)`; picking
+  a topic spawns `resume TOPIC`, which revives it — and since a revived topic is
+  its own container, the topics stay pickable even while a session runs in the
+  project dir (only `(this directory)` is withheld then). `n` on a project
+  prompts for a topic and starts a **new worktree** session there
+  (`_wip_new_worktree`) — unless the topic already has a life (`_topic_history`:
+  live worktree, surviving branch, or finished topic's transcript), in which
+  case it spawns `resume <topic>` to reconnect instead of `start`; remaining
+  topic validation is left to the spawned yolo, surfacing in the new window like
+  Enter's launch errors, `S` on a
   session row opens a bash shell in its container (`_wip_shell`: `docker exec -it
   <cid> /bin/bash` in a new `<name>-shell` window, like `yolo shell`), `l` on a
   session row opens its captured **startup log** (`_wip_startup_log`: `less -R`
@@ -1855,15 +1865,22 @@ Details that matter:
 ## The worktree mechanics (`setup_worktree`)
 
 When a verb gets a `TOPIC`, this is what backs it. Orthogonal to the credential
-modes (composes with any of them). `setup_worktree` creates a git worktree on a new
-branch `TOPIC` (off `base`, default current `HEAD`, no upstream) at
-`~/.claude-yolo/worktrees/<repo-slug>/TOPIC`, where `<repo-slug>` is the main repo
-path slugified the way Claude names `~/.claude/projects/` buckets
-(`re.sub(r"[^a-zA-Z0-9]", "-", path)`, factored into `_repo_paths`). `start` is its
-sole caller and guards existence (`worktree.exists() or _branch_exists(topic)`)
-*before* calling it, so `setup_worktree` always creates fresh — a single
-unconditional `git worktree add -b`. `resume`/`shell` don't call it; they locate the
-existing worktree via `_worktree_dir`. `main` then retargets `cwd` to the worktree
+modes (composes with any of them). `setup_worktree` creates a git worktree on
+branch `TOPIC` at `~/.claude-yolo/worktrees/<repo-slug>/TOPIC`, where
+`<repo-slug>` is the main repo path slugified the way Claude names
+`~/.claude/projects/` buckets (`re.sub(r"[^a-zA-Z0-9]", "-", path)`, factored
+into `_repo_paths`). When the branch doesn't exist it's created off `base`
+(default current `HEAD`, no upstream); when it does — a revived topic whose
+branch survived its finish — the worktree **reattaches** to it (`git worktree
+add` without `-b`). `start` guards existence (`worktree.exists() or
+_branch_exists(topic)`) *before* calling it, so from `start` it always creates
+fresh. `resume`/`shell` normally locate the existing worktree via
+`_worktree_dir`, but **`resume` revives a finished topic**: the worktree is
+gone, yet the topic's Claude transcripts (keyed by the deterministic worktree
+path) and possibly its branch survive — when either exists, resume calls
+`setup_worktree` to recreate the worktree and falls through to the normal
+continue-or-fresh logic, which finds the old session. A topic with neither (a
+typo) still exits. `main` then retargets `cwd` to the worktree
 (so `-w` and the `{cwd}:{cwd}` mount point there) and **additionally mounts the
 shared `.git` at its identical host path** — both same-path mounts are required
 because a linked worktree stores *absolute* paths to its `.git` and back. The session
@@ -2208,7 +2225,10 @@ the per-repo `merged` judgement run from a different repo, an orphaned worktree
 the verb gating), the non-tmux already-running `resume` refusal, the
 `resume`-with-no-session fallback to a fresh session (worktree mode names it
 `<repo>:<topic>`, cwd mode after the directory; a seeded `projects/<slug>/*.jsonl`
-transcript exercises the real `--continue` path), and the `stop`
+transcript exercises the real `--continue` path), the finished-topic revive
+(a seeded transcript surviving `finish` → resume recreates the worktree and
+`--continue`s; a kept unmerged branch → the recreated worktree reattaches at
+its old tip; a topic with neither still refuses), and the `stop`
 verb (`docker stop`ping the worktree's container by label, the nothing-running
 no-op, and the actively-`working` guard — refused without `--force`, stopped with
 it; the cwd variant is in `test_cli.py`).
@@ -2300,9 +2320,13 @@ resolution) and the `_wip_loop` event loop driven by a scripted `FakeTerm` with 
 preserving selection by key, Enter→switch/resume-worktree/resume-project/focus-
 active-project-or-worktree, `N` new-session on a worktree/project spawning
 `resume TOPIC --new`/`start` (and refusing on a live `window` + the session-row
-no-op), `R` resume-pick spawning `resume TOPIC -r`/`resume -r`, `n` on a
-project prompting a topic then spawning `start <topic>` (and cancelling on an empty
-topic), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
+no-op), `R` resume-pick spawning `resume TOPIC -r`/`resume -r` (and, on a
+project with finished topics, the revive picker: topic → `resume <topic>`,
+`(this directory)` → the plain picker, cancel, and the live-window case that
+withholds only `(this directory)`; `_finished_topics`/`_topic_history`
+themselves unit-tested against real transcript-bucket layouts), `n` on a
+project prompting a topic then spawning `start <topic>` (and cancelling on an
+empty topic; a topic with history spawning `resume <topic>` instead), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
 there (cancel on empty, reject a non-dir), `S` shell on a session row spawning the
 `docker exec` window (a worktree-row no-op), `l` startup-log on a session row
 spawning the `less -R` window (the missing-log footer message and the

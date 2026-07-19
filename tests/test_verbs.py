@@ -111,9 +111,47 @@ def test_start_base_ref_is_used(cy, run_cli, repo):
 
 
 def test_resume_errors_without_worktree(cy, run_cli, repo):
+    # A topic with no worktree, no branch, and no transcript is a typo, not a
+    # finished topic — resume still refuses rather than reviving it.
     r, home = repo
     with pytest.raises(SystemExit):
         run_cli(["resume", "ghost"], home=home, cwd=r)
+
+
+def test_resume_revives_finished_topic_with_transcript(cy, run_cli, repo, capsys):
+    # A finished topic leaves its Claude transcript behind (keyed by the
+    # deterministic worktree path): resume recreates the worktree and issues
+    # `--continue`, reconnecting the old session.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    seed_session(cy, home, wt)
+    run_cli(["finish", "topic"], home=home, cwd=r)  # undiverged → branch deleted too
+    assert not wt.exists()
+    argv = run_cli(["resume", "topic"], home=home, cwd=r)
+    assert wt.is_dir()  # recreated
+    assert "--continue" in claude_command(cy, argv)  # the old session, not a fresh one
+    assert "Recreating the 'topic' worktree" in capsys.readouterr().err
+
+
+def test_resume_revive_reattaches_surviving_branch(cy, run_cli, repo):
+    # finish keeps an unmerged branch; a later resume of the finished topic
+    # reattaches the recreated worktree to that branch (same tip), rather than
+    # erroring or creating a fresh branch off base.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "w.txt").write_text("work\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    tip = git(wt, "rev-parse", "HEAD").stdout.strip()
+    run_cli(["finish", "topic"], home=home, cwd=r)  # unmerged → branch kept
+    assert not wt.exists()
+    argv = run_cli(["resume", "topic"], home=home, cwd=r)
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() == tip
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "topic"
+    # no transcript was seeded, so the revived worktree gets a fresh session
+    assert "--continue" not in claude_command(cy, argv)
 
 
 def test_resume_defaults_to_continue(cy, run_cli, repo):

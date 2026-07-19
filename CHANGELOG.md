@@ -5,6 +5,18 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`resume TOPIC` revives a finished topic.** Finishing removes the worktree,
+  but the topic's Claude transcripts (keyed by the worktree's deterministic
+  path) and — depending on the finish action — its branch survive; resume now
+  recreates the worktree (reattaching the surviving branch, else fresh off
+  `--base`) and continues the old session where it left off, instead of
+  refusing. A topic with no worktree, branch, or transcript still errors. In
+  the `wip` dashboard: `R` on a project row now first offers its finished
+  topics (newest transcript first) alongside `(this directory)` — picking one
+  revives it — and `n` with a previously-used topic name spawns `resume`
+  instead of `start`, so retyping an old topic reconnects its session rather
+  than starting an amnesiac fresh one.
+
 - **Fewer confirmation prompts in the `wip` dashboard.** Confirms now guard
   only actions that can lose unrecoverable state: `f` (finish — deletes the
   worktree, including gitignored files) and `s` on an *actively working*

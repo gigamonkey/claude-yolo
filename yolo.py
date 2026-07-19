@@ -1531,9 +1531,11 @@ def setup_worktree(
     `base` (default the repo's current HEAD) with no upstream (a stray `git push`
     can't hit main); commits land in the shared .git on the host, so work survives
     container exit. `repo` targets a repo other than the cwd's (the extra repos of a
-    multi-repo start); default is the repo containing the cwd. The callers (`start`,
-    and `resume` recreating a missing extra worktree) guarantee the worktree and
-    branch don't already exist (they error otherwise), so this always creates fresh.
+    multi-repo start); default is the repo containing the cwd. When branch NAME
+    already exists (a finished-then-revived topic whose branch survived, or an
+    extra repo in the same state), the worktree **reattaches** to it instead of
+    creating fresh — `start` pre-flights both the worktree and the branch away, so
+    from `start` this always creates a new branch off `base`.
     """
     if repo is None:
         common_git, main_root, slug = _repo_paths()
@@ -1544,10 +1546,12 @@ def setup_worktree(
         common_git, main_root, slug = ident
     worktree = home / ".claude-yolo" / "worktrees" / slug / name
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "-C", str(main_root), "worktree", "add", "-b", name, str(worktree), base],
-        check=True,
+    tail = (
+        [str(worktree), name]
+        if _branch_exists(name, main_root)
+        else ["-b", name, str(worktree), base]
     )
+    subprocess.run(["git", "-C", str(main_root), "worktree", "add", *tail], check=True)
     return worktree, common_git, main_root
 
 
@@ -7483,7 +7487,7 @@ def _wip_action(key, item, home, session, term) -> str:
         if key == "N":
             return _wip_new_session(kind, p, home, session)
         if key == "R":
-            return _wip_resume_pick(kind, p, home, session)
+            return _wip_resume_pick(kind, p, home, session, term)
     except YoloError as e:
         return str(e)
     return ""
@@ -7599,14 +7603,90 @@ def _wip_new_session(kind, p, home, session) -> str:
     return f"starting a new session in {label}…"
 
 
-def _wip_resume_pick(kind, p, home, session) -> str:
+def _project_claude_dir(home, path) -> pathlib.Path:
+    """The Claude config dir a launch from `path` would use (its config's
+    `config_dir`, else ~/.claude) — where its session transcripts live."""
+    cfg, _ = load_yolo_config(pathlib.Path(path), home, quiet=True)
+    return pathlib.Path(cfg.get("config_dir") or home / ".claude")
+
+
+def _finished_topics(home, path) -> list[str]:
+    """Topics of `path`'s repo that are finished but left a Claude transcript
+    behind — revivable with `resume TOPIC` (which recreates the worktree and
+    continues the old session). Newest-transcript first.
+
+    Enumerated from ~/.claude/projects/: a finished topic's worktree is gone, but
+    its transcript bucket — named by the slugified worktree path — persists. The
+    slug is lossy (every non-alphanumeric becomes `-`), so a candidate topic is
+    kept only when it round-trips to the bucket name; topics whose worktree still
+    exists are excluded (they have live worktree rows). `home` None is the
+    test/standalone path → none.
+    """
+    ident = _repo_root_of(pathlib.Path(path)) if home is not None else None
+    if ident is None:
+        return []
+    base = home / ".claude-yolo" / "worktrees" / ident[2]
+    prefix = _cwd_slug(base) + "-"
+    projects = _project_claude_dir(home, path) / "projects"
+    if not projects.is_dir():
+        return []
+    found = []
+    for d in projects.iterdir():
+        topic = d.name[len(prefix) :] if d.name.startswith(prefix) else ""
+        if not topic or _cwd_slug(base / topic) != d.name or (base / topic).exists():
+            continue
+        stamps = [f.stat().st_mtime for f in d.glob("*.jsonl")]
+        if stamps:
+            found.append((max(stamps), topic))
+    return [t for _, t in sorted(found, reverse=True)]
+
+
+def _topic_history(home, path, topic) -> bool:
+    """Whether `topic` already has a life in `path`'s repo — a live worktree, a
+    surviving branch, or a finished topic's Claude transcript. Decides whether
+    the dashboard's `n` spawns `resume` (reconnect/revive) or `start` (fresh)."""
+    ident = _repo_root_of(pathlib.Path(path)) if home is not None else None
+    if ident is None:
+        return False
+    worktree = home / ".claude-yolo" / "worktrees" / ident[2] / topic
+    return (
+        worktree.is_dir()
+        or _branch_exists(topic, ident[1])
+        or _has_resumable_session(_project_claude_dir(home, path), worktree)
+    )
+
+
+def _wip_resume_pick(kind, p, home, session, term) -> str:
     """`R`: open Claude's interactive session picker (`resume -r`) in a new window,
     so you can resume a session other than the most recent. Refuses on a running
-    row, like `N` (you can't resume into the live container)."""
+    row, like `N` (you can't resume into the live container).
+
+    On a project row, finished topics with surviving transcripts are offered
+    first (`_finished_topics`): picking one spawns `resume TOPIC`, which revives
+    the topic — recreates its worktree and continues its old Claude session.
+    `(this directory)` keeps the plain picker-for-the-project-dir behavior (and
+    is withheld while a session runs there — a revived topic is its own
+    container, so topics stay pickable even then)."""
     target = _wip_spawn_target(kind, p, home)
     if target is None:
         return "resume picker applies to worktrees and projects."
     cwd, window_name, label, extra = target
+    if kind == "project":
+        finished = _finished_topics(home, p["path"])
+        if finished:
+            here = "(this directory)"
+            options = ([] if p.get("window") else [here]) + finished
+            choice = _pick_one(term, f"resume in {label}:", options)
+            if choice is None:
+                return "cancelled."
+            if choice != here:
+                _spawn_session_window(
+                    cwd,
+                    ["resume", choice, *extra, "--no-tmux"],
+                    _session_window_name(label, choice),
+                    session,
+                )
+                return f"resuming finished topic '{choice}' in {label}…"
     if p.get("window"):
         return f"a session is already running in {label} — Enter switches to it; stop it first."
     argv_tail = (
@@ -8216,28 +8296,34 @@ def _wip_config(kind, p, home, term) -> str:
 
 
 def _wip_new_worktree(p, home, session, term) -> str:
-    """`n`: prompt for a topic, then start a new worktree session in this project.
+    """`n`: prompt for a topic, then start a worktree session for it in this project.
 
     Shells out (like Enter's launches) into a fresh tmux window running `yolo start
     <topic> [--project <name>] --no-tmux` in the project dir, so the inner yolo
     creates the worktree(s) + branch and execs docker into the window (a registered
     row starts by name, so the inner yolo retargets to the project's `dir` itself
-    and the window's cwd only needs to be valid). Topic validation (existing
-    worktree/branch, bad branch name) is left to that spawned `yolo start`,
-    surfacing in the window — the same place Enter's launch errors land.
+    and the window's cwd only needs to be valid). A topic that already has a life
+    (`_topic_history`: a live worktree, a surviving branch, or a finished topic's
+    transcript) spawns `resume <topic>` instead, which reconnects — reviving the
+    worktree and its old Claude session if it was finished — rather than letting
+    `start` refuse or begin an amnesiac fresh session over old history. Remaining
+    topic validation (bad branch name, …) is left to the spawned yolo, surfacing
+    in the window — the same place Enter's launch errors land.
     """
     topic = term.prompt_line("New worktree topic: ")
     if not topic:
         return "cancelled."
     target = _wip_spawn_target("project", p, home)
     cwd, _, label, extra = target
+    verb = "resume" if cwd and _topic_history(home, cwd, topic) else "start"
     _spawn_session_window(
         cwd or pathlib.Path.home(),
-        ["start", topic, *extra, "--no-tmux"],
+        [verb, topic, *extra, "--no-tmux"],
         _session_window_name(label, topic),
         session,
     )
-    return f"starting worktree '{topic}' in {label}…"
+    doing = "resuming" if verb == "resume" else "starting"
+    return f"{doing} worktree '{topic}' in {label}…"
 
 
 def _wip_add_project(home, term) -> str:
@@ -9044,7 +9130,20 @@ def _main():
             _write_worktrees_file(wt_file, worktrees)
         else:
             if not worktree.is_dir():
-                sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
+                # A finished topic leaves its Claude transcript behind (keyed by
+                # the worktree path, which is deterministic) and possibly its
+                # branch: `resume` revives it — recreate the worktree (reattaching
+                # the surviving branch, else fresh off base) and fall through to
+                # the normal continue-or-fresh logic, which finds the old session.
+                # A topic with neither (a typo) still errors.
+                claude_dir = parsed.config_dir or f"{home}/.claude"
+                if verb == "resume" and (
+                    _branch_exists(topic, main_root) or _has_resumable_session(claude_dir, worktree)
+                ):
+                    print(f"Recreating the '{topic}' worktree.", file=sys.stderr)
+                    setup_worktree(topic, home, base=parsed.base)
+                else:
+                    sys.exit(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
             cwd, common_git = worktree, _repo_paths()[0]
             # `resume` restarts the container, so config flags passed to it update
             # the overlay (add mounts/ports, change auth, …) and persist for next
@@ -9067,14 +9166,10 @@ def _main():
                             file=sys.stderr,
                         )
                         continue
-                    # A repo added to the topic's config after start: bring its
-                    # worktree into existence now, as start would have.
-                    if _branch_exists(topic, extra_root):
-                        sys.exit(
-                            f"branch '{topic}' already exists in {extra_root} but has "
-                            "no yolo worktree; resolve it there first (delete the "
-                            "branch, or remove the repo from this topic's `repos`)."
-                        )
+                    # A repo added to the topic's config after start, or an extra
+                    # of a revived topic: bring its worktree into existence now,
+                    # as start would have (setup_worktree reattaches the branch
+                    # if one survived a finish, e.g. finish-action keep).
                     print(f"Creating the '{topic}' worktree in {extra_root}.", file=sys.stderr)
                     extra_wt = setup_worktree(topic, home, base=parsed.base, repo=extra_root)[0]
                 extra_repos.append((extra_wt, extra_git, extra_slug))
