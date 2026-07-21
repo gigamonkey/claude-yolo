@@ -1039,9 +1039,9 @@ def test_list_unmerged_branch(cy, run_cli, repo, capsys):
 
 
 def test_list_flags_rebase_conflicts(cy, run_cli, repo, capsys):
-    # A rebase left mid-conflict shows STATUS 'rebase conflicts' (detected from
-    # the worktree's git dir, regardless of who started it), and the TOPIC stays
-    # the topic name rather than the detached-HEAD the rebase leaves it on.
+    # A rebase left mid-conflict shows STATUS 'conflicts' (detected from the
+    # worktree's git dir, regardless of who started it), and the TOPIC stays the
+    # topic name rather than the detached-HEAD the rebase leaves it on.
     r, home = repo
     run_cli(["start", "wip"], home=home, cwd=r)
     wt = next((home / ".claude-yolo" / "worktrees").rglob("wip"))
@@ -1056,8 +1056,7 @@ def test_list_flags_rebase_conflicts(cy, run_cli, repo, capsys):
     assert cy._rebase_in_progress(wt)
     capsys.readouterr()
     run_cli(["list"], home=home, cwd=r)
-    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("wip "))
-    assert "rebase conflicts" in line
+    assert _status_for(capsys.readouterr().out, "wip") == "conflicts"
 
 
 def test_list_shows_commits(cy, run_cli, repo, capsys):

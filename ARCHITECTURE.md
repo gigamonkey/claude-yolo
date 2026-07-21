@@ -1283,7 +1283,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   across the whole set first, then each repo rebases onto its own `base`; a
   conflict in one repo doesn't abort the run — that worktree is left in-progress
   (git leaves its `rebase-merge`/`rebase-apply` state dir, which `_rebase_in_progress`
-  detects for the `rebase conflicts` STATUS) and the remaining repos still rebase,
+  detects for the `conflicts` STATUS) and the remaining repos still rebase,
   a `YoloError` at the end naming which repos rebased vs conflicted (each rebase
   is per-repo-atomic, so nothing needs unwinding). A **single-repo** rebase
   (`--this-repo`, or a worktree row) still raises immediately with git's output.
@@ -1349,7 +1349,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   branch checked out (someone switched it inside the container) — so there's no
   standing BRANCH column for what's almost always redundant (suppressed too
   mid-rebase, where HEAD is detached and would read as `HEAD`).
-  STATUS is `running`/`dirty`, `rebase conflicts` when the worktree is stopped
+  STATUS is `running`/`dirty`, `conflicts` when the worktree is stopped
   mid-rebase (`_rebase_in_progress`: git's `rebase-merge`/`rebase-apply` state
   dir under the worktree's own git dir — checked ahead of the branch reads, which
   are meaningless on the rebase's detached HEAD, and colored red like
@@ -1495,7 +1495,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   they act on the whole set, the dashboard's `yolo rebase/merge/diff TOPIC`. `r`
   rebases (`_wip_rebase` → `rebase_worktree`; keeps the idle guard — only a
   `waiting` session row, unlike `m`/`d`; a whole-set rebase that conflicts in one
-  repo leaves that worktree mid-rebase — flagged `rebase conflicts` in the
+  repo leaves that worktree mid-rebase — flagged `conflicts` in the
   WORKTREES STATUS — and still rebases the rest, its footer naming which repos
   rebased vs conflicted). `m` on a worktree row (or any session row, even a
   `working` one — the merge only reads the branch's committed tip, so it has no
@@ -2383,7 +2383,7 @@ every repo). `m` on a worktree *and* a session row (no confirm, the core stubbed
 calls `merge_worktree` with `capture=True`; the whole-set `rebase_worktree`
 continue-past-conflict path is exercised for real (app rebases, lib conflicts →
 the `YoloError` names both, `_rebase_in_progress` sees lib mid-rebase and not
-app), and the `rebase conflicts` STATUS lands in `list` output (with the
+app), and the `conflicts` STATUS lands in `list` output (with the
 detached-HEAD TOPIC still shown as the topic). `d` on a worktree *and* a session
 row spawning `yolo diff <topic> --base … --stat` — `--this-repo` on a worktree
 row, omitted (whole set) on a session row (a no-op on a plain cwd session), the

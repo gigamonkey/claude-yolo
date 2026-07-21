@@ -18,10 +18,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   resolve (`git rebase --continue`/`--abort`) while the rest still rebase, and
   the result names which repos rebased and which conflicted.
 
-- **New `rebase conflicts` worktree STATUS.** `yolo list` and the `wip`
-  dashboard now flag a worktree left stopped mid-rebase (from `r`, the CLI, or
-  a hand-run `git rebase`) with a red `rebase conflicts` status, so a stuck
-  rebase is visible at a glance instead of hiding as a generic `dirty`.
+- **New `conflicts` worktree STATUS.** `yolo list` and the `wip` dashboard now
+  flag a worktree left stopped mid-rebase (from `r`, the CLI, or a hand-run
+  `git rebase`) with a red `conflicts` status, so a stuck rebase is visible at
+  a glance instead of hiding as a generic `dirty`.
 
 - **The `wip` dashboard's `f` (finish) skips the confirm when nothing committed
   is at stake.** When every one of the topic's branches (across all its repos)

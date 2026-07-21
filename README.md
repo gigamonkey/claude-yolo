@@ -315,7 +315,7 @@ Verb details:
   its [projects](#projects) name (a project entry's `repos`, or a topic's per-start
   `--repo`), so a multi-repo topic's worktrees all appear. When more than one repo
   is in view a leading REPO column names each. STATUS is `running`,
-  `dirty` (uncommitted changes), `rebase conflicts` (a rebase stopped mid-way on
+  `dirty` (uncommitted changes), `conflicts` (a rebase stopped mid-way on
   conflicts, left for you to `git rebase --continue`/`--abort` in the worktree),
   or — when idle and clean — `merged`/`unmerged`
   depending on whether the branch is already contained in the base branch (`git
@@ -417,7 +417,7 @@ repo, as usual):
 - **`rebase TOPIC`** dirty-checks every worktree first, then rebases each onto
   `--base` resolved in its *own* repo (so the default `HEAD` means each repo's
   tip). A conflict in one repo doesn't stop the rest — that worktree is left
-  in-progress to resolve (and flagged `rebase conflicts` in `list`/`wip`) while
+  in-progress to resolve (and flagged `conflicts` in `list`/`wip`) while
   the other repos still rebase; the result names which repos rebased and which
   conflicted (a non-zero exit).
 
@@ -447,7 +447,7 @@ that one repo (rebasing, merging, or diffing it against its own base — the
 `--this-repo` scope), while on the **session** row — which *is* the whole topic
 — they act on the **whole set**, the dashboard's `yolo rebase/merge/diff TOPIC`.
 A whole-set rebase that hits a conflict in one repo doesn't stop the others: the
-conflicted worktree is left mid-rebase and flagged `rebase conflicts` in the
+conflicted worktree is left mid-rebase and flagged `conflicts` in the
 WORKTREES STATUS column (resolve it with `git rebase --continue`/`--abort`),
 while the rest still rebase; the footer names which repos rebased and which
 conflicted. A repo whose path has vanished is
@@ -622,7 +622,7 @@ the selected row:
 | `b`     | a session with forwarded ports   | `browse` the port (with more than one, prompts for the container port or its label) |
 | `s`     | a running session                | stop it (immediate when idle — the transcript persists and `resume` reconnects; an actively working session asks for a confirm first) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree). Confirms first **unless the topic's branches are all already merged** into their bases — then it just cleans up, since nothing committed is at stake and a finished topic revives by name (`resume TOPIC`) |
-| `r`     | a worktree, or an idle session   | rebase the branch onto its base. On a **worktree** row it rebases just that repo; on a **session** row it rebases the **whole topic**. A conflict in one repo of a multi-repo set doesn't stop the others — that worktree is left mid-rebase (flagged `rebase conflicts` in WORKTREES, resolve with `git rebase --continue`/`--abort`) while the rest still rebase |
+| `r`     | a worktree, or an idle session   | rebase the branch onto its base. On a **worktree** row it rebases just that repo; on a **session** row it rebases the **whole topic**. A conflict in one repo of a multi-repo set doesn't stop the others — that worktree is left mid-rebase (flagged `conflicts` in WORKTREES, resolve with `git rebase --continue`/`--abort`) while the rest still rebase |
 | `m`     | a worktree, or a session         | merge the branch into its base, keeping the worktree and branch (no confirm — a conflicted merge aborts cleanly, a landed one is `git reset --hard ORIG_HEAD` away from undone). On a **worktree** row it merges just that repo; on a **session** row it merges the **whole topic** — every repo of a multi-repo set — the dashboard's `yolo merge TOPIC` |
 | `d`     | a worktree, or a session         | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes). On a **worktree** row it diffs just that repo; on a **session** row it diffs the **whole topic**, each repo in turn under a `== repo ==` header |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row — and a name, defaulting to the dir basename) |

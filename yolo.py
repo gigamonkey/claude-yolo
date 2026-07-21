@@ -5631,7 +5631,7 @@ def rebase_worktree(
     whole set rebases: the dirty guard runs across every repo first, then each
     worktree rebases onto `base` resolved in its *own* main repo. A conflict in
     one repo doesn't stop the rest — that worktree is left in-progress (to
-    `git rebase --continue`/`--abort`, and flagged `rebase conflicts` in the
+    `git rebase --continue`/`--abort`, and flagged `conflicts` in the
     WORKTREES list) and the remaining repos still rebase; at the end a
     `YoloError` names which repos rebased and which conflicted (each repo's
     rebase is per-repo-atomic, so nothing needs unwinding). With
@@ -5722,7 +5722,7 @@ def rebase_worktree(
         raise YoloError(
             f"{did}Conflicts in {', '.join(conflicts)} — resolve there "
             "(git rebase --continue / --abort); the WORKTREES list flags them "
-            "'rebase conflicts'."
+            "'conflicts'."
         )
     return "\n".join(msgs)
 
@@ -6300,7 +6300,7 @@ def _worktree_rows(
                     # be meaningless — flag it instead, for the user to resolve
                     # (git rebase --continue/--abort in the worktree).
                     rebasing = True
-                    status = ", ".join((["running"] if running else []) + ["rebase conflicts"])
+                    status = ", ".join((["running"] if running else []) + ["conflicts"])
                     commits = "-"
                 else:
                     dirty = bool(
@@ -7913,8 +7913,8 @@ def _wip_rebase(kind, p, home, term) -> str:
     whole-set spelling. A **session row is the whole topic**, so `r` there
     rebases every repo of the set; a conflict in one repo doesn't stop the
     others — the core leaves each conflicted worktree in-progress, flags it
-    `rebase conflicts` in the WORKTREES list, and its footer names which repos
-    rebased and which conflicted. For a single-repo topic the two coincide."""
+    `conflicts` in the WORKTREES list, and its footer names which repos rebased
+    and which conflicted. For a single-repo topic the two coincide."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
