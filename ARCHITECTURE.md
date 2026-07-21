@@ -1279,7 +1279,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   practice. The **dirty-tree refusal is independent and absolute** — no `force`
   bypass, since `git rebase` needs a clean tree regardless (this is why `force`
   here gates *only* the running-container check, not the dirty check as it does in
-  `finish`).
+  `finish`). **Multi-repo rebase continues past conflicts**: the dirty guard runs
+  across the whole set first, then each repo rebases onto its own `base`; a
+  conflict in one repo doesn't abort the run — that worktree is left in-progress
+  (git leaves its `rebase-merge`/`rebase-apply` state dir, which `_rebase_in_progress`
+  detects for the `rebase conflicts` STATUS) and the remaining repos still rebase,
+  a `YoloError` at the end naming which repos rebased vs conflicted (each rebase
+  is per-repo-atomic, so nothing needs unwinding). A **single-repo** rebase
+  (`--this-repo`, or a worktree row) still raises immediately with git's output.
 - **`merge TOPIC`** (`do_merge` → the `merge_worktree` core) — merge a worktree's
   branch into `base`, but **keep the worktree and branch** (the difference from
   `finish --finish-action merge`, whose `_finish_merge` merges and then removes the
@@ -1340,8 +1347,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   TOPIC cell is just the topic, since yolo names the worktree's branch the same;
   it's only shown as `topic (branch: X)` when the worktree has a *different*
   branch checked out (someone switched it inside the container) — so there's no
-  standing BRANCH column for what's almost always redundant.
-  STATUS is `running`/`dirty`, else `merged`/`unmerged` (idle+clean) judged by
+  standing BRANCH column for what's almost always redundant (suppressed too
+  mid-rebase, where HEAD is detached and would read as `HEAD`).
+  STATUS is `running`/`dirty`, `rebase conflicts` when the worktree is stopped
+  mid-rebase (`_rebase_in_progress`: git's `rebase-merge`/`rebase-apply` state
+  dir under the worktree's own git dir — checked ahead of the branch reads, which
+  are meaningless on the rebase's detached HEAD, and colored red like
+  dirty/orphaned), else `merged`/`unmerged` (idle+clean) judged by
   whether the branch is reachable from **`base`** — exactly `git branch --merged
   <base>` (default `base` is `HEAD` = the main checkout; honours
   the `base` config key/`--base`) — or **`orphaned`** when git can't resolve the
@@ -1476,19 +1488,26 @@ gracefully outside one — there's just no repo slug to label/find by).
   single-`base` + `_branch_merged` resolution — in which case it skips the
   confirm, since `delete-if-merged` disposes only integrated branches and a
   finished topic revives by name; a squash-merge/unresolvable ref reads as
-  un-merged and still confirms), `r` rebases, `m` on a worktree row (or any worktree-backed
-  session row, even a `working` one — the merge only reads the branch's committed
-  tip, so it has no idle guard) **merges** the branch into its base while keeping
-  the worktree + branch (`_wip_merge` → the `merge_worktree` core, no confirm —
-  the core aborts on conflict and a landed merge is reflog-revertable; base from
-  `_worktree_config`; **scope is per-row**: a worktree row is one repo
-  (`single_repo=True`), but a **session row is the whole topic** — its one
-  container spans every repo and its payload carries the primary's
-  worktree/root/slug — so `m` there merges the whole set, the dashboard's `yolo
-  merge TOPIC`), `d` on a worktree row (or any worktree-backed
-  session row, even a `working` one — diff is read-only) spawns `yolo diff
-  <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
-  `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
+  un-merged and still confirms). **`r`/`m`/`d` are scoped by the row** (the same
+  `single_repo = (kind == "worktree")` split in each): a **worktree** row is one
+  repo, a **session** row is the whole topic — its one container spans every repo
+  and its payload carries the primary's worktree/root/slug — so on a session row
+  they act on the whole set, the dashboard's `yolo rebase/merge/diff TOPIC`. `r`
+  rebases (`_wip_rebase` → `rebase_worktree`; keeps the idle guard — only a
+  `waiting` session row, unlike `m`/`d`; a whole-set rebase that conflicts in one
+  repo leaves that worktree mid-rebase — flagged `rebase conflicts` in the
+  WORKTREES STATUS — and still rebases the rest, its footer naming which repos
+  rebased vs conflicted). `m` on a worktree row (or any session row, even a
+  `working` one — the merge only reads the branch's committed tip, so it has no
+  idle guard) **merges** the branch into its base while keeping the worktree +
+  branch (`_wip_merge` → the `merge_worktree` core, no confirm — the core aborts
+  on conflict and a landed merge is reflog-revertable; base from
+  `_worktree_config`). `d` on a worktree row (or any session row, even a
+  `working` one — diff is read-only) spawns `yolo diff <topic> --base <base>
+  --stat` in a new window (`_wip_diff`; base from `_worktree_config`;
+  `--this-repo` only on a worktree row, so a session row walks every repo under a
+  `== repo ==` header, its `--stat` picker per repo with a repo-qualified title)
+  — the interactive diff-stat picker, where Enter/Space on a
   file opens its diff in yet another window, `c` on a worktree or project row
   opens an **interactive config editor** (`_config_editor_loop`) for that worktree's
   overlay / project entry — a modal sub-screen (the `_diff_stat_loop` pattern) that
@@ -2354,13 +2373,20 @@ session gets the force confirm, cancellable),
 cores, which own the guard; `f`'s confirm is skipped when `_finish_all_merged`
 and shown otherwise — both branches stubbed via that helper, plus its real
 single- and multi-repo merge-detection against started topics, and the
-home=None never-auto-skip), `m` on a worktree *and* a session row (no confirm, the core stubbed) calling
-`merge_worktree` with `capture=True` — `single_repo=True` from a worktree row
-(per-repo) but `single_repo=False` from a session row (whole set); the real
-per-repo-vs-whole-set split verified against started multi-repo topics (a
-worktree row lands only its own repo, a session row lands every repo's branch),
-`d` on a worktree *and* a worktree-backed session row
-spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
+home=None never-auto-skip). `r`/`m`/`d` share the `single_repo = (kind ==
+"worktree")` split — `single_repo=True` from a worktree row (per-repo),
+`single_repo=False` from a session row (whole set) — stubbed at the loop level
+(`r` also keeps its idle guard: whole-set on a `waiting` session row, a no-op on
+a `working` one; `m`/`d` have none) and verified for real against started
+multi-repo topics (a worktree row acts on its own repo only, a session row on
+every repo). `m` on a worktree *and* a session row (no confirm, the core stubbed)
+calls `merge_worktree` with `capture=True`; the whole-set `rebase_worktree`
+continue-past-conflict path is exercised for real (app rebases, lib conflicts →
+the `YoloError` names both, `_rebase_in_progress` sees lib mid-rebase and not
+app), and the `rebase conflicts` STATUS lands in `list` output (with the
+detached-HEAD TOPIC still shown as the topic). `d` on a worktree *and* a session
+row spawning `yolo diff <topic> --base … --stat` — `--this-repo` on a worktree
+row, omitted (whole set) on a session row (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file
 `git diff` window, q quitting; `_draw_diff_stat`'s selected-file reverse bar and dim
 summary), `c` opening the config editor (`_config_editor_loop` / `_config_scope`: the

@@ -997,6 +997,7 @@ def test_finish_waiting_session_allowed(cy, monkeypatch):
 
 
 def test_rebase_worktree_calls_core(cy, monkeypatch):
+    # `r` on a worktree row is per-repo (single_repo=True), like `m`/`d`.
     calls = []
     monkeypatch.setattr(
         cy,
@@ -1007,6 +1008,32 @@ def test_rebase_worktree_calls_core(cy, monkeypatch):
     frames = run_loop(cy, monkeypatch, sections, ["r", "q"])
     assert calls == [("old", {"capture": True, "single_repo": True})]
     assert frames[-1][1] == "rebased"
+
+
+def test_rebase_on_session_row_rebases_whole_set(cy, monkeypatch):
+    # `r` on an idle session row is the whole-topic rebase (single_repo=False):
+    # the session is the whole topic, so it rebases every repo of the set.
+    calls = []
+    monkeypatch.setattr(
+        cy,
+        "rebase_worktree",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "rebased",
+    )
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}  # waiting
+    run_loop(cy, monkeypatch, sections, ["r"])
+    assert calls == [("topic", {"capture": True, "single_repo": False})]
+
+
+def test_rebase_on_working_session_row_is_noop(cy, monkeypatch):
+    # `r` still won't touch an actively-working session row (the idle guard),
+    # unlike `m`/`d` which don't mutate the working tree.
+    calls = []
+    monkeypatch.setattr(cy, "rebase_worktree", lambda *a, **k: calls.append(1) or "x")
+    working = session_item(cy, payload={"state": "working"})
+    sections = {"session": [working], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["r"])
+    assert calls == []
+    assert "rebase applies to worktrees and idle sessions" in frames[-1][1]
 
 
 def test_merge_worktree_calls_core_without_confirm(cy, monkeypatch):
@@ -1060,8 +1087,10 @@ def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):
     assert frames[-1][1] == "diffing 'old'…"
 
 
-def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
-    # `d` also works on a worktree-backed session row (read-only, so any state).
+def test_d_on_session_row_diffs_whole_set(cy, monkeypatch):
+    # `d` on a session row is the whole-topic diff — it omits `--this-repo`, so
+    # `yolo diff` walks every repo of the set (each under a `== repo ==` header).
+    # Read-only, so it works on any session state.
     spawned = []
     monkeypatch.setattr(
         cy,
@@ -1073,7 +1102,7 @@ def test_d_on_worktree_session_spawns_diff_window(cy, monkeypatch):
     ((repo, argv, name),) = spawned
     assert (
         repo == "/repo"
-        and argv == ["diff", "topic", "--base", "HEAD", "--stat", "--this-repo"]
+        and argv == ["diff", "topic", "--base", "HEAD", "--stat"]  # no --this-repo
         and name == "diff-topic"
     )
 

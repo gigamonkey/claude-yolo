@@ -1038,6 +1038,28 @@ def test_list_unmerged_branch(cy, run_cli, repo, capsys):
     assert _status_for(capsys.readouterr().out, "wip") == "unmerged"
 
 
+def test_list_flags_rebase_conflicts(cy, run_cli, repo, capsys):
+    # A rebase left mid-conflict shows STATUS 'rebase conflicts' (detected from
+    # the worktree's git dir, regardless of who started it), and the TOPIC stays
+    # the topic name rather than the detached-HEAD the rebase leaves it on.
+    r, home = repo
+    run_cli(["start", "wip"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("wip"))
+    (wt / "README").write_text("branch\n")  # conflicting change vs main's advance
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "branch edit")
+    (r / "README").write_text("main\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main edit")
+    with pytest.raises(SystemExit):  # single-repo conflict raises
+        run_cli(["rebase", "wip"], home=home, cwd=r)
+    assert cy._rebase_in_progress(wt)
+    capsys.readouterr()
+    run_cli(["list"], home=home, cwd=r)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("wip "))
+    assert "rebase conflicts" in line
+
+
 def test_list_shows_commits(cy, run_cli, repo, capsys):
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)

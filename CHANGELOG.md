@@ -5,11 +5,23 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **`m` (merge) on a `wip` session row merges the whole topic.** A session row
+- **`r`/`m`/`d` on a `wip` session row act on the whole topic.** A session row
   represents the topic's one container, which spans every repo of a multi-repo
-  set, so `m` there now lands every repo's branch into its base — the dashboard
-  affordance for `yolo merge TOPIC`. `m` on a **worktree** row stays per-repo
-  (that repo only), matching `r`/`d`. For a single-repo topic the two coincide.
+  set, so `r` (rebase), `m` (merge), and `d` (diff) there now act on every repo
+  — the dashboard affordances for `yolo rebase/merge/diff TOPIC`. On a
+  **worktree** row they stay per-repo (that repo only). For a single-repo topic
+  the two coincide.
+
+- **A multi-repo rebase no longer stops at the first conflicting repo.** `yolo
+  rebase TOPIC` (and a session-row `r`) now rebases every repo of the set even
+  when one hits conflicts: the conflicted worktree is left in-progress to
+  resolve (`git rebase --continue`/`--abort`) while the rest still rebase, and
+  the result names which repos rebased and which conflicted.
+
+- **New `rebase conflicts` worktree STATUS.** `yolo list` and the `wip`
+  dashboard now flag a worktree left stopped mid-rebase (from `r`, the CLI, or
+  a hand-run `git rebase`) with a red `rebase conflicts` status, so a stuck
+  rebase is visible at a glance instead of hiding as a generic `dirty`.
 
 - **The `wip` dashboard's `f` (finish) skips the confirm when nothing committed
   is at stake.** When every one of the topic's branches (across all its repos)

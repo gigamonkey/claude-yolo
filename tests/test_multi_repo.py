@@ -574,6 +574,35 @@ def test_merge_this_repo_merges_only_the_cwd_repo(cy, run_cli, repos):
     assert awt.is_dir() and lwt.is_dir()
 
 
+def test_rebase_whole_set_continues_past_conflict(cy, run_cli, repos):
+    # A conflict in one repo doesn't stop the rest: app rebases clean, lib
+    # conflicts and is left in-progress, and the error names which repos rebased
+    # vs conflicted. Each conflicted worktree stays flagged for the user.
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    # app: non-conflicting advance (main touches a new file; branch a different one)
+    (app / "a-main.txt").write_text("main\n")
+    git(app, "add", ".")
+    git(app, "commit", "-qm", "advance main")
+    (awt / "a-wt.txt").write_text("branch\n")
+    git(awt, "add", ".")
+    git(awt, "commit", "-qm", "work")
+    # lib: conflicting change to the SAME file on both main and branch
+    (lib / "README").write_text("main version\n")
+    git(lib, "add", ".")
+    git(lib, "commit", "-qm", "advance main")
+    (lwt / "README").write_text("branch version\n")
+    git(lwt, "add", ".")
+    git(lwt, "commit", "-qm", "work")
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["rebase", "feat"], home=home, cwd=app)
+    msg = str(exc.value)
+    assert "app" in msg and "Conflicts in lib" in msg
+    assert (awt / "a-main.txt").exists()  # app was replayed onto its advanced main
+    assert cy._rebase_in_progress(lwt)  # lib left mid-rebase to resolve
+    assert not cy._rebase_in_progress(awt)  # app finished cleanly
+
+
 def test_rebase_this_repo_rebases_only_the_cwd_repo(cy, run_cli, repos):
     app, lib, proto, home = repos
     awt, lwt = start_pair(cy, run_cli, repos)
@@ -890,6 +919,33 @@ def test_wip_rebase_on_primary_row_rebases_only_that_repo(cy, run_cli, repos):
     assert "Rebased 'feat'" in msg
     assert (awt / "a-main.txt").exists()
     assert not (lwt / "l-main.txt").exists()  # the extra repo's branch not replayed
+
+
+def test_wip_rebase_on_session_row_rebases_whole_set(cy, run_cli, repos):
+    # `r` on a session row is the whole-topic rebase: every repo's branch is
+    # replayed onto its own advanced main. A session payload carries the
+    # PRIMARY's worktree/root/slug and (for `r`) must be idle.
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for repo, fname in ((app, "a-main.txt"), (lib, "l-main.txt")):
+        (repo / fname).write_text("new on main\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "advance main")
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    payload = {
+        "topic": "feat",
+        "state": "waiting",  # `r` keeps the idle guard even whole-set
+        "worktree": awt,
+        "main_root": app,
+        "slug": awt.parent.name,
+    }
+    msg = cy._wip_rebase("session", payload, home, FakeTerm([]))
+    assert "[app]" in msg and "[lib]" in msg
+    assert (awt / "a-main.txt").exists()
+    assert (lwt / "l-main.txt").exists()  # the extra repo replayed too — whole set
 
 
 def test_wip_extra_worktree_row_gets_primary_session_window(cy):

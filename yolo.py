@@ -5629,16 +5629,19 @@ def rebase_worktree(
     A dirty worktree is always refused (no `force` bypass): `git rebase` needs a
     clean tree regardless. For a multi-repo topic (see `_topic_repo_set`) the
     whole set rebases: the dirty guard runs across every repo first, then each
-    worktree rebases onto `base` resolved in its *own* main repo; a conflict
-    stops at that repo (the earlier repos stay rebased — each rebase is
-    per-repo-atomic, so there's nothing to unwind). With `single_repo=True`
-    (the dashboard's `r`, and `--this-repo` on the verb) the fan-out is
-    suppressed: only the given worktree rebases, whatever the topic spans.
-    Raises `YoloError` on those refusals, an unresolvable base, or conflicts
-    (leaving that repo's rebase in-progress to resolve/abort). With
-    `capture=True` git's output is captured (and folded into the conflict
-    error) rather than streamed — for the dashboard, which can't let git
-    scribble over its frame.
+    worktree rebases onto `base` resolved in its *own* main repo. A conflict in
+    one repo doesn't stop the rest — that worktree is left in-progress (to
+    `git rebase --continue`/`--abort`, and flagged `rebase conflicts` in the
+    WORKTREES list) and the remaining repos still rebase; at the end a
+    `YoloError` names which repos rebased and which conflicted (each repo's
+    rebase is per-repo-atomic, so nothing needs unwinding). With
+    `single_repo=True` (the dashboard's per-repo `r` on a worktree row, and
+    `--this-repo` on the verb) the fan-out is suppressed: only the given
+    worktree rebases, whatever the topic spans. Raises `YoloError` on the
+    guard refusals, an unresolvable base, or any conflict (single-repo, or the
+    multi-repo end-of-run summary). With `capture=True` git's output is captured
+    (and folded into a single-repo conflict error) rather than streamed — for the
+    dashboard, which can't let git scribble over its frame.
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; start one with `yolo start {topic}`.")
@@ -5681,6 +5684,7 @@ def rebase_worktree(
                 f"worktree '{topic}'{where} has uncommitted changes; commit or stash "
                 "them first (git rebase requires a clean tree)."
             )
+    rebased, conflicts = [], []
     for wt, root, _ in repo_set:
         rev = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", base],
@@ -5694,18 +5698,31 @@ def rebase_worktree(
         kw = {"capture_output": True, "text": True} if capture else {}
         rebase = subprocess.run(["git", "-C", str(wt), "rebase", target], **kw)
         if rebase.returncode != 0:
-            detail = ""
-            if capture:
-                detail = "\n" + (rebase.stderr.strip() or rebase.stdout.strip())
-            raise YoloError(
-                f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
-                f"{wt} and run `git rebase --continue`, or `git rebase --abort` "
-                f"there to back out.{detail}"
-            )
+            # Single repo: raise now with git's output. Multi: record the
+            # conflicted repo, leave its rebase in-progress, and keep going so the
+            # other repos still rebase — reported together at the end.
+            if not multi:
+                detail = "\n" + (rebase.stderr.strip() or rebase.stdout.strip()) if capture else ""
+                raise YoloError(
+                    f"rebasing '{topic}' onto '{base}' hit conflicts; resolve them in "
+                    f"{wt} and run `git rebase --continue`, or `git rebase --abort` "
+                    f"there to back out.{detail}"
+                )
+            conflicts.append(root.name)
+            continue
+        rebased.append(root.name)
         msgs.append(
             f"[{root.name}] Rebased '{topic}' onto '{base}'."
             if multi
             else f"Rebased '{topic}' onto '{base}'."
+        )
+    if conflicts:
+        # Multi-repo: some repos conflicted (single-repo already raised above).
+        did = f"Rebased '{topic}' onto '{base}' in {', '.join(rebased)}. " if rebased else ""
+        raise YoloError(
+            f"{did}Conflicts in {', '.join(conflicts)} — resolve there "
+            "(git rebase --continue / --abort); the WORKTREES list flags them "
+            "'rebase conflicts'."
         )
     return "\n".join(msgs)
 
@@ -5885,7 +5902,9 @@ def do_diff(
         if multi:
             print(f"== {root.name} ==", flush=True)
         if stat:
-            _diff_stat_picker(wt, diff_from, base, topic)
+            # The picker clears the screen, so the `== repo ==` header above is
+            # lost once it draws — qualify its title with the repo instead.
+            _diff_stat_picker(wt, diff_from, base, f"{topic} · {root.name}" if multi else topic)
             continue
         subprocess.run(["git", "-C", str(wt), "diff", diff_from])
 
@@ -6181,6 +6200,28 @@ WorktreeRow = collections.namedtuple(
 )
 
 
+def _rebase_in_progress(wt: pathlib.Path) -> bool:
+    """Whether `wt` is stopped mid-rebase — a rebase that hit conflicts left its
+    state dir behind for the user to `git rebase --continue`/`--abort`.
+
+    git keeps that state (the merge-backend `rebase-merge`, or the apply-backend
+    `rebase-apply`) in the worktree's *own* git dir, which for a linked worktree
+    is `<common>/.git/worktrees/<id>` — resolved here via `--absolute-git-dir`
+    (run inside the worktree). yolo only ever runs non-interactive rebases, so an
+    in-progress one always means unresolved conflicts. False if `wt`'s repo can't
+    be resolved (an orphaned worktree — judged separately).
+    """
+    gd = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if gd.returncode != 0:
+        return False
+    d = pathlib.Path(gd.stdout.strip())
+    return (d / "rebase-merge").is_dir() or (d / "rebase-apply").is_dir()
+
+
 def _worktree_rows(
     home: pathlib.Path,
     base: str,
@@ -6226,6 +6267,7 @@ def _worktree_rows(
         slug = slug_dir.name
         for wt in sorted(p for p in slug_dir.iterdir() if p.is_dir()):
             topic = wt.name
+            rebasing = False
             head = subprocess.run(
                 ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
@@ -6248,32 +6290,45 @@ def _worktree_rows(
                 status = ", ".join((["running"] if running else []) + ["orphaned"])
                 commits = "-"
             else:
-                dirty = bool(
-                    subprocess.run(
-                        ["git", "-C", str(wt), "status", "--porcelain"],
-                        capture_output=True,
-                        text=True,
-                    ).stdout.strip()
-                )
                 # When the view spans repos, resolve the branch in its own repo
                 # (the current dir isn't it); also names the REPO column.
                 repo = _worktree_main_repo(wt) if resolve_repo else None
-                wt_base = base_resolver(repo, wt) if base_resolver else base
-                flags = (["running"] if running else []) + (["dirty"] if dirty else [])
-                # `merged` vs `unmerged` only matters when it's idle and clean — i.e.
-                # when it's actually a candidate to `finish`.
-                if not flags:
-                    flags.append("merged" if _branch_merged(branch, wt_base, repo) else "unmerged")
-                status = ", ".join(flags)
-                ab = _branch_ahead_behind(branch, wt_base, repo)
-                # ↓behind ↑ahead — behind first, the order GitHub uses on its branch list.
-                commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
+                if _rebase_in_progress(wt):
+                    # A rebase (from `r`, the CLI, or by hand) that hit conflicts
+                    # left the worktree in-progress. HEAD is detached during a
+                    # rebase, so the branch/merged/ahead-behind reads below would
+                    # be meaningless — flag it instead, for the user to resolve
+                    # (git rebase --continue/--abort in the worktree).
+                    rebasing = True
+                    status = ", ".join((["running"] if running else []) + ["rebase conflicts"])
+                    commits = "-"
+                else:
+                    dirty = bool(
+                        subprocess.run(
+                            ["git", "-C", str(wt), "status", "--porcelain"],
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                    )
+                    wt_base = base_resolver(repo, wt) if base_resolver else base
+                    flags = (["running"] if running else []) + (["dirty"] if dirty else [])
+                    # `merged` vs `unmerged` only matters when it's idle and clean —
+                    # i.e. when it's actually a candidate to `finish`.
+                    if not flags:
+                        flags.append(
+                            "merged" if _branch_merged(branch, wt_base, repo) else "unmerged"
+                        )
+                    status = ", ".join(flags)
+                    ab = _branch_ahead_behind(branch, wt_base, repo)
+                    # ↓behind ↑ahead — behind first, the order GitHub uses.
+                    commits = f"↓{ab[1]} ↑{ab[0]}" if ab else "-"
             # Drop the ~/.claude-yolo/worktrees/ prefix every row shares; wt is
             # always under root by construction, so this leaves just <slug>/<topic>.
             directory = str(wt.relative_to(root))
             # Fold the branch into TOPIC, surfaced only when it differs (the
-            # off-the-happy-path case of a branch switched inside the container).
-            label = topic if branch in (topic, "") else f"{topic} (branch: {branch})"
+            # off-the-happy-path case of a branch switched inside the container) —
+            # but not mid-rebase, where HEAD is detached and reads as "HEAD".
+            label = topic if rebasing or branch in (topic, "") else f"{topic} (branch: {branch})"
             rows.append(
                 WorktreeRow(
                     # repo.name when git resolves the live main repo; else recover
@@ -7176,10 +7231,12 @@ def _color_session_row(it) -> tuple:
 
 
 def _color_status(status: str) -> str:
-    """Color a worktree STATUS: orphaned/dirty red, running green, unmerged yellow, else grey."""
+    """Color a worktree STATUS: orphaned/dirty/conflict red, running green, unmerged
+    yellow, else grey."""
     code = (
         _RED
-        if "orphaned" in status or "dirty" in status  # orphaned first: beats `running`
+        # orphaned/conflict first: they beat a co-present `running`
+        if "orphaned" in status or "dirty" in status or "conflict" in status
         else _GREEN
         if "running" in status
         else _YELLOW
@@ -7851,9 +7908,13 @@ def _wip_rebase(kind, p, home, term) -> str:
     """`r`: rebase a worktree (the core guards a running session), or an idle
     (waiting) session row, onto the base from *this worktree's* own config.
 
-    Per-repo by construction (`single_repo=True`): a row is one repo, so on a
-    multi-repo topic only that repo rebases — `yolo rebase TOPIC` is the
-    whole-set spelling."""
+    **Scope depends on the row** (like `m`): a worktree row is one repo, so it
+    rebases just that repo (`single_repo=True`) — `yolo rebase TOPIC` is the
+    whole-set spelling. A **session row is the whole topic**, so `r` there
+    rebases every repo of the set; a conflict in one repo doesn't stop the
+    others — the core leaves each conflicted worktree in-progress, flags it
+    `rebase conflicts` in the WORKTREES list, and its footer names which repos
+    rebased and which conflicted. For a single-repo topic the two coincide."""
     if kind == "worktree" or (kind == "session" and p["state"] == "waiting" and p["topic"]):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
@@ -7866,7 +7927,7 @@ def _wip_rebase(kind, p, home, term) -> str:
             home,
             base,
             capture=True,
-            single_repo=True,
+            single_repo=kind == "worktree",
         )
     return "rebase applies to worktrees and idle sessions."
 
@@ -7909,19 +7970,24 @@ def _wip_merge(kind, p, home, term) -> str:
 
 
 def _wip_diff(kind, p, home, session) -> str:
-    """`d`: `git diff` a worktree's branch against its base, in a new tmux window.
+    """`d`: `git diff` a branch against its base, in a new tmux window.
 
-    Applies to a worktree row *or* a worktree-backed session row — and, since the
-    diff is read-only (no mutation, no locks), even a `working` one, unlike `f`/`r`.
-    Diff output is large and interactive, so it can't live in the footer — it shells
-    out, spawning `yolo diff <topic> --base <base> --stat --this-repo` (the base
+    Applies to a worktree row *or* a session row — and, since the diff is
+    read-only (no mutation, no locks), even a `working` one, unlike `f`/`r`.
+    Diff output is large and interactive, so it can't live in the footer — it
+    shells out, spawning `yolo diff <topic> --base <base> --stat [...]` (the base
     from *this worktree's* own config, so it matches the COMMITS column and the
     dashboard's rebase; a matched project entry rides along as `--project`, so the
     spawned yolo resolves the same entry instead of erroring when several projects
-    share the dir; `--this-repo` keeps a multi-repo topic's diff to the row's own
-    repo — like `r`/`m`, per-repo by construction, `yolo diff TOPIC` being the
-    whole-set spelling). That window shows the interactive diff-stat; Enter/Space
-    on a file there opens its diff in yet another window."""
+    share the dir). That window shows the interactive diff-stat; Enter/Space on a
+    file there opens its diff in yet another window.
+
+    **Scope depends on the row** (like `m`/`r`): a **worktree** row passes
+    `--this-repo`, keeping a multi-repo topic's diff to that one repo. A
+    **session** row is the whole topic, so it omits `--this-repo` — `yolo diff`
+    then walks every repo of the set, each under a `== <repo> ==` header (its
+    `--stat` picker runs per repo in turn, quit one to reach the next, its title
+    repo-qualified)."""
     if kind == "worktree" or (kind == "session" and p.get("topic") and p.get("main_root")):
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
@@ -7935,7 +8001,7 @@ def _wip_diff(kind, p, home, session) -> str:
                 "--base",
                 base,
                 "--stat",
-                "--this-repo",
+                *(["--this-repo"] if kind == "worktree" else []),
             ],
             f"diff-{p['topic']}",
             session,
