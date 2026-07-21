@@ -7872,7 +7872,7 @@ def _wip_rebase(kind, p, home, term) -> str:
 
 
 def _wip_merge(kind, p, home, term) -> str:
-    """`m`: merge a worktree's branch into its base but keep the worktree + branch.
+    """`m`: merge a branch into its base but keep the worktree + branch.
 
     Unlike `f` (finish), the worktree and branch survive — only the merge happens.
     The merge reads the branch's committed tip and lands in the main checkout, so a
@@ -7880,9 +7880,12 @@ def _wip_merge(kind, p, home, term) -> str:
     a worktree row or a worktree-backed session row. Base comes from *this
     worktree's* own config (`_worktree_config`).
 
-    Per-repo by construction (`single_repo=True`): a row is one repo, so on a
-    multi-repo topic only that repo's branch merges — `yolo merge TOPIC` is the
-    whole-set spelling.
+    **Scope depends on the row.** A worktree row is one repo, so it merges just
+    that repo (`single_repo=True`) — `yolo merge TOPIC` is the whole-set spelling,
+    matching `r`/`d`. A **session row is the whole topic** (its one container
+    spans every repo of the set, and its payload carries the *primary's*
+    worktree/root/slug), so `m` there merges the whole set — the dashboard
+    affordance for `yolo merge TOPIC`. For a single-repo topic the two coincide.
 
     No confirm: the core refuses a base that isn't the checkout and aborts on any
     conflict (nothing is left half-merged), and a merge that lands anyway keeps
@@ -7900,7 +7903,7 @@ def _wip_merge(kind, p, home, term) -> str:
             home,
             base,
             capture=True,
-            single_repo=True,
+            single_repo=kind == "worktree",
         )
     return "merge applies to worktrees and worktree sessions."
 

@@ -1480,8 +1480,12 @@ gracefully outside one — there's just no repo slug to label/find by).
   session row, even a `working` one — the merge only reads the branch's committed
   tip, so it has no idle guard) **merges** the branch into its base while keeping
   the worktree + branch (`_wip_merge` → the `merge_worktree` core, no confirm —
-  the core aborts on conflict and a landed merge is reflog-revertable;
-  base from `_worktree_config`), `d` on a worktree row (or any worktree-backed
+  the core aborts on conflict and a landed merge is reflog-revertable; base from
+  `_worktree_config`; **scope is per-row**: a worktree row is one repo
+  (`single_repo=True`), but a **session row is the whole topic** — its one
+  container spans every repo and its payload carries the primary's
+  worktree/root/slug — so `m` there merges the whole set, the dashboard's `yolo
+  merge TOPIC`), `d` on a worktree row (or any worktree-backed
   session row, even a `working` one — diff is read-only) spawns `yolo diff
   <topic> --base <base> --stat` in a new window (`_wip_diff`; base from
   `_worktree_config`) — the interactive diff-stat picker, where Enter/Space on a
@@ -2350,8 +2354,11 @@ session gets the force confirm, cancellable),
 cores, which own the guard; `f`'s confirm is skipped when `_finish_all_merged`
 and shown otherwise — both branches stubbed via that helper, plus its real
 single- and multi-repo merge-detection against started topics, and the
-home=None never-auto-skip), `m` on a worktree *and* a worktree-backed session row
-(no confirm, the core stubbed) calling `merge_worktree` with `capture=True`,
+home=None never-auto-skip), `m` on a worktree *and* a session row (no confirm, the core stubbed) calling
+`merge_worktree` with `capture=True` — `single_repo=True` from a worktree row
+(per-repo) but `single_repo=False` from a session row (whole set); the real
+per-repo-vs-whole-set split verified against started multi-repo topics (a
+worktree row lands only its own repo, a session row lands every repo's branch),
 `d` on a worktree *and* a worktree-backed session row
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
 diff-stat picker (`_diff_stat_loop` navigating + Enter/Space spawning the per-file

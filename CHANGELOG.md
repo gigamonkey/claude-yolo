@@ -5,6 +5,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`m` (merge) on a `wip` session row merges the whole topic.** A session row
+  represents the topic's one container, which spans every repo of a multi-repo
+  set, so `m` there now lands every repo's branch into its base — the dashboard
+  affordance for `yolo merge TOPIC`. `m` on a **worktree** row stays per-repo
+  (that repo only), matching `r`/`d`. For a single-repo topic the two coincide.
+
 - **The `wip` dashboard's `f` (finish) skips the confirm when nothing committed
   is at stake.** When every one of the topic's branches (across all its repos)
   is already merged into its base, finishing just cleans up — `delete-if-merged`

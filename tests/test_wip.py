@@ -1025,19 +1025,21 @@ def test_merge_worktree_calls_core_without_confirm(cy, monkeypatch):
     assert frames[-1][1] == "merged"
 
 
-def test_merge_on_worktree_session_row(cy, monkeypatch):
-    # `m` on a worktree-backed session row merges too (unlike f/r, no idle guard —
-    # the merge only reads the branch's committed tip).
+def test_merge_on_session_row_merges_whole_set(cy, monkeypatch):
+    # `m` on a session row is the whole-topic merge (the session's one container
+    # spans every repo of the set), so it calls the core with single_repo=False —
+    # unlike a worktree row, which is one repo. No idle guard (unlike f/r): the
+    # merge only reads the branch's committed tip, so a `working` session is fine.
     calls = []
     monkeypatch.setattr(
         cy,
         "merge_worktree",
-        lambda wt, mr, slug, topic, home, base, **k: calls.append(topic) or "ok",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "ok",
     )
     working = session_item(cy, payload={"state": "working"})
     sections = {"session": [working], "worktree": [], "project": []}
     run_loop(cy, monkeypatch, sections, ["m"])
-    assert calls == ["topic"]
+    assert calls == [("topic", {"capture": True, "single_repo": False})]
 
 
 def test_d_on_worktree_spawns_diff_window(cy, monkeypatch):

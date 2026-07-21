@@ -834,9 +834,9 @@ def test_finish_all_merged_needs_every_repo_merged(cy, run_cli, repos):
 
 
 def test_wip_merge_on_primary_row_merges_only_that_repo(cy, run_cli, repos):
-    # `m` is per-repo on EVERY row, the primary's included: the dashboard calls
-    # the core with single_repo=True, so the whole-set fan-out of `yolo merge
-    # TOPIC` never happens from a row.
+    # `m` on a WORKTREE row is per-repo, the primary's row included: the dashboard
+    # calls the core with single_repo=True, so the whole-set fan-out of `yolo
+    # merge TOPIC` never happens from a worktree row (that's the session row's job).
     app, lib, proto, home = repos
     awt, lwt = start_pair(cy, run_cli, repos)
     for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
@@ -848,6 +848,30 @@ def test_wip_merge_on_primary_row_merges_only_that_repo(cy, run_cli, repos):
     assert "Merged 'feat'" in msg
     assert (app / "a-wt.txt").exists()
     assert not (lib / "l-wt.txt").exists()  # the extra repo untouched
+
+
+def test_wip_merge_on_session_row_merges_whole_set(cy, run_cli, repos):
+    # `m` on a SESSION row is the whole-topic merge: the session is the one
+    # container spanning every repo, so it lands each branch in its own repo's
+    # checkout — the dashboard affordance for `yolo merge TOPIC`. A session
+    # payload carries the PRIMARY's worktree/root/slug (its `-w` dir).
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    for wt, fname in ((awt, "a-wt.txt"), (lwt, "l-wt.txt")):
+        (wt / fname).write_text("on branch\n")
+        git(wt, "add", ".")
+        git(wt, "commit", "-qm", "work")
+    payload = {
+        "topic": "feat",
+        "state": "working",  # no idle guard — the merge only reads committed tips
+        "worktree": awt,
+        "main_root": app,
+        "slug": awt.parent.name,
+    }
+    msg = cy._wip_merge("session", payload, home, FakeTerm([]))
+    assert "[app]" in msg and "[lib]" in msg
+    assert (app / "a-wt.txt").exists()
+    assert (lib / "l-wt.txt").exists()  # the extra repo merged too — whole set
 
 
 def test_wip_rebase_on_primary_row_rebases_only_that_repo(cy, run_cli, repos):

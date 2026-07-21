@@ -437,10 +437,12 @@ repo's row switches to the primary's session when it's running, and otherwise
 resumes the topic from the primary, never a second container named for the
 secondary repo. `f` likewise finishes the *whole* topic from any of its rows
 (the confirm says so — finishing just one repo of a set would half-dismantle
-it), while `r`/`m`/`d` are per-repo on every row, the primary's included:
-rebasing, merging, or diffing one repo of the set against its own base is
-exactly what those rows are for (the CLI verbs are the whole-set spelling;
-`--this-repo` gives them the dashboard's per-repo scope). A repo whose path has vanished is
+it), while `r`/`m`/`d` on a **worktree** row are per-repo, the primary's
+included: rebasing, merging, or diffing one repo of the set against its own base
+is exactly what those rows are for (the CLI verbs are the whole-set spelling;
+`--this-repo` gives them the dashboard's per-repo scope). The exception is `m`
+on the **session** row — the session *is* the whole topic, so merging there
+lands every repo's branch, the dashboard's `yolo merge TOPIC`. A repo whose path has vanished is
 skipped by `finish` with a warning (never stranding the rest); a repo *added*
 to a topic's config mid-flight (`yolo config TOPIC --add-repo …`) gets its
 worktree created on the next `resume`. `repos` is ignored (with a note) for
@@ -613,7 +615,7 @@ the selected row:
 | `s`     | a running session                | stop it (immediate when idle — the transcript persists and `resume` reconnects; an actively working session asks for a confirm first) |
 | `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree). Confirms first **unless the topic's branches are all already merged** into their bases — then it just cleans up, since nothing committed is at stake and a finished topic revives by name (`resume TOPIC`) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
-| `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (no confirm — a conflicted merge aborts cleanly, a landed one is `git reset --hard ORIG_HEAD` away from undone) |
+| `m`     | a worktree, or a session         | merge the branch into its base, keeping the worktree and branch (no confirm — a conflicted merge aborts cleanly, a landed one is `git reset --hard ORIG_HEAD` away from undone). On a **worktree** row it merges just that repo; on a **session** row it merges the **whole topic** — every repo of a multi-repo set — the dashboard's `yolo merge TOPIC` |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |
 | `a`     | a project (or anything)          | register a project (the selected recent one, else prompts for a path — Tab-completes like the `+` row — and a name, defaulting to the dir basename) |
 | `B`     | anything                         | rebuild the default image from scratch (`docker build --no-cache`) in a new window — new sessions pick up the fresh image with no flag to pass, since image tags are content-addressed (see below) |
