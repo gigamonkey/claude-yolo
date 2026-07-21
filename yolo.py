@@ -7777,10 +7777,33 @@ def _wip_browse(p, term) -> str:
     return f"opened {browse_session(p['cid'], select=select)}"
 
 
+def _finish_all_merged(home, worktree, main_root, slug, topic, base) -> bool:
+    """Whether every repo in the topic's set already has its branch merged into
+    `base` — the condition under which finishing strands no un-integrated commits.
+
+    Mirrors finish's own repo-set + base resolution (`_topic_repo_set`, one `base`
+    across the set, `_branch_merged` per repo), so the skip-the-confirm decision
+    can't disagree with what finish will actually do. A squash-merge reads as
+    unmerged (a safe false negative — errs toward confirming), as does any repo
+    whose branch or base won't resolve. `home` None (the test/standalone loop)
+    returns False, so the dashboard only auto-skips against real config.
+    """
+    if home is None:
+        return False
+    repo_set = _topic_repo_set(pathlib.Path(worktree), pathlib.Path(main_root), slug, topic, home)
+    return all(_branch_merged(topic, base, root) for _, root, _ in repo_set)
+
+
 def _wip_finish(kind, p, home, term) -> str:
     """`f`: finish a worktree (the core stops an idle session first, refuses a working
     one), or stop-then-finish an idle (waiting) session row. base / finish-action /
     finish-remote come from *this worktree's* own config (`_worktree_config`).
+
+    The confirm is **skipped when the finish strands no un-integrated work** —
+    every repo's branch is already merged into its base (`_finish_all_merged`),
+    so `delete-if-merged` disposes them cleanly and removing the worktree loses no
+    committed work (and a finished topic revives by name, `resume TOPIC`). An
+    unmerged branch — a topic with commits not yet on its base — still confirms.
 
     On an *extra* repo's worktree row, finish routes to the topic's primary and so
     finishes the whole repo set: finishing just the extra would half-dismantle the
@@ -7794,18 +7817,22 @@ def _wip_finish(kind, p, home, term) -> str:
         if not p.get("main_root"):
             return "couldn't resolve the worktree's main repo."
         worktree, main_root, slug = p["worktree"], p["main_root"], p["slug"]
-        prompt = f"Finish '{p['topic']}' (remove worktree)?"
+        multi = False
         primary = _primary_for_extra(home, worktree, main_root, p["topic"])
         if primary is not None:
             main_root, worktree = primary
             slug = pathlib.Path(worktree).parent.name
+            multi = True
+        base, action, remote, _ = _worktree_config(home, main_root, worktree)
+        if not _finish_all_merged(home, worktree, main_root, slug, p["topic"], base):
             prompt = (
                 f"Finish '{p['topic']}' — a multi-repo topic: removes its worktrees "
                 "in every repo of the set?"
+                if multi
+                else f"Finish '{p['topic']}' (remove worktree)?"
             )
-        if not term.confirm(prompt):
-            return "cancelled."
-        base, action, remote, _ = _worktree_config(home, main_root, worktree)
+            if not term.confirm(prompt):
+                return "cancelled."
         return finish_worktree(
             worktree,
             main_root,

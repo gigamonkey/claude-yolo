@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The `wip` dashboard's `f` (finish) skips the confirm when nothing committed
+  is at stake.** When every one of the topic's branches (across all its repos)
+  is already merged into its base, finishing just cleans up — `delete-if-merged`
+  disposes the merged branches and removes the worktrees with no prompt, since
+  no committed work is lost and a finished topic revives by name (`resume
+  TOPIC`). A topic with un-merged commits on any repo's branch still confirms.
+  (A squash-merged branch reads as un-merged, so it confirms — a safe
+  false-positive.)
+
 ## v0.29.0 — 2026-07-19
 
 - **`dir TOPIC` takes an optional project directory.** `yolo dir TOPIC DIR`

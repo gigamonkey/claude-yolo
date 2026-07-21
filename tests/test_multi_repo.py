@@ -811,10 +811,26 @@ def test_wip_finish_on_extra_worktree_row_finishes_the_whole_set(cy, run_cli, re
         "slug": lib_wt.parent.name,
         "topic": "feat",
     }
-    msg = cy._wip_finish("worktree", payload, home, FakeTerm([], confirms=[True]))
+    # 'feat' has no commits → both branches trivially merged → the confirm is
+    # auto-skipped (FakeTerm has no keys; a confirm call would find none).
+    msg = cy._wip_finish("worktree", payload, home, FakeTerm([]))
     assert not lib_wt.exists()
     assert not wt_of(cy, home, app, "feat").exists()  # the primary went too
     assert "[app]" in msg and "[lib]" in msg
+
+
+def test_finish_all_merged_needs_every_repo_merged(cy, run_cli, repos):
+    # The skip-the-confirm check spans the whole set: a commit on just one repo's
+    # branch (here lib's) makes it unmerged, so finishing the topic still
+    # confirms even though the primary's branch is clean.
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    slug = cy._repo_root_of(app)[2]
+    assert cy._finish_all_merged(home, str(awt), str(app), slug, "feat", "HEAD")
+    (lwt / "l.txt").write_text("work\n")
+    git(lwt, "add", ".")
+    git(lwt, "commit", "-qm", "work")
+    assert not cy._finish_all_merged(home, str(awt), str(app), slug, "feat", "HEAD")
 
 
 def test_wip_merge_on_primary_row_merges_only_that_repo(cy, run_cli, repos):

@@ -611,7 +611,7 @@ the selected row:
 | `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |
 | `b`     | a session with forwarded ports   | `browse` the port (with more than one, prompts for the container port or its label) |
 | `s`     | a running session                | stop it (immediate when idle — the transcript persists and `resume` reconnects; an actively working session asks for a confirm first) |
-| `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree) |
+| `f`     | a worktree / idle session        | finish it (stops an idle session first, then removes the worktree). Confirms first **unless the topic's branches are all already merged** into their bases — then it just cleans up, since nothing committed is at stake and a finished topic revives by name (`resume TOPIC`) |
 | `r`     | a worktree / idle session        | rebase its branch onto its base |
 | `m`     | a worktree (or worktree session) | merge its branch into its base, keeping the worktree and branch (no confirm — a conflicted merge aborts cleanly, a landed one is `git reset --hard ORIG_HEAD` away from undone) |
 | `d`     | a worktree (or worktree session) | open an interactive `git diff --stat` in a new window; Enter/Space on a file there opens that file's diff in another window (`q` closes) |

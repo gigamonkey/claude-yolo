@@ -923,6 +923,8 @@ def test_S_on_worktree_is_noop(cy, monkeypatch):
 
 
 def test_finish_worktree_confirms_then_calls_core(cy, monkeypatch):
+    # run_loop drives with home=None, so `_finish_all_merged` is conservatively
+    # False (never auto-skips without real config) → the confirm path runs.
     calls = []
     monkeypatch.setattr(
         cy,
@@ -934,6 +936,52 @@ def test_finish_worktree_confirms_then_calls_core(cy, monkeypatch):
     assert calls and calls[0][0] == "old"
     assert calls[0][1]["action"] == "delete-if-merged"
     assert frames[-1][1] == "done"
+
+
+def test_finish_skips_confirm_when_all_merged(cy, monkeypatch):
+    # A fully-merged topic finishes with no confirm: delete-if-merged disposes
+    # the merged branch cleanly, and removing the worktree strands no committed
+    # work (a finished topic revives by name). No confirms scripted → had one
+    # been asked, FakeTerm would decline it and finish wouldn't run.
+    monkeypatch.setattr(cy, "_finish_all_merged", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(
+        cy,
+        "finish_worktree",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append(topic) or "done",
+    )
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["f", "q"])
+    assert calls == ["old"]
+    assert frames[-1][1] == "done"
+
+
+def test_finish_confirms_when_unmerged(cy, monkeypatch):
+    # An unmerged topic (commits not yet on its base) still confirms; declining
+    # is a no-op.
+    monkeypatch.setattr(cy, "_finish_all_merged", lambda *a: False)
+    calls = []
+    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: calls.append(1) or "x")
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["f", "q"], confirms=[False])
+    assert calls == []
+    assert frames[-1][1] == "cancelled."
+
+
+def test_finish_all_merged_reflects_branch_state(cy, run_cli, repo):
+    # The real merge check behind the skip: a fresh topic branched off HEAD with
+    # no commits reads as merged (skippable); a commit on the branch diverges it
+    # (confirm required); home=None never auto-skips.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    slug = cy._repo_root_of(r)[2]
+    assert cy._finish_all_merged(home, str(wt), str(r), slug, "topic", "HEAD")
+    (wt / "x").write_text("x\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    assert not cy._finish_all_merged(home, str(wt), str(r), slug, "topic", "HEAD")
+    assert not cy._finish_all_merged(None, str(wt), str(r), slug, "topic", "HEAD")
 
 
 def test_finish_waiting_session_allowed(cy, monkeypatch):

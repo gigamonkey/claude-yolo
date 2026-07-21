@@ -1470,7 +1470,13 @@ gracefully outside one — there's just no repo slug to label/find by).
   only for sessions yolo spawned into tmux; see the startup-log paragraph in the
   tmux section), `b` browses a
   forwarded port (prompting if >1, by container port number or label), `s`
-  stops, `f` finishes, `r` rebases, `m` on a worktree row (or any worktree-backed
+  stops, `f` finishes (`_wip_finish` → the `finish_worktree` core; confirmed
+  first **unless** `_finish_all_merged` — every repo's branch in the topic set
+  already merged into its base, mirroring finish's own `_topic_repo_set` +
+  single-`base` + `_branch_merged` resolution — in which case it skips the
+  confirm, since `delete-if-merged` disposes only integrated branches and a
+  finished topic revives by name; a squash-merge/unresolvable ref reads as
+  un-merged and still confirms), `r` rebases, `m` on a worktree row (or any worktree-backed
   session row, even a `working` one — the merge only reads the branch's committed
   tip, so it has no idle guard) **merges** the branch into its base while keeping
   the worktree + branch (`_wip_merge` → the `merge_worktree` core, no confirm —
@@ -2341,7 +2347,10 @@ worktree-row no-op), `b` browse incl. the
 multi-port prompt, `s` stop (idle stops with no confirm; a working/agenting
 session gets the force confirm, cancellable),
 `f`/`r` on worktrees and idle sessions (a running worktree row now defers to the
-cores, which own the guard), `m` on a worktree *and* a worktree-backed session row
+cores, which own the guard; `f`'s confirm is skipped when `_finish_all_merged`
+and shown otherwise — both branches stubbed via that helper, plus its real
+single- and multi-repo merge-detection against started topics, and the
+home=None never-auto-skip), `m` on a worktree *and* a worktree-backed session row
 (no confirm, the core stubbed) calling `merge_worktree` with `capture=True`,
 `d` on a worktree *and* a worktree-backed session row
 spawning `yolo diff <topic> --base … --stat` (a no-op on a plain cwd session), the
