@@ -5,6 +5,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Documented that plan-gated models misreport as credit-gated under the
+  default `oauth-token` auth.** A `claude setup-token` token carries only the
+  `user:inference` scope, so Claude Code's entitlement lookups (`/api/oauth/profile`,
+  `/api/oauth/claude_cli/roles`) 403 and the client fails closed — a model your
+  plan includes is offered as a usage-credits purchase instead. Observed with
+  Fable 5 on Max; the fix is `--auth keychain` for that work, since host login
+  credentials carry the needed scope. README's auth section now covers this
+  ([claude-code#79360](https://github.com/anthropics/claude-code/issues/79360)).
+  Docs only — no behavior change.
+
 - **`r`/`m`/`d` on a `wip` session row act on the whole topic.** A session row
   represents the topic's one container, which spans every repo of a multi-repo
   set, so `r` (rebase), `m` (merge), and `d` (diff) there now act on every repo

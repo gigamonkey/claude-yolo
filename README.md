@@ -661,8 +661,8 @@ options](#configuration) below compose with whichever you pick.
 
 | `--auth`                  | How it authenticates                                              | Best for                                                 |
 |---------------------------|-------------------------------------------------------------------|----------------------------------------------------------|
-| `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var       | Everything, including long-lived and concurrent sessions |
-| `keychain`                | Mounts a snapshot of your rotating Claude.ai login credentials    | Plans without `setup-token` (Claude Console); short sessions |
+| `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var       | Almost everything, including long-lived and concurrent sessions — but see [the scope caveat](#plan-gated-models-misreport-as-credit-gated) |
+| `keychain`                | Mounts a snapshot of your rotating Claude.ai login credentials    | Plan-gated models (e.g. Fable 5); plans without `setup-token` (Claude Console); short sessions |
 | `bedrock`                 | AWS Bedrock credentials                                           | Billing via AWS                                          |
 
 ### `oauth-token` (default)
@@ -694,8 +694,44 @@ value is used as-is. In a non-interactive context with no cached token, yolo
 exits with guidance instead of hanging on a browser flow nobody can drive.
 
 Requires a **Pro/Max/Team/Enterprise plan** (that's what `claude setup-token`
-needs); the token is scoped to inference only. If your plan doesn't support it,
-set `"auth": "keychain"` in `~/.yolo.json` and read the keychain section below.
+needs); the token carries only the `user:inference` scope. If your plan doesn't
+support it, set `"auth": "keychain"` in `~/.yolo.json` and read the keychain
+section below — and see the scope caveat immediately below, which is a second
+reason to reach for `keychain`.
+
+#### Plan-gated models misreport as credit-gated
+
+**A `setup-token` can run inference but can't read your plan.** Claude Code
+resolves plan entitlements from endpoints that require the `user:profile` scope,
+which an inference-scoped token doesn't carry:
+
+```
+GET /api/oauth/profile          → 403  does not meet scope requirement any_of(user:profile, user:office)
+GET /api/oauth/claude_cli/roles → 403  does not meet scope requirement user:profile
+```
+
+When that read fails the client fails **closed**: it assumes no entitlement and
+offers to bill the model against usage credits. The server knows better and
+would serve the model — only the client is confused. Observed 2026-07-24 with
+Fable 5 on a Max plan that includes it: `/model` reports "Fable 5 requires usage
+credits" and the session stays on Opus.
+
+yolo can't fix this. The scope is fixed when the token is minted, `claude
+setup-token` has no broader-scope flag, and re-minting yields the same scope. So
+**use `--auth keychain` for work that needs a plan-gated model** — host login
+credentials do carry `user:profile`. Scope it per project rather than globally,
+so you don't take on the rotation hazard described below everywhere:
+
+```bash
+yolo config --project NAME --auth keychain
+```
+
+Upstream: [claude-code#79360](https://github.com/anthropics/claude-code/issues/79360)
+(open as of this writing). Adjacent but distinct: a saved model string carrying a
+`[1m]` suffix (e.g. `claude-fable-5[1m]`) can produce the same credits message
+under *any* auth mode —
+[#79337](https://github.com/anthropics/claude-code/issues/79337) — so check the
+`model` key in your `settings.json` too before blaming auth.
 
 **Tokens are scoped per config directory.** Just like the host login
 credentials, each `--config-dir` (≈ each account/profile) gets its *own*
@@ -821,9 +857,11 @@ run `claude auth login` on the host to mint a fresh pair. (The pre-launch login
 check can't catch this: login *status* can't reveal whether a refresh token is
 still live without spending it.)
 
-This is why it's not the default. Probably the only reason to use `keychain`
-mode is if your plan doesn't support `setup-token` (i.e. a Claude Console
-account).
+This is why it's not the default. There are two reasons to use `keychain`
+anyway: your plan doesn't support `setup-token` (i.e. a Claude Console account),
+or you need a model your plan gates — an inference-scoped `setup-token` can't
+read the entitlement, so those models misreport as credit-gated (see
+[above](#plan-gated-models-misreport-as-credit-gated)).
 
 ### `bedrock`
 
