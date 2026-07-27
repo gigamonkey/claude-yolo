@@ -425,6 +425,36 @@ def test_keychain_auth_keeps_token_off_run_secrets(cy, run_cli, dirs):
     assert not any("/run/secrets" in m for m in mount_values(argv))
 
 
+def test_subscription_type_rides_the_token_transport(cy, run_cli, dirs):
+    # --subscription-type is forwarded as CLAUDE_CODE_SUBSCRIPTION_TYPE alongside
+    # the token (claude-code#79360: an inference-scoped setup-token can't read the
+    # plan, so claude misreports plan-included models as credit-gated unless the
+    # tier is declared). Same file transport, so it stays off the argv too.
+    home, work = dirs
+    argv = run_cli(["--subscription-type", "max"], home=home, cwd=work)
+    assert not any("CLAUDE_CODE_SUBSCRIPTION_TYPE" in a for a in argv)
+    sub_file = home / ".claude-yolo-run" / "work" / "secrets" / "CLAUDE_CODE_SUBSCRIPTION_TYPE"
+    assert sub_file.read_text() == "max"
+
+
+def test_subscription_type_from_global_config(cy, run_cli, dirs):
+    home, work = dirs
+    (home / ".yolo.json").write_text(json.dumps({"subscription-type": "max"}))
+    run_cli([], home=home, cwd=work)
+    sub_file = home / ".claude-yolo-run" / "work" / "secrets" / "CLAUDE_CODE_SUBSCRIPTION_TYPE"
+    assert sub_file.read_text() == "max"
+
+
+def test_subscription_type_ignored_outside_oauth_token(cy, run_cli, dirs, capsys):
+    # keychain credentials carry the real subscriptionType — the env var would
+    # override it — so the flag is only staged in oauth-token mode, with a
+    # warning (not an error) when it's inert, matching the AWS knobs.
+    home, work = dirs
+    run_cli(["--auth", "keychain", "--subscription-type", "max"], home=home, cwd=work)
+    assert not (home / ".claude-yolo-run" / "work" / "secrets").exists()
+    assert "subscription-type ignored" in capsys.readouterr().err
+
+
 # --- config-layer concatenation ----------------------------------------------
 
 

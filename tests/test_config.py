@@ -825,6 +825,13 @@ def test_config_global_creates_missing_file(cy, run_cli, dirs):
     assert json.loads((home / ".yolo.json").read_text()) == {"ssh-agent": False}
 
 
+def test_config_global_subscription_type(cy, run_cli, dirs):
+    # The README's suggested one-time setting for the plan-entitlement caveat.
+    home, work = dirs
+    run_cli(["config", "--global", "--subscription-type", "max"], home=home, cwd=work)
+    assert json.loads((home / ".yolo.json").read_text()) == {"subscription-type": "max"}
+
+
 def test_config_global_list_edits_and_unset(cy, run_cli, dirs, tmp_path):
     home, work = dirs
     ref = tmp_path / "ref"

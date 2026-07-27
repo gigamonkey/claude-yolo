@@ -1582,6 +1582,7 @@ YOLO_KEYS = {
     "aws_profile": ("aws_profile", "str"),
     "aws_region": ("aws_region", "str"),
     "bedrock_model": ("bedrock_model", "str"),
+    "subscription_type": ("subscription_type", "str"),
     "claude_json": ("claude_json", "bool"),
     "ssh_agent": ("ssh_agent", "bool"),
     "submodules": ("submodules", "bool"),
@@ -3737,6 +3738,15 @@ PARSER.add_argument(
     help="Bedrock model id (requires --auth bedrock).",
 )
 PARSER.add_argument(
+    "--subscription-type",
+    metavar="TYPE",
+    help="With --auth oauth-token: your Claude plan tier (e.g. 'max', 'pro'), "
+    "forwarded as CLAUDE_CODE_SUBSCRIPTION_TYPE. A setup-token is inference-scoped "
+    "and can't read your plan, so Claude Code misreports plan-included models "
+    "(e.g. Fable 5) as needing usage credits; declaring the tier restores them "
+    "(claude-code#79360). Also settable as `subscription-type` in config.",
+)
+PARSER.add_argument(
     "--claude-json",
     action=argparse.BooleanOptionalAction,
     default=True,
@@ -5103,6 +5113,13 @@ def launch_container(
         # from there — but that's inside claude's own trust boundary; claude holds
         # the token regardless.)
         token_env["CLAUDE_CODE_OAUTH_TOKEN"] = ensure_oauth_token(config_dir)
+        if parsed.subscription_type:
+            # The token is inference-scoped, so claude's plan-entitlement lookups
+            # 403 and it misreports plan-included models as credit-gated
+            # (claude-code#79360); with this set, claude trusts the declared tier
+            # instead. Not staged in the other auth modes: keychain credentials
+            # carry the real subscriptionType, and this env var would override it.
+            token_env["CLAUDE_CODE_SUBSCRIPTION_TYPE"] = parsed.subscription_type
         args += ["-v", f"{_masking_credfile(run_dir)}:/home/claude/.claude/.credentials.json"]
     elif parsed.auth == "bedrock":
         # (the container name's -{profile} suffix was applied up front, with the run dir.)
@@ -9148,6 +9165,13 @@ def _main():
     ):
         print(
             "warning: aws-profile/aws-region/bedrock-model ignored without --auth bedrock.",
+            file=sys.stderr,
+        )
+    # Same shape for subscription-type: only the oauth-token block consumes it
+    # (keychain/bedrock credentials carry their own plan information).
+    if parsed.auth != "oauth-token" and parsed.subscription_type:
+        print(
+            "warning: subscription-type ignored without --auth oauth-token.",
             file=sys.stderr,
         )
     if parsed.config_dir and not pathlib.Path(parsed.config_dir).is_dir():

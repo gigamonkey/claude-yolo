@@ -528,7 +528,13 @@ The three `--auth` values (the (c) block in `launch_container`):
   throwaway `{}` `.credentials.json` (`_masking_credfile`) so a stale host creds
   file can't shadow the env token under Claude Code 2.1.x (see the precedence
   caveat below). It's the default because it has no refresh boundary, so it's safe
-  regardless of session timing or concurrency. See
+  regardless of session timing or concurrency. The token is inference-scoped, so
+  Claude Code's plan-entitlement lookups 403 and plan-gated models misreport as
+  credit-gated (claude-code#79360); `--subscription-type` / the
+  `subscription-type` config key forwards `CLAUDE_CODE_SUBSCRIPTION_TYPE` on the
+  same transport, which makes the client trust the declared tier instead
+  (oauth-token mode only — a `main` warning fires otherwise, like the AWS knobs).
+  See
   [Long-lived OAuth token](#long-lived-oauth-token---auth-oauth-token-the-default) below.
 - **`keychain`** → `ensure_logged_in` + `extract_credentials`, mounting
   the rotating keychain creds at `.credentials.json`. The only mode that runs the
@@ -979,7 +985,9 @@ Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `config-dir`, `dockerfile`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
-`bedrock-model`, `claude-json`,
+`bedrock-model`, `subscription-type` (plan tier forwarded as
+`CLAUDE_CODE_SUBSCRIPTION_TYPE` under `oauth-token` auth — see the README's
+scope caveat), `claude-json`,
 `ssh-agent`, `submodules`, `redirect-build-dirs`, `base`, `finish-action` (one of
 `delete-if-merged`/`merge`/`push`/`keep` — validated against `FINISH_CHOICES` in
 `_parse_yolo_dict`, same as `auth`), `finish-remote`,

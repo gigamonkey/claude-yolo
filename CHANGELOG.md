@@ -5,15 +5,20 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **Documented that plan-gated models misreport as credit-gated under the
-  default `oauth-token` auth.** A `claude setup-token` token carries only the
-  `user:inference` scope, so Claude Code's entitlement lookups (`/api/oauth/profile`,
-  `/api/oauth/claude_cli/roles`) 403 and the client fails closed — a model your
-  plan includes is offered as a usage-credits purchase instead. Observed with
-  Fable 5 on Max; the fix is `--auth keychain` for that work, since host login
-  credentials carry the needed scope. README's auth section now covers this
+- **New `--subscription-type` flag / `subscription-type` config key: unblocks
+  plan-gated models (e.g. Fable 5) under the default `oauth-token` auth.** A
+  `claude setup-token` token carries only the `user:inference` scope, so Claude
+  Code's entitlement lookups (`/api/oauth/profile`, `/api/oauth/claude_cli/roles`)
+  403 and the client fails closed — a model your plan includes is offered as a
+  usage-credits purchase instead
   ([claude-code#79360](https://github.com/anthropics/claude-code/issues/79360)).
-  Docs only — no behavior change.
+  Declaring your plan tier (e.g. `yolo config --global --subscription-type max`)
+  forwards it as `CLAUDE_CODE_SUBSCRIPTION_TYPE` — riding the same private file
+  transport as the token — and the client trusts it instead of the failed
+  lookup. oauth-token mode only (keychain/bedrock credentials carry their own
+  plan info; a warning fires if set elsewhere, like the AWS knobs). The
+  alternative remains `--auth keychain`, whose login credentials carry the
+  needed scope; README's auth section covers both.
 
 - **`r`/`m`/`d` on a `wip` session row act on the whole topic.** A session row
   represents the topic's one container, which spans every repo of a multi-repo

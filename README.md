@@ -661,8 +661,8 @@ options](#configuration) below compose with whichever you pick.
 
 | `--auth`                  | How it authenticates                                              | Best for                                                 |
 |---------------------------|-------------------------------------------------------------------|----------------------------------------------------------|
-| `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var       | Almost everything, including long-lived and concurrent sessions — but see [the scope caveat](#plan-gated-models-misreport-as-credit-gated) |
-| `keychain`                | Mounts a snapshot of your rotating Claude.ai login credentials    | Plan-gated models (e.g. Fable 5); plans without `setup-token` (Claude Console); short sessions |
+| `oauth-token` *(default)* | A long-lived token in the `CLAUDE_CODE_OAUTH_TOKEN` env var       | Almost everything, including long-lived and concurrent sessions — plan-gated models need [`--subscription-type`](#plan-gated-models-misreport-as-credit-gated) |
+| `keychain`                | Mounts a snapshot of your rotating Claude.ai login credentials    | Plans without `setup-token` (Claude Console); short sessions |
 | `bedrock`                 | AWS Bedrock credentials                                           | Billing via AWS                                          |
 
 ### `oauth-token` (default)
@@ -696,8 +696,8 @@ exits with guidance instead of hanging on a browser flow nobody can drive.
 Requires a **Pro/Max/Team/Enterprise plan** (that's what `claude setup-token`
 needs); the token carries only the `user:inference` scope. If your plan doesn't
 support it, set `"auth": "keychain"` in `~/.yolo.json` and read the keychain
-section below — and see the scope caveat immediately below, which is a second
-reason to reach for `keychain`.
+section below — and see the scope caveat immediately below, which needs a
+one-time `--subscription-type` setting if you use plan-gated models.
 
 #### Plan-gated models misreport as credit-gated
 
@@ -716,18 +716,32 @@ would serve the model — only the client is confused. Observed 2026-07-24 with
 Fable 5 on a Max plan that includes it: `/model` reports "Fable 5 requires usage
 credits" and the session stays on Opus.
 
-yolo can't fix this. The scope is fixed when the token is minted, `claude
-setup-token` has no broader-scope flag, and re-minting yields the same scope. So
-**use `--auth keychain` for work that needs a plan-gated model** — host login
-credentials do carry `user:profile`. Scope it per project rather than globally,
-so you don't take on the rotation hazard described below everywhere:
+The scope itself can't be fixed: it's set when the token is minted, `claude
+setup-token` has no broader-scope flag, and re-minting yields the same scope.
+But Claude Code reads the plan tier from the `CLAUDE_CODE_SUBSCRIPTION_TYPE`
+environment variable when one is set alongside a token, skipping the entitlement
+lookup that fails — so **declare your tier with `--subscription-type`** (or the
+`subscription-type` config key), e.g. globally:
 
 ```bash
-yolo config --project NAME --auth keychain
+yolo config --global --subscription-type max
 ```
 
+The value is your plan tier (`max`, `pro`, `team`, `enterprise`); yolo forwards
+it verbatim, on the same private transport as the token, in `oauth-token` mode
+only. Declaring a tier you don't have doesn't unlock anything — the client
+stops second-guessing, but the server still enforces your real plan.
+
+The alternative is `--auth keychain` for the work that needs the plan-gated
+model — host login credentials carry `user:profile`, so the entitlement lookup
+just works. If you go that way, scope it per project rather than globally
+(`yolo config --project NAME --auth keychain`) so you don't take on the
+rotation hazard described below everywhere.
+
 Upstream: [claude-code#79360](https://github.com/anthropics/claude-code/issues/79360)
-(open as of this writing). Adjacent but distinct: a saved model string carrying a
+(open as of this writing; the env-var lever is from
+[this comment](https://github.com/anthropics/claude-code/issues/79360#issuecomment-5095314730)).
+Adjacent but distinct: a saved model string carrying a
 `[1m]` suffix (e.g. `claude-fable-5[1m]`) can produce the same credits message
 under *any* auth mode —
 [#79337](https://github.com/anthropics/claude-code/issues/79337) — so check the
@@ -857,11 +871,12 @@ run `claude auth login` on the host to mint a fresh pair. (The pre-launch login
 check can't catch this: login *status* can't reveal whether a refresh token is
 still live without spending it.)
 
-This is why it's not the default. There are two reasons to use `keychain`
-anyway: your plan doesn't support `setup-token` (i.e. a Claude Console account),
-or you need a model your plan gates — an inference-scoped `setup-token` can't
-read the entitlement, so those models misreport as credit-gated (see
-[above](#plan-gated-models-misreport-as-credit-gated)).
+This is why it's not the default. The main reason to use `keychain` is a plan
+that doesn't support `setup-token` (i.e. a Claude Console account). It also
+sidesteps the plan-gated-model misreport without declaring a tier — an
+inference-scoped `setup-token` can't read the entitlement, but login credentials
+can (see [above](#plan-gated-models-misreport-as-credit-gated) — though
+`--subscription-type` fixes that within `oauth-token` mode too).
 
 ### `bedrock`
 
@@ -1407,6 +1422,14 @@ The AWS knobs for `auth: bedrock` (see
 [Authentication modes](#authentication-modes)); ignored, with a warning, under
 any other auth mode. `aws-profile` is optional (SDK default credentials
 otherwise) and `aws-region` defaults to `us-east-1`.
+
+### `subscription-type` (`--subscription-type TYPE`)
+
+Your Claude plan tier (`max`, `pro`, `team`, `enterprise`), forwarded to the
+container as `CLAUDE_CODE_SUBSCRIPTION_TYPE` under `auth: oauth-token`
+(ignored, with a warning, under any other auth mode). Set it if plan-included
+models misreport as needing usage credits — see
+[the scope caveat](#plan-gated-models-misreport-as-credit-gated).
 
 ### `require-project-entry` (`--require-project-entry`, default off)
 
