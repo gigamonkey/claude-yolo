@@ -1212,6 +1212,17 @@ def test_c_edit_scalar_unsets_via_picker(cy, monkeypatch, tmp_path, capsys):
     assert "(was bedrock)" in capsys.readouterr().out  # shown in the next frame
 
 
+def test_c_add_key_menu_is_sorted(cy, monkeypatch, tmp_path):
+    # `a` offers the not-yet-set keys alphabetically, not in YOLO_KEYS order.
+    _seed_worktree_entry(tmp_path, {"auth": "bedrock"})
+    seen = []
+    monkeypatch.setattr(cy, "_pick_one", lambda term, title, options: seen.append(options))
+    cy._wip_config("worktree", WT_PAYLOAD, tmp_path, FakeTerm(["a", "q"]))
+    (options,) = seen
+    assert options == sorted(options)
+    assert "auth" not in options  # already set, so not offered
+
+
 def test_c_add_mount_element_with_mode(cy, monkeypatch, tmp_path):
     # The list-element view: add a mount — Tab-completed path, then a ro/rw pick.
     calls = _stub_config_run(cy, monkeypatch)

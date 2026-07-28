@@ -8381,9 +8381,9 @@ def _config_editor_loop(scope, term) -> str:
         elif k in ("\r", "\n") and keys:
             msg = _config_edit_key(scope, keys[sel], term)
         elif k == "a":
-            available = [
+            available = sorted(
                 kk.replace("_", "-") for kk in YOLO_KEYS if kk.replace("_", "-") not in entry
-            ]
+            )
             chosen = _pick_one(term, "add key:", available)
             if chosen:
                 msg = _config_edit_key(scope, chosen, term)

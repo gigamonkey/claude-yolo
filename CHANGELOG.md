@@ -3,6 +3,11 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The config editor's add-key menu is now sorted alphabetically** instead of
+  following the internal key declaration order.
+
 ## v0.30.0 — 2026-07-28
 
 - **`yolo wip --rebuild-image` now opens the dashboard after the rebuild**
