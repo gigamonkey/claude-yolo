@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo wip --rebuild-image` now opens the dashboard after the rebuild**
+  instead of just exiting. A hand-typed run lands you in `wip` once the build
+  finishes, and the dashboard's `B` key (which spawns exactly that command into
+  a window) now returns focus to the dashboard when the build succeeds — a
+  failed build still holds its window open on the error. On a box without tmux
+  the command keeps its old build-and-exit behavior.
+
 - **New `--subscription-type` flag / `subscription-type` config key: unblocks
   plan-gated models (e.g. Fable 5) under the default `oauth-token` auth.** A
   `claude setup-token` token carries only the `user:inference` scope, so Claude

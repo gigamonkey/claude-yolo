@@ -1461,8 +1461,9 @@ A few flags are deliberately *not* config keys:
 - **`--rebuild-image`** — pass `--no-cache` to `docker build`, forcing a full
   image rebuild (useful when a baked-in tool such as Claude Code itself is
   stale). On a launch (`start`/`resume`/`shell`) it rebuilds that session's
-  image; **`yolo wip --rebuild-image`** rebuilds the *default* image on its own
-  and exits — the same thing the dashboard's `B` key spawns. Because image tags
+  image; **`yolo wip --rebuild-image`** rebuilds the *default* image and then
+  opens the dashboard — the same thing the dashboard's `B` key spawns, so a
+  finished build returns focus to the dashboard. Because image tags
   are content-addressed on the Dockerfile text, the fresh image lands under the
   very tag every subsequent launch already resolves to, so new sessions pick it
   up via a normal cache hit with no flag to pass. Custom Dockerfiles that layer

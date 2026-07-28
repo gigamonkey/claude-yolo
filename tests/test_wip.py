@@ -1539,9 +1539,27 @@ def test_do_rebuild_image_builds_default_no_cache(cy, monkeypatch):
     assert kw == {"no_cache": True}
 
 
-def test_wip_rebuild_image_flag_routes_to_rebuild(cy, run_cli, monkeypatch, tmp_path):
-    # `yolo wip --rebuild-image` rebuilds the default image and exits — it never
-    # falls through to the dashboard bootstrap (do_wip).
+def test_wip_rebuild_image_then_opens_dashboard(cy, run_cli, monkeypatch, tmp_path):
+    # `yolo wip --rebuild-image` rebuilds the default image and then chains into
+    # the dashboard bootstrap (do_wip) — a hand-typed run lands in the dashboard,
+    # and the `B`-spawned window refocuses it when the build finishes.
+    monkeypatch.setattr(cy.shutil, "which", lambda n: "/usr/bin/tmux" if n == "tmux" else None)
+    called = []
+    monkeypatch.setattr(cy, "do_rebuild_image", lambda: called.append("rebuild"))
+    monkeypatch.setattr(
+        cy, "do_wip", lambda home, *, dashboard, tmux_session: called.append(("wip", dashboard))
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    run_cli(["wip", "--rebuild-image"], home=home, cwd=tmp_path)
+    assert called == ["rebuild", ("wip", False)]
+
+
+def test_wip_rebuild_image_skips_dashboard_without_tmux(cy, run_cli, monkeypatch, tmp_path):
+    # On a tmux-less box the rebuild still stands alone: build, then return —
+    # never do_wip (whose bootstrap would sys.exit asking for tmux after a
+    # perfectly good build).
+    monkeypatch.setattr(cy.shutil, "which", lambda n: None)
     called = []
     monkeypatch.setattr(cy, "do_rebuild_image", lambda: called.append("rebuild"))
     monkeypatch.setattr(cy, "do_wip", lambda *a, **k: called.append("wip"))

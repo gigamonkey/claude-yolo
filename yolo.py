@@ -3833,8 +3833,9 @@ PARSER.add_argument(
     dest="rebuild_image",
     help="Force a from-scratch Docker image rebuild (passes --no-cache to docker "
     "build). On a launch (start/resume/shell) it rebuilds that session's image; "
-    "`yolo wip --rebuild-image` rebuilds the default image on its own (the dashboard's "
-    "`B` key spawns exactly that).",
+    "`yolo wip --rebuild-image` rebuilds the default image and then opens the "
+    "dashboard (the dashboard's `B` key spawns exactly that, so a finished build "
+    "returns focus to the dashboard).",
 )
 PARSER.add_argument(
     "-v",
@@ -8508,8 +8509,10 @@ def _wip_rebuild_image(session) -> str:
     too (their `FROM` resolves to the new base image id); a fully-custom image (no
     YOLO_BASE) is decoupled and unaffected — rebuild it with `yolo start --rebuild-image`.
     Spawned into its own window (running `yolo wip --rebuild-image`) so the build streams
-    there and the dashboard stays put. No confirm: nothing is lost — the build burns
-    only time, in a window that can simply be killed.
+    there and the dashboard stays put; when the build succeeds that command chains into
+    `do_wip`, so the window refocuses the dashboard and closes (a failure holds it open
+    on the error). No confirm: nothing is lost — the build burns only time, in a window
+    that can simply be killed.
     """
     _spawn_window(
         pathlib.Path.home(),
@@ -8521,12 +8524,16 @@ def _wip_rebuild_image(session) -> str:
 
 
 def do_rebuild_image() -> None:
-    """`yolo wip --rebuild-image`: rebuild the default image with --no-cache, then exit.
+    """`yolo wip --rebuild-image`: rebuild the default image with --no-cache.
 
     The dashboard's `B` key spawns this into a window, but it also stands alone as a
     hand-typed command. Builds DEFAULT_DOCKERFILE from scratch under its
     content-addressed tag, so every subsequent launch that resolves to that tag reuses
-    the fresh image via a normal cache hit. No tmux needed — it just builds and prints.
+    the fresh image via a normal cache hit. Build only: on success the `wip` dispatch
+    in main chains into `do_wip`, so a hand-typed run lands in the dashboard and the
+    `B`-spawned window hands focus back to it (tmux-less boxes stop after the build —
+    there's no dashboard to open). A failed build sys.exits before the chaining, which
+    also keeps its spawned window held open on the error.
     """
     uid = os.getuid()
     tag = _image_tag(DEFAULT_DOCKERFILE, uid)
@@ -9080,6 +9087,9 @@ def _main():
         return
     if verb == "wip" and parsed.rebuild_image:
         do_rebuild_image()
+        if not shutil.which("tmux"):
+            return  # the rebuild stands alone on a tmux-less box; wip can't open anyway
+        do_wip(home, dashboard=False, tmux_session=parsed.tmux_session)
         return
     if verb == "wip":
         do_wip(home, dashboard=parsed.wip_dashboard, tmux_session=parsed.tmux_session)
