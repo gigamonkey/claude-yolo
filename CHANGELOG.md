@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.30.0 — 2026-07-28
 
 - **`yolo wip --rebuild-image` now opens the dashboard after the rebuild**
   instead of just exiting. A hand-typed run lands you in `wip` once the build
