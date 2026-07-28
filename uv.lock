@@ -127,7 +127,7 @@ wheels = [
 
 [[package]]
 name = "claude-yolo"
-version = "0.30.0"
+version = "0.30.1"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
