@@ -3,6 +3,14 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **New `wip` key: `x` on a worktree row discards it** — deletes the worktree
+  *and its branch*, unmerged commits and uncommitted changes included (a running
+  session is stopped through). The destructive sibling of `f` for a topic that
+  didn't work out; it always asks for confirmation, and on a multi-repo topic it
+  discards every repo of the set.
+
 ## v0.30.1 — 2026-07-28
 
 - **The config editor's add-key menu is now sorted alphabetically** instead of

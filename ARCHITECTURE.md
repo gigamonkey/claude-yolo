@@ -1496,7 +1496,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   single-`base` + `_branch_merged` resolution — in which case it skips the
   confirm, since `delete-if-merged` disposes only integrated branches and a
   finished topic revives by name; a squash-merge/unresolvable ref reads as
-  un-merged and still confirms). **`r`/`m`/`d` are scoped by the row** (the same
+  un-merged and still confirms). `x` **discards** a worktree (`_wip_discard` →
+  the same `finish_worktree` core with `force=True` and the internal
+  `action="discard"`, which deletes the branch unconditionally with `-D`):
+  finish's guards are waved off — a running session is stopped through, a dirty
+  tree removed anyway, an unmerged branch deleted — so unlike `f` its confirm
+  is **never** skipped. Worktree rows only (an extra repo's row routes to the
+  topic's primary and discards the whole set, like `f`); a failed branch delete
+  is reported in the message rather than raised. **`r`/`m`/`d` are scoped by the row** (the same
   `single_repo = (kind == "worktree")` split in each): a **worktree** row is one
   repo, a **session** row is the whole topic — its one container spans every repo
   and its payload carries the primary's worktree/root/slug — so on a session row

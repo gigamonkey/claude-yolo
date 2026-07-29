@@ -996,6 +996,64 @@ def test_finish_waiting_session_allowed(cy, monkeypatch):
     assert calls == ["topic"]  # the idle session's worktree gets finished
 
 
+def test_discard_worktree_confirms_then_calls_core(cy, monkeypatch):
+    # `x` always confirms — even a fully-merged topic (no _finish_all_merged
+    # skip) — then runs the finish core with force=True and action="discard".
+    monkeypatch.setattr(cy, "_finish_all_merged", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(
+        cy,
+        "finish_worktree",
+        lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "gone",
+    )
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["x", "q"], confirms=[True])
+    assert calls and calls[0][0] == "old"
+    assert calls[0][1]["force"] is True
+    assert calls[0][1]["action"] == "discard"
+    assert frames[-1][1] == "gone"
+
+
+def test_discard_declined_is_noop(cy, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: calls.append(1) or "x")
+    sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["x", "q"], confirms=[False])
+    assert calls == []
+    assert frames[-1][1] == "cancelled."
+
+
+def test_discard_on_session_row_is_noop(cy, monkeypatch):
+    # `x` is worktree-only — a session row (even an idle one, which `f` accepts)
+    # just explains in the footer.
+    calls = []
+    monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: calls.append(1) or "x")
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    frames = run_loop(cy, monkeypatch, sections, ["x"])
+    assert calls == []
+    assert frames[-1][1] == "discard applies to worktrees."
+
+
+def test_discard_deletes_dirty_worktree_and_unmerged_branch(cy, run_cli, repo):
+    # The real thing end-to-end: a topic with an unmerged commit *and* an
+    # uncommitted file — everything `f` would refuse or preserve — is removed
+    # wholesale, branch included, and its overlay entry goes with it.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("committed\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    (wt / "dirty.txt").write_text("uncommitted\n")
+    slug = cy._repo_root_of(r)[2]
+    payload = {"worktree": wt, "main_root": r, "slug": slug, "topic": "topic"}
+    msg = cy._wip_discard("worktree", payload, home, FakeTerm([], confirms=[True]))
+    assert "Removed worktree" in msg and "Deleted branch 'topic'" in msg
+    assert not wt.exists()
+    branches = git(r, "branch", "--list", "topic").stdout.strip()
+    assert branches == ""
+
+
 def test_rebase_worktree_calls_core(cy, monkeypatch):
     # `r` on a worktree row is per-repo (single_repo=True), like `m`/`d`.
     calls = []
