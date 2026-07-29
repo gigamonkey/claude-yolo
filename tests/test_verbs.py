@@ -860,6 +860,25 @@ def test_merge_refuses_base_not_checked_out(cy, run_cli, repo):
         run_cli(["merge", "topic", "--base", "otherbase"], home=home, cwd=r)
 
 
+def test_merge_refuses_same_commit_base_not_checked_out(cy, run_cli, repo):
+    r, home = repo
+    # a base branch parked at the SAME commit as the checkout: commit equality
+    # can't tell it from the checked-out branch, but merging would advance main
+    # and leave it behind — must refuse, not merge into main
+    head = git(r, "rev-parse", "HEAD").stdout.strip()
+    git(r, "branch", "otherbase", head)
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("done")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    with pytest.raises(SystemExit):
+        run_cli(["merge", "topic", "--base", "otherbase"], home=home, cwd=r)
+    # nothing merged: main and otherbase both still at the original commit
+    assert git(r, "rev-parse", "HEAD").stdout.strip() == head
+    assert git(r, "rev-parse", "otherbase").stdout.strip() == head
+
+
 # --- diff -------------------------------------------------------------------
 
 

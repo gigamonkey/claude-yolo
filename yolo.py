@@ -5792,7 +5792,9 @@ def merge_worktree(
     naming the checked-out branch (e.g. `main`) resolves to the same commit. A `base`
     that isn't checked out (another local branch, or a remote-tracking ref like
     origin/main) can't be merged into locally without switching branches, so it's
-    refused with guidance rather than silently merging into the wrong branch.
+    refused with guidance rather than silently merging into the wrong branch — a
+    local-branch base even when it points at the same commit as the checkout, since
+    the merge would advance the checked-out branch and leave the base behind.
 
     Distinct from `finish --finish-action merge`, which merges *and then* removes the
     worktree and deletes the branch: here both stay, so the branch keeps living for
@@ -5826,6 +5828,11 @@ def merge_worktree(
         # defaults to HEAD (always the checkout); a base naming the checked-out
         # branch resolves to the same commit. Anything else (an unchecked-out
         # branch, a remote ref) would merge into the wrong place, so refuse it.
+        # Commit equality alone isn't enough: a local branch parked at the same
+        # commit as the checkout would pass it, but merging would advance the
+        # checked-out branch, not the base — so local branches are also matched
+        # by name. (A same-commit remote ref / tag / SHA still passes: those can
+        # never advance, so landing in the checkout is exactly right.)
         head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             capture_output=True,
@@ -5846,6 +5853,22 @@ def merge_worktree(
                 f"base '{base}' isn't what the main repo has checked out ({target}); "
                 f"`merge` only lands in the checkout, so check out '{base}' in {root} "
                 f"first.{prior}"
+            )
+        base_ref = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--symbolic-full-name", base],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        head_ref = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if base_ref.startswith("refs/heads/") and base_ref != head_ref:
+            raise YoloError(
+                f"base '{base}' is at the same commit as the checkout ({target}) but "
+                f"isn't checked out, so the merge would advance {target}, not "
+                f"'{base}'; check out '{base}' in {root} first.{prior}"
             )
         kw = {"capture_output": True, "text": True} if capture else {}
         merge = subprocess.run(["git", "-C", str(root), "merge", topic], **kw)

@@ -11,6 +11,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   didn't work out; it always asks for confirmation, and on a multi-repo topic it
   discards every repo of the set.
 
+- **Fixed: `merge` no longer merges into the checked-out branch when the
+  configured base is a different branch parked at the same commit.** The
+  not-the-checkout guard compared commits only, so a base branch that hadn't
+  diverged from e.g. `main` slipped past it and the merge landed on `main`,
+  leaving the base branch behind. Such a base is now refused by name with the
+  same check-out-the-base-first guidance the diverged case already got.
+
 ## v0.30.1 — 2026-07-28
 
 - **The config editor's add-key menu is now sorted alphabetically** instead of
