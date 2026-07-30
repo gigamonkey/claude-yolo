@@ -3,7 +3,13 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.31.0 — 2026-07-30
+
+- **New `wip` key: `x` on a worktree row discards it** — deletes the worktree
+  *and its branch*, unmerged commits and uncommitted changes included (a running
+  session is stopped through). The destructive sibling of `f` for a topic that
+  didn't work out; it always asks for confirmation, and on a multi-repo topic it
+  discards every repo of the set.
 
 - **Fixed: a `base` ref that doesn't exist in the target repo now fails with a
   clean error instead of a traceback.** A config-set `"base": "main"` meeting a
@@ -12,12 +18,6 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   recreates a worktree) now reports the bad ref, where to fix it (`--base` or
   the `base` config key), and — on a multi-repo start where the ref is missing
   from only some repos — rolls back cleanly.
-
-- **New `wip` key: `x` on a worktree row discards it** — deletes the worktree
-  *and its branch*, unmerged commits and uncommitted changes included (a running
-  session is stopped through). The destructive sibling of `f` for a topic that
-  didn't work out; it always asks for confirmation, and on a multi-repo topic it
-  discards every repo of the set.
 
 - **Fixed: `merge` no longer merges into the checked-out branch when the
   configured base is a different branch parked at the same commit.** The
