@@ -212,6 +212,20 @@ def test_start_aborts_whole_set_when_branch_exists_in_one_extra(cy, run_cli, rep
     assert not branch_exists(proto, "clash")
 
 
+def test_start_base_missing_in_extra_repo_rolls_back(cy, run_cli, repos):
+    # The base ref resolves in the primary but not in an extra: the primary's
+    # already-created worktree/branch are rolled back, no repo left dirty.
+    app, lib, proto, home = repos
+    git(app, "branch", "release")
+    with pytest.raises(SystemExit) as e:
+        run_cli(["start", "feat", "--repo", str(lib), "--base", "release"], home=home, cwd=app)
+    assert "base ref 'release' does not exist" in str(e.value)
+    assert "rolled back" in str(e.value)
+    for r in (app, lib):
+        assert not wt_of(cy, home, r, "feat").exists()
+        assert not branch_exists(r, "feat")
+
+
 def test_start_rolls_back_on_midway_creation_failure(cy, run_cli, repos, monkeypatch):
     app, lib, proto, home = repos
     real = cy.setup_worktree

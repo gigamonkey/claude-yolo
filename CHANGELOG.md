@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Fixed: a `base` ref that doesn't exist in the target repo now fails with a
+  clean error instead of a traceback.** A config-set `"base": "main"` meeting a
+  repo whose default branch is `master` used to surface as a raw
+  `CalledProcessError` out of `git worktree add`; `start` (and a `resume` that
+  recreates a worktree) now reports the bad ref, where to fix it (`--base` or
+  the `base` config key), and — on a multi-repo start where the ref is missing
+  from only some repos — rolls back cleanly.
+
 - **New `wip` key: `x` on a worktree row discards it** — deletes the worktree
   *and its branch*, unmerged commits and uncommitted changes included (a running
   session is stopped through). The destructive sibling of `f` for a topic that

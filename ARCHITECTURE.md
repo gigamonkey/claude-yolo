@@ -1179,7 +1179,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   topic in another project, and from a cwd session named just after its
   project/directory, no colon);
   **errors if the worktree or branch already exists** (use
-  `resume`). Any **explicit config flags** passed here are snapshotted into the
+  `resume`), and **errors before creating anything if `base` doesn't resolve to a
+  commit** in the target repo (`setup_worktree` pre-flights it — the classic case
+  is a config-set `"base": "main"` meeting a `master`-era repo). Any **explicit
+  config flags** passed here are snapshotted into the
   worktree's `worktrees.json` overlay (see the config section), so a later
   `resume TOPIC` reuses them. *No `TOPIC`:* a fresh session in the current
   directory, named after the directory basename (`= --hostname`).

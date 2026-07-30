@@ -1542,6 +1542,10 @@ def setup_worktree(
     extra repo in the same state), the worktree **reattaches** to it instead of
     creating fresh — `start` pre-flights both the worktree and the branch away, so
     from `start` this always creates a new branch off `base`.
+
+    A `base` that doesn't resolve to a commit in the target repo (a config-set
+    `"base": "main"` meeting a `master` repo, say) raises YoloError before any
+    worktree is created, rather than surfacing git's failure as a traceback.
     """
     if repo is None:
         common_git, main_root, slug = _repo_paths()
@@ -1551,12 +1555,20 @@ def setup_worktree(
             raise YoloError(f"not a git repository: {repo}")
         common_git, main_root, slug = ident
     worktree = home / ".claude-yolo" / "worktrees" / slug / name
+    if _branch_exists(name, main_root):
+        tail = [str(worktree), name]
+    else:
+        resolves = subprocess.run(
+            ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+            capture_output=True,
+        )
+        if resolves.returncode != 0:
+            raise YoloError(
+                f"base ref '{base}' does not exist in {main_root}; check --base "
+                "or the `base` config key against that repo's branches."
+            )
+        tail = ["-b", name, str(worktree), base]
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    tail = (
-        [str(worktree), name]
-        if _branch_exists(name, main_root)
-        else ["-b", name, str(worktree), base]
-    )
     subprocess.run(["git", "-C", str(main_root), "worktree", "add", *tail], check=True)
     return worktree, common_git, main_root
 

@@ -107,6 +107,17 @@ def test_start_base_ref_is_used(cy, run_cli, repo):
     assert git(wt, "rev-parse", "HEAD").stdout.strip() == first
 
 
+def test_start_nonexistent_base_errors_before_creating_anything(cy, run_cli, repo):
+    # A base the repo doesn't have (a config-set `main` meeting a `master` repo,
+    # say) errors cleanly instead of tracebacking out of `git worktree add`.
+    r, home = repo
+    with pytest.raises(SystemExit) as e:
+        run_cli(["start", "topic", "--base", "nope"], home=home, cwd=r)
+    assert "base ref 'nope' does not exist" in str(e.value)
+    assert not list((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert not git(r, "branch", "--list", "topic").stdout.strip()
+
+
 # --- resume -----------------------------------------------------------------
 
 
