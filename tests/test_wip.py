@@ -85,7 +85,7 @@ def session_item(cy, **over):
         "main_root": "/repo",
     }
     p.update(over.pop("payload", {}))
-    cols = over.pop("cols", ("repo-topic", "topic", "waiting 5m", "-", "1m"))
+    cols = over.pop("cols", ("repo-topic", "topic", "waiting 5m", "1m"))
     return cy.WipItem("session", over.pop("key", "session:repo-topic"), cols, p)
 
 
@@ -137,7 +137,7 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None, term
 
 def test_order_sessions_unknown_then_waiting_then_agenting_then_working(cy):
     def mk(name, state, age, created_at=""):
-        return cy.WipSession("c", name, "", "/c", "", "", "1m", state, age, created_at)
+        return cy.WipSession("c", name, "", "/c", "", "1m", state, age, created_at)
 
     ordered = cy._order_sessions(
         [
@@ -172,19 +172,19 @@ def test_draw_wip_renders_one_sessions_table_grouped(cy, capsys):
     sections = {
         "session": [
             session_item(
-                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "1m", "-", "-")
+                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "1m", "-")
             ),
             session_item(
                 cy,
                 key="session:w1",
                 payload={"state": "waiting"},
-                cols=("w1", "-", "1m", "-", "waiting 9m"),
+                cols=("w1", "-", "1m", "waiting 9m"),
             ),
             session_item(
                 cy,
                 key="session:k1",
                 payload={"state": "working"},
-                cols=("k1", "-", "1m", "-", "working 2m"),
+                cols=("k1", "-", "1m", "working 2m"),
             ),
         ],
         "worktree": [],
@@ -206,19 +206,19 @@ def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
                 cy,
                 key="session:w1",
                 payload={"state": "waiting"},
-                cols=("w1", "-", "1m", "-", "waiting 9m"),
+                cols=("w1", "-", "1m", "waiting 9m"),
             ),
             session_item(
                 cy,
                 key="session:a1",
                 payload={"state": "agenting"},
-                cols=("a1", "-", "1m", "-", "agenting 3m"),
+                cols=("a1", "-", "1m", "agenting 3m"),
             ),
             session_item(
                 cy,
                 key="session:k1",
                 payload={"state": "working"},
-                cols=("k1", "-", "1m", "-", "working 1m"),
+                cols=("k1", "-", "1m", "working 1m"),
             ),
         ],
         "worktree": [],
@@ -269,7 +269,7 @@ def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monke
         cy,
         "_wip_sessions",
         lambda h: [
-            cy.WipSession("cidA", "repo-alpha", "alpha", str(wt_alpha), "", "", "1m", "waiting", 9)
+            cy.WipSession("cidA", "repo-alpha", "alpha", str(wt_alpha), "", "1m", "waiting", 9)
         ],
     )
 
@@ -331,7 +331,7 @@ def test_wip_projects_flags_active(cy, tmp_path):
     home = tmp_path / "home"
     (home / ".claude-yolo").mkdir(parents=True)
     (home / ".claude-yolo" / "projects.json").write_text('{"/work/a": {}, "/work/b": {}}')
-    sessions = [cy.WipSession("c", "n", "", "/work/a/sub", "", "", "1m", "waiting", 1)]
+    sessions = [cy.WipSession("c", "n", "", "/work/a/sub", "", "1m", "waiting", 1)]
     projects = cy._wip_projects(home, sessions)
     by_path = {str(p["path"]): p["active"] for p in projects}
     assert by_path == {"/work/a": True, "/work/b": False}
@@ -339,7 +339,7 @@ def test_wip_projects_flags_active(cy, tmp_path):
 
 
 def _sess(cy, name, cwd):
-    return cy.WipSession("c", name, "", cwd, "", "", "1m", "waiting", 1)
+    return cy.WipSession("c", name, "", cwd, "", "1m", "waiting", 1)
 
 
 def test_session_window_for_prefers_exact_path(cy):

@@ -395,7 +395,7 @@ def test_wip_browse_rejects_unknown_choice(cy, wip_browse_env):
     assert wip_browse_env == []
 
 
-# --- the ps/wip PORTS column ------------------------------------------------
+# --- the ps PORTS column ----------------------------------------------------
 
 
 def test_condense_ports_prefixes_labeled_mappings(cy):

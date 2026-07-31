@@ -6988,7 +6988,7 @@ def _draw_picker(rows: list, windows: dict, selected: str | None) -> None:
 # created_at defaults to "" so older 9-arg constructions (tests) still work.
 WipSession = collections.namedtuple(
     "WipSession",
-    "cid name topic cwd config_dir ports created state age created_at extra",
+    "cid name topic cwd config_dir created state age created_at extra",
     defaults=("", ""),  # created_at, extra (the yolo.extra-repos slug list)
 )
 
@@ -6997,7 +6997,7 @@ WipSession = collections.namedtuple(
 # section's table, and the payload an action needs.
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
-WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "PORTS", "STATE")
+WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE")
 WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS", "DIRECTORY")
 WIP_PROJECT_HEADERS = ("REPO", "DIRECTORY")
 
@@ -7017,11 +7017,9 @@ def _wip_sessions(home: pathlib.Path) -> list:
             '{{.Label "yolo.worktree"}}',
             '{{.Label "yolo.cwd"}}',
             '{{.Label "yolo.config-dir"}}',
-            "{{.Ports}}",
             "{{.RunningFor}}",
             "{{.CreatedAt}}",
             '{{.Label "yolo.extra-repos"}}',
-            '{{.Label "yolo.ports"}}',
         )
     )
     try:
@@ -7035,27 +7033,13 @@ def _wip_sessions(home: pathlib.Path) -> list:
     now = time.time()
     sessions = []
     for line in out.splitlines():
-        cid, name, topic, cwd, cfgdir, ports, up, created_at, extra, portlbl = (
-            line.split("\t") + [""] * 10
-        )[:10]
+        cid, name, topic, cwd, cfgdir, up, created_at, extra = (line.split("\t") + [""] * 8)[:8]
         base = cfgdir or str(home / ".claude")
         state_file = pathlib.Path(base) / _STATUS_DIR_NAME / f"{_cwd_slug(cwd)}.state"
         activity = _session_activity(state_file, now)
         state, age = activity if activity else (None, 0)
         sessions.append(
-            WipSession(
-                cid,
-                name,
-                topic,
-                cwd,
-                cfgdir,
-                _condense_ports(ports, portlbl),
-                up,
-                state,
-                age,
-                created_at,
-                extra,
-            )
+            WipSession(cid, name, topic, cwd, cfgdir, up, state, age, created_at, extra)
         )
     return sessions
 
@@ -7217,7 +7201,6 @@ def _wip_items(home: pathlib.Path) -> dict:
             s.name + ("" if win else " *"),
             s.topic or "-",
             s.created,
-            s.ports or "-",
             state_disp,
         )
         session_items.append(WipItem("session", f"session:{s.name}", cols, payload))
@@ -7286,13 +7269,12 @@ def _fg(s: str, code: int) -> str:
 
 
 def _color_session_row(it) -> tuple:
-    name, topic, created, ports, state = it.cols
+    name, topic, created, state = it.cols
     g = _SESSION_GROUP.get(it.payload.get("state"), _GREY)
     return (
         _fg(name, g),
         _fg(topic, _CYAN),
         _fg(created, _BLUE),
-        _fg(ports, _MAGENTA),
         _fg(state, g),
     )
 

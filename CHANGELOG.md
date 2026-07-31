@@ -11,6 +11,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   first — showing how long ago the topic was last active — so an accidental name
   collision doesn't silently drop you into an old session. Declining cancels.
 
+- **The `wip` dashboard's SESSIONS table dropped its PORTS column.** Forwarded
+  ports are still reachable via `b` (browse) on a session row, and the `ps`
+  view keeps its PORTS column.
+
 ## v0.31.0 — 2026-07-30
 
 - **New `wip` key: `x` on a worktree row discards it** — deletes the worktree

@@ -967,7 +967,7 @@ def test_wip_extra_worktree_row_gets_primary_session_window(cy):
     # yolo.extra-repos label; the extra's worktree row picks up that session's
     # window so Enter switches instead of reporting "no tmux window".
     s = cy.WipSession(
-        "cid", "chat-feat", "feat", "/wt/app/feat", "", "", "1m", "waiting", 5, "", "lib-1234abcd"
+        "cid", "chat-feat", "feat", "/wt/app/feat", "", "1m", "waiting", 5, "", "lib-1234abcd"
     )
     windows = {"chat-feat": ("@7", "yolo")}
     assert cy._extra_session_window("lib-1234abcd", "feat", [s], windows) == "@7"
