@@ -1482,8 +1482,10 @@ gracefully outside one — there's just no repo slug to label/find by).
   project dir (only `(this directory)` is withheld then). `n` on a project
   prompts for a topic and starts a **new worktree** session there
   (`_wip_new_worktree`) — unless the topic already has a life (`_topic_history`:
-  live worktree, surviving branch, or finished topic's transcript), in which
-  case it spawns `resume <topic>` to reconnect instead of `start`; remaining
+  live worktree, surviving branch, or finished topic's transcript, returned as
+  its last-activity timestamp), in which case a confirm — dated with that
+  activity ("last active 2d ago") — offers to spawn `resume <topic>` to
+  reconnect instead of `start` (declining cancels); remaining
   topic validation is left to the spawned yolo, surfacing in the new window like
   Enter's launch errors, `S` on a
   session row opens a bash shell in its container (`_wip_shell`: `docker exec -it
@@ -2380,7 +2382,8 @@ project with finished topics, the revive picker: topic → `resume <topic>`,
 withholds only `(this directory)`; `_finished_topics`/`_topic_history`
 themselves unit-tested against real transcript-bucket layouts), `n` on a
 project prompting a topic then spawning `start <topic>` (and cancelling on an
-empty topic; a topic with history spawning `resume <topic>` instead), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
+empty topic; a topic with history confirming — dated with its last activity —
+before spawning `resume <topic>`, and cancelling when declined), Enter on the `+` row prompting a directory then spawning `start --no-tmux`
 there (cancel on empty, reject a non-dir), `S` shell on a session row spawning the
 `docker exec` window (a worktree-row no-op), `l` startup-log on a session row
 spawning the `less -R` window (the missing-log footer message and the

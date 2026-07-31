@@ -56,6 +56,7 @@ class FakeTerm:
         self._keys = list(keys)
         self._lines = list(lines or [])
         self._confirms = list(confirms or [])
+        self.confirm_prompts = []
 
     def wait_key(self, timeout):
         if not self._keys:
@@ -68,6 +69,7 @@ class FakeTerm:
     prompt_path = prompt_line  # same scripted-line source; completion is the real term's job
 
     def confirm(self, prompt):
+        self.confirm_prompts.append(prompt)
         return self._confirms.pop(0) if self._confirms else False
 
 
@@ -112,15 +114,16 @@ def project_item(cy, **over):
     )
 
 
-def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None):
+def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None, term=None):
     """Drive _wip_loop with fixed sections + scripted term; return the draw frames.
 
     Each frame is (selected_key, footer) as _draw_wip would have rendered it.
+    Pass a prebuilt `term` to inspect it afterwards (e.g. confirm_prompts).
     """
     monkeypatch.setattr(cy, "_wip_items", lambda home: sections)
     frames = []
     monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
-    term = FakeTerm(keys, lines=lines, confirms=confirms)
+    term = term or FakeTerm(keys, lines=lines, confirms=confirms)
     # home=None → per-worktree _worktree_config returns built-in defaults, so the
     # loop runs without touching real config. The loop ends either on `q` (only
     # allowed with no sessions) or by exhausting the scripted keys.
@@ -641,19 +644,38 @@ def test_n_on_project_cancels_on_empty_topic(cy, monkeypatch):
     assert frames[-1][1] == "cancelled."
 
 
-def test_n_with_history_resumes_instead_of_starting(cy, monkeypatch):
-    # Typing a previously-used topic under `n` spawns `resume`, not `start`:
+def test_n_with_history_confirms_then_resumes(cy, monkeypatch):
+    # Typing a previously-used topic under `n` asks before resuming — the name
+    # may be a deliberate revive or an accidental collision — dating the prompt
+    # with the topic's last activity. Confirming spawns `resume`, not `start`:
     # a finished topic revives with its old Claude session, and a live
     # worktree/branch resumes instead of tripping `start`'s already-exists guard.
     spawned = []
     monkeypatch.setattr(
         cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
     )
-    monkeypatch.setattr(cy, "_topic_history", lambda home, path, topic: topic == "old-feat")
+    two_days = cy.time.time() - 2 * 86400
+    monkeypatch.setattr(
+        cy, "_topic_history", lambda home, path, topic: two_days if topic == "old-feat" else None
+    )
     sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
-    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"])
+    term = FakeTerm(["n", "q"], lines=["old-feat"], confirms=[True])
+    frames = run_loop(cy, monkeypatch, sections, [], term=term)
     assert spawned == [["resume", "old-feat", "--no-tmux"]]
     assert "resuming worktree 'old-feat'" in frames[-1][1]
+    assert term.confirm_prompts == ["'old-feat' already exists (last active 2d ago) — resume it?"]
+
+
+def test_n_with_history_declined_cancels(cy, monkeypatch):
+    # Declining the resume prompt spawns nothing — `start` over the existing
+    # name would only trip its already-exists guard.
+    spawned = []
+    monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
+    monkeypatch.setattr(cy, "_topic_history", lambda home, path, topic: cy.time.time() - 60)
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"], confirms=[False])
+    assert spawned == []
+    assert frames[-1][1] == "cancelled."
 
 
 def test_R_on_project_offers_finished_topics(cy, monkeypatch):
@@ -767,19 +789,23 @@ def test_finished_topics_from_transcript_buckets(cy, repo):
 
 
 def test_topic_history_worktree_branch_or_transcript(cy, repo):
+    # Returns the topic's last-activity timestamp (or None when fresh): the
+    # newest of transcript mtime, branch tip commit time, and worktree mtime.
     r, home = repo
     slug = cy._repo_root_of(r)[2]
     base = home / ".claude-yolo" / "worktrees" / slug
-    assert not cy._topic_history(home, r, "nope")
+    assert cy._topic_history(home, r, "nope") is None
     d = home / ".claude" / "projects" / cy._cwd_slug(base / "done")
     d.mkdir(parents=True)
     (d / "s.jsonl").write_text("{}\n")
-    assert cy._topic_history(home, r, "done")  # a finished topic's transcript
+    os.utime(d / "s.jsonl", (500, 500))
+    assert cy._topic_history(home, r, "done") == 500  # a finished topic's transcript
     git(r, "branch", "kept")
-    assert cy._topic_history(home, r, "kept")  # a surviving branch
+    tip = int(git(r, "log", "-1", "--format=%ct", "kept").stdout)
+    assert cy._topic_history(home, r, "kept") == tip  # a surviving branch
     (base / "live").mkdir(parents=True)
-    assert cy._topic_history(home, r, "live")  # a live worktree
-    assert not cy._topic_history(None, r, "done")  # home=None (loop default)
+    assert cy._topic_history(home, r, "live")  # a live worktree (dir mtime)
+    assert cy._topic_history(None, r, "done") is None  # home=None (loop default)
 
 
 def _newsession_item(cy):

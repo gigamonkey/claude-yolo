@@ -3,6 +3,14 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The `wip` dashboard's `n` now confirms before resuming an existing topic.**
+  Typing a previously-used topic name (a live worktree, a surviving branch, or a
+  finished topic's transcript) used to spawn `resume` immediately; it now asks
+  first — showing how long ago the topic was last active — so an accidental name
+  collision doesn't silently drop you into an old session. Declining cancels.
+
 ## v0.31.0 — 2026-07-30
 
 - **New `wip` key: `x` on a worktree row discards it** — deletes the worktree

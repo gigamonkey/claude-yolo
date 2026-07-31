@@ -7784,19 +7784,28 @@ def _finished_topics(home, path) -> list[str]:
     return [t for _, t in sorted(found, reverse=True)]
 
 
-def _topic_history(home, path, topic) -> bool:
-    """Whether `topic` already has a life in `path`'s repo — a live worktree, a
-    surviving branch, or a finished topic's Claude transcript. Decides whether
-    the dashboard's `n` spawns `resume` (reconnect/revive) or `start` (fresh)."""
+def _topic_history(home, path, topic) -> float | None:
+    """When `topic` last lived in `path`'s repo — a live worktree, a surviving
+    branch, or a finished topic's Claude transcript — as an epoch timestamp
+    (the newest of transcript mtime, branch tip commit time, worktree mtime),
+    or None when the topic is fresh. Lets the dashboard's `n` offer `resume`
+    (reconnect/revive) instead of `start`, with the offer dated."""
     ident = _repo_root_of(pathlib.Path(path)) if home is not None else None
     if ident is None:
-        return False
+        return None
     worktree = home / ".claude-yolo" / "worktrees" / ident[2] / topic
-    return (
-        worktree.is_dir()
-        or _branch_exists(topic, ident[1])
-        or _has_resumable_session(_project_claude_dir(home, path), worktree)
+    stamps = [worktree.stat().st_mtime] if worktree.is_dir() else []
+    tip = subprocess.run(
+        ["git", "-C", str(ident[1]), "log", "-1", "--format=%ct", f"refs/heads/{topic}", "--"],
+        capture_output=True,
+        text=True,
     )
+    if tip.returncode == 0 and tip.stdout.strip():
+        stamps.append(float(tip.stdout.strip()))
+    bucket = _project_claude_dir(home, path) / "projects" / _cwd_slug(worktree)
+    if bucket.is_dir():
+        stamps.extend(f.stat().st_mtime for f in bucket.glob("*.jsonl"))
+    return max(stamps, default=None)
 
 
 def _wip_resume_pick(kind, p, home, session, term) -> str:
@@ -8541,18 +8550,27 @@ def _wip_new_worktree(p, home, session, term) -> str:
     row starts by name, so the inner yolo retargets to the project's `dir` itself
     and the window's cwd only needs to be valid). A topic that already has a life
     (`_topic_history`: a live worktree, a surviving branch, or a finished topic's
-    transcript) spawns `resume <topic>` instead, which reconnects — reviving the
-    worktree and its old Claude session if it was finished — rather than letting
-    `start` refuse or begin an amnesiac fresh session over old history. Remaining
-    topic validation (bad branch name, …) is left to the spawned yolo, surfacing
-    in the window — the same place Enter's launch errors land.
+    transcript) prompts — the name may be a deliberate revive or an accidental
+    collision, so confirm (dated with the topic's last activity) before spawning
+    `resume <topic>`, which reconnects — reviving the worktree and its old Claude
+    session if it was finished — rather than letting `start` refuse or begin an
+    amnesiac fresh session over old history. Declining cancels outright: `start`
+    over that name would only trip its already-exists guard. Remaining topic
+    validation (bad branch name, …) is left to the spawned yolo, surfacing in the
+    window — the same place Enter's launch errors land.
     """
     topic = term.prompt_line("New worktree topic: ")
     if not topic:
         return "cancelled."
     target = _wip_spawn_target("project", p, home)
     cwd, _, label, extra = target
-    verb = "resume" if cwd and _topic_history(home, cwd, topic) else "start"
+    verb = "start"
+    last = _topic_history(home, cwd, topic) if cwd else None
+    if last is not None:
+        age = _humanize_secs(max(0, int(time.time() - last)))
+        if not term.confirm(f"'{topic}' already exists (last active {age} ago) — resume it?"):
+            return "cancelled."
+        verb = "resume"
     _spawn_session_window(
         cwd or pathlib.Path.home(),
         [verb, topic, *extra, "--no-tmux"],
