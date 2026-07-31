@@ -5,11 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
-- **The `wip` dashboard's `n` now confirms before resuming an existing topic.**
+- **The `wip` dashboard's `n` now asks before resuming an existing topic.**
   Typing a previously-used topic name (a live worktree, a surviving branch, or a
-  finished topic's transcript) used to spawn `resume` immediately; it now asks
-  first — showing how long ago the topic was last active — so an accidental name
-  collision doesn't silently drop you into an old session. Declining cancels.
+  finished topic's transcript) used to spawn `resume` immediately; it now
+  prompts — showing how long ago the topic was last active — so an accidental
+  name reuse doesn't silently drop you into an old session: `y` resumes it,
+  `n` starts a fresh Claude session in the topic's worktree (`resume --new`),
+  and Esc cancels.
 
 - **The `wip` dashboard's SESSIONS table dropped its PORTS column.** Forwarded
   ports are still reachable via `b` (browse) on a session row, and the `ps`

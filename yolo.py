@@ -6875,6 +6875,12 @@ class _PickerTerm:
         sys.stdout.flush()
         return _read_key(self.fd) in ("y", "Y")
 
+    def ask_key(self, prompt: str) -> str:
+        """Draw a prompt (which should name its keys) and return one raw keypress."""
+        sys.stdout.write("\r\x1b[K" + prompt + " ")
+        sys.stdout.flush()
+        return _read_key(self.fd)
+
 
 def _run_picker(body) -> None:
     """Run a picker `body(term)` with the terminal in cbreak mode, restored after.
@@ -8533,32 +8539,43 @@ def _wip_new_worktree(p, home, session, term) -> str:
     and the window's cwd only needs to be valid). A topic that already has a life
     (`_topic_history`: a live worktree, a surviving branch, or a finished topic's
     transcript) prompts — the name may be a deliberate revive or an accidental
-    collision, so confirm (dated with the topic's last activity) before spawning
-    `resume <topic>`, which reconnects — reviving the worktree and its old Claude
-    session if it was finished — rather than letting `start` refuse or begin an
-    amnesiac fresh session over old history. Declining cancels outright: `start`
-    over that name would only trip its already-exists guard. Remaining topic
-    validation (bad branch name, …) is left to the spawned yolo, surfacing in the
-    window — the same place Enter's launch errors land.
+    reuse, so a three-way ask (dated with the topic's last activity) picks:
+    `y` spawns `resume <topic>`, which reconnects — reviving the worktree and
+    its old Claude session if it was finished — rather than letting `start`
+    refuse or begin an amnesiac fresh session over old history; `n` spawns
+    `resume <topic> --new` — the topic's worktree (revived if needed) with a
+    *fresh* Claude session; Esc (or any other key) bails without spawning
+    anything. Remaining topic validation (bad branch name, …) is left to the
+    spawned yolo, surfacing in the window — the same place Enter's launch
+    errors land.
     """
     topic = term.prompt_line("New worktree topic: ")
     if not topic:
         return "cancelled."
     target = _wip_spawn_target("project", p, home)
     cwd, _, label, extra = target
-    verb = "start"
+    verb, flags = "start", []
     last = _topic_history(home, cwd, topic) if cwd else None
     if last is not None:
         age = _humanize_secs(max(0, int(time.time() - last)))
-        if not term.confirm(f"'{topic}' already exists (last active {age} ago) — resume it?"):
+        key = term.ask_key(
+            f"'{topic}' already exists (last active {age} ago) — "
+            "[y] resume, [n] new session, [Esc] cancel"
+        )
+        if key in ("y", "Y"):
+            verb = "resume"
+        elif key in ("n", "N"):
+            verb, flags = "resume", ["--new"]
+        else:
             return "cancelled."
-        verb = "resume"
     _spawn_session_window(
         cwd or pathlib.Path.home(),
-        [verb, topic, *extra, "--no-tmux"],
+        [verb, topic, *flags, *extra, "--no-tmux"],
         _session_window_name(label, topic),
         session,
     )
+    if flags:
+        return f"starting a fresh session in worktree '{topic}' in {label}…"
     doing = "resuming" if verb == "resume" else "starting"
     return f"{doing} worktree '{topic}' in {label}…"
 

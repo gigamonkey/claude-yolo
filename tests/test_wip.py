@@ -52,11 +52,13 @@ class KeysExhausted(Exception):
 class FakeTerm:
     """A scripted picker terminal: canned keys, prompt lines, and confirmations."""
 
-    def __init__(self, keys, *, lines=None, confirms=None):
+    def __init__(self, keys, *, lines=None, confirms=None, answers=None):
         self._keys = list(keys)
         self._lines = list(lines or [])
         self._confirms = list(confirms or [])
+        self._answers = list(answers or [])
         self.confirm_prompts = []
+        self.ask_prompts = []
 
     def wait_key(self, timeout):
         if not self._keys:
@@ -71,6 +73,10 @@ class FakeTerm:
     def confirm(self, prompt):
         self.confirm_prompts.append(prompt)
         return self._confirms.pop(0) if self._confirms else False
+
+    def ask_key(self, prompt):
+        self.ask_prompts.append(prompt)
+        return self._answers.pop(0) if self._answers else "\x1b"
 
 
 def session_item(cy, **over):
@@ -114,7 +120,9 @@ def project_item(cy, **over):
     )
 
 
-def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None, term=None):
+def run_loop(
+    cy, monkeypatch, sections, keys, *, lines=None, confirms=None, answers=None, term=None
+):
     """Drive _wip_loop with fixed sections + scripted term; return the draw frames.
 
     Each frame is (selected_key, footer) as _draw_wip would have rendered it.
@@ -123,7 +131,7 @@ def run_loop(cy, monkeypatch, sections, keys, *, lines=None, confirms=None, term
     monkeypatch.setattr(cy, "_wip_items", lambda home: sections)
     frames = []
     monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
-    term = term or FakeTerm(keys, lines=lines, confirms=confirms)
+    term = term or FakeTerm(keys, lines=lines, confirms=confirms, answers=answers)
     # home=None → per-worktree _worktree_config returns built-in defaults, so the
     # loop runs without touching real config. The loop ends either on `q` (only
     # allowed with no sessions) or by exhausting the scripted keys.
@@ -644,10 +652,10 @@ def test_n_on_project_cancels_on_empty_topic(cy, monkeypatch):
     assert frames[-1][1] == "cancelled."
 
 
-def test_n_with_history_confirms_then_resumes(cy, monkeypatch):
-    # Typing a previously-used topic under `n` asks before resuming — the name
-    # may be a deliberate revive or an accidental collision — dating the prompt
-    # with the topic's last activity. Confirming spawns `resume`, not `start`:
+def test_n_with_history_y_resumes(cy, monkeypatch):
+    # Typing a previously-used topic under `n` asks before acting — the name
+    # may be a deliberate revive or an accidental reuse — dating the prompt
+    # with the topic's last activity. `y` spawns `resume`, not `start`:
     # a finished topic revives with its old Claude session, and a live
     # worktree/branch resumes instead of tripping `start`'s already-exists guard.
     spawned = []
@@ -659,21 +667,36 @@ def test_n_with_history_confirms_then_resumes(cy, monkeypatch):
         cy, "_topic_history", lambda home, path, topic: two_days if topic == "old-feat" else None
     )
     sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
-    term = FakeTerm(["n", "q"], lines=["old-feat"], confirms=[True])
+    term = FakeTerm(["n", "q"], lines=["old-feat"], answers=["y"])
     frames = run_loop(cy, monkeypatch, sections, [], term=term)
     assert spawned == [["resume", "old-feat", "--no-tmux"]]
     assert "resuming worktree 'old-feat'" in frames[-1][1]
-    assert term.confirm_prompts == ["'old-feat' already exists (last active 2d ago) — resume it?"]
+    assert term.ask_prompts == [
+        "'old-feat' already exists (last active 2d ago) — [y] resume, [n] new session, [Esc] cancel"
+    ]
 
 
-def test_n_with_history_declined_cancels(cy, monkeypatch):
-    # Declining the resume prompt spawns nothing — `start` over the existing
-    # name would only trip its already-exists guard.
+def test_n_with_history_n_starts_fresh_session(cy, monkeypatch):
+    # `n` at the prompt keeps the topic (its worktree, revived if needed) but
+    # begins a fresh Claude session there: `resume <topic> --new`.
+    spawned = []
+    monkeypatch.setattr(
+        cy, "_spawn_session_window", lambda repo, argv, name, sess: spawned.append(argv)
+    )
+    monkeypatch.setattr(cy, "_topic_history", lambda home, path, topic: cy.time.time() - 60)
+    sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
+    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"], answers=["n"])
+    assert spawned == [["resume", "old-feat", "--new", "--no-tmux"]]
+    assert "fresh session in worktree 'old-feat'" in frames[-1][1]
+
+
+def test_n_with_history_esc_cancels(cy, monkeypatch):
+    # Esc (or any key other than y/n) at the prompt bails without spawning.
     spawned = []
     monkeypatch.setattr(cy, "_spawn_session_window", lambda *a: spawned.append(a))
     monkeypatch.setattr(cy, "_topic_history", lambda home, path, topic: cy.time.time() - 60)
     sections = {"session": [], "worktree": [], "project": [project_item(cy, path="/work/proj")]}
-    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"], confirms=[False])
+    frames = run_loop(cy, monkeypatch, sections, ["n", "q"], lines=["old-feat"], answers=["\x1b"])
     assert spawned == []
     assert frames[-1][1] == "cancelled."
 
