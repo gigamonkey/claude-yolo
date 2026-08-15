@@ -1436,7 +1436,9 @@ gracefully outside one — there's just no repo slug to label/find by).
   STATUS and spares `_worktree_rows` its own per-worktree `docker ps` at the 2s
   cadence; this table carries the same **COMMITS**
   column `list` grows — `_branch_ahead_behind`'s `↓behind ↑ahead` counts vs
-  `base`), and **projects** (`_wip_projects`: the
+  `base` — but *not* `list`'s DIRECTORY column: the worktree dir is derived
+  from repo + topic, and it was the one unbounded-width cell in the table),
+  and **projects** (`_wip_projects`: the
   `projects.json` keys **plus** the recent-projects registry — every launch stamps
   the project it opened (`_record_recent_project`, keyed by `_project_key`) into
   `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
@@ -1445,7 +1447,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   registers a recent one) but no longer surfaced as a marker). Rendered as a
   **REPO / DIRECTORY** table (the repo basename + the `~`-relative path), every
   row colored the same — the registered-vs-recent and active distinctions are
-  not shown — the WORKTREES shape minus the extra columns. This registry is kept **separate from `projects.json`
+  not shown. This registry is kept **separate from `projects.json`
   on purpose**: `projects.json` stays a deliberate, config-only ledger (`yolo
   config` is its only writer), so the dangling-key warning and `require-project-entry`
   keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under
@@ -1613,7 +1615,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   through a per-section `_color_*_row` that SGR-wraps every cell (`_fg`) — session
   SESSION/STATE by status group, worktree STATUS by `dirty`/`running`/`unmerged`,
   COMMITS with nonzero behind red / ahead green / zeros grey, projects with
-  REPO blue / DIRECTORY grey (uniform — like WORKTREES). `_format_table` measures **visible** width (`_visible_len` strips
+  REPO blue / DIRECTORY grey (uniform). `_format_table` measures **visible** width (`_visible_len` strips
   the SGR via `_SGR_RE`) so colored cells still align; the selected row is rendered
   as a plain reverse-video bar (ANSI stripped, then `\x1b[7m`) rather than tinted,
   which sidesteps the per-cell-color-vs-highlight clash and grey-on-grey.

@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `wip` dashboard's WORKTREES table dropped its DIRECTORY column.** The
+  worktree directory is derived from the repo and the topic, and it was the one
+  cell of unbounded width — the main source of over-long rows. `yolo list`
+  still shows it.
+
 - **The `wip` dashboard scrolls when the page outgrows the terminal.** With
   enough sessions/worktrees/projects (e.g. multi-repo projects with several
   worktrees) the page used to overflow, pushing the top off-screen; now only a

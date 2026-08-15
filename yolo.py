@@ -7027,7 +7027,9 @@ WipSession = collections.namedtuple(
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
 WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE")
-WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS", "DIRECTORY")
+# No DIRECTORY column: the worktree dir is derived from repo + topic (and it was
+# the one unbounded-width cell in the table); `yolo list` still shows it.
+WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS")
 WIP_PROJECT_HEADERS = ("REPO", "DIRECTORY")
 
 
@@ -7238,7 +7240,7 @@ def _wip_items(home: pathlib.Path) -> dict:
         WipItem(
             "worktree",
             f"worktree:{w.slug}:{w.topic}",
-            (w.topic_label, w.repo_name, w.status, w.commits, w.directory),
+            (w.topic_label, w.repo_name, w.status, w.commits),
             {
                 "worktree": w.worktree,
                 "main_root": w.main_root,
@@ -7258,7 +7260,7 @@ def _wip_items(home: pathlib.Path) -> dict:
     for p in projects:
         path = pathlib.Path(p["path"])
         try:
-            directory = "~/" + str(path.relative_to(home))  # like the WORKTREES column
+            directory = "~/" + str(path.relative_to(home))  # like `list`'s DIRECTORY
         except ValueError:
             directory = str(path)
         if p["repos"]:
@@ -7338,13 +7340,12 @@ def _color_commits(commits: str) -> str:
 
 
 def _color_worktree_row(it) -> tuple:
-    topic, repo, status, commits, directory = it.cols
+    topic, repo, status, commits = it.cols
     return (
         _fg(topic, _BLUE),
         _fg(repo, _CYAN),
         _color_status(status),
         _color_commits(commits),
-        _fg(directory, _GREY),
     )
 
 

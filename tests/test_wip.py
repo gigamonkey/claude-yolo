@@ -101,7 +101,7 @@ def worktree_item(cy, **over):
     return cy.WipItem(
         "worktree",
         over.pop("key", "worktree:repo:old"),
-        over.pop("cols", ("repo", "old", "merged", "↓2 ↑0", "~/old")),
+        over.pop("cols", ("old", "repo", "merged", "↓2 ↑0")),  # TOPIC, REPO, STATUS, COMMITS
         p,
     )
 
@@ -254,7 +254,7 @@ def test_draw_wip_sessions_none_when_empty(cy, capsys):
 
 
 def test_draw_wip_projects_is_repo_directory_table(cy, capsys):
-    # PROJECTS is a REPO / DIRECTORY table (like WORKTREES, minus the extra columns).
+    # PROJECTS is a REPO / DIRECTORY table.
     sections = {
         "session": [],
         "worktree": [],
@@ -291,6 +291,10 @@ def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monke
     wt_by_topic = {it.payload["topic"]: it.payload for it in sections["worktree"]}
     assert set(wt_by_topic) == {"alpha", "beta"}
     assert wt_by_topic["alpha"]["running"] and not wt_by_topic["beta"]["running"]
+    # cols are (TOPIC, REPO, STATUS, COMMITS) — no DIRECTORY column; the dir is
+    # derived from repo + topic and was the table's one unbounded-width cell
+    beta = next(it for it in sections["worktree"] if it.payload["topic"] == "beta")
+    assert len(beta.cols) == 4 and beta.cols[:2] == ("beta", r.name)
     # the running session resolved its worktree + main repo for finish/rebase
     sess = sections["session"][0]
     assert sess.payload["worktree"] == wt_alpha
@@ -321,7 +325,7 @@ def test_worktree_rows_report_commits(cy, run_cli, repo):
 def test_draw_wip_renders_commits_column(cy, capsys):
     sections = {
         "session": [],
-        "worktree": [worktree_item(cy, cols=("repo", "old", "unmerged", "↓3 ↑1", "~/old"))],
+        "worktree": [worktree_item(cy, cols=("old", "repo", "unmerged", "↓3 ↑1"))],
         "project": [],
     }
     cy._draw_wip(sections, None, "")
@@ -454,7 +458,7 @@ def _tall_sections(cy, n=12):
             worktree_item(
                 cy,
                 key=f"worktree:repo:t{i:02}",
-                cols=(f"t{i:02}", "repo", "clean", "↓0 ↑0", "~/x"),
+                cols=(f"t{i:02}", "repo", "clean", "↓0 ↑0"),
             )
             for i in range(n)
         ],
@@ -512,7 +516,7 @@ def test_draw_wip_clips_wide_rows_to_terminal_width(cy, monkeypatch, capsys):
     monkeypatch.setattr(
         cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((40, 24))
     )
-    wide = worktree_item(cy, cols=("topic", "repo", "clean", "↓0 ↑0", "~/" + "deep/" * 30))
+    wide = worktree_item(cy, cols=("topic-" + "x" * 150, "repo", "clean", "↓0 ↑0"))
     sections = {"session": [], "worktree": [wide], "project": []}
     cy._draw_wip(sections, "worktree:repo:old", "")
     out = capsys.readouterr().out.replace("\x1b[H\x1b[2J", "")
@@ -1892,7 +1896,7 @@ def test_color_project_row_blue_repo_grey_dir_uniform(cy):
 
 
 def test_wip_items_project_cols_are_repo_and_dir(cy, repo, monkeypatch):
-    # A project row is (REPO basename, ~-relative DIRECTORY) — the WORKTREES format.
+    # A project row is (REPO basename, ~-relative DIRECTORY).
     r, home = repo
     proj = home / "myproj"
     proj.mkdir()
