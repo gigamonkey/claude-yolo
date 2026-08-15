@@ -1593,8 +1593,19 @@ gracefully outside one — there's just no repo slug to label/find by).
   config` edit reaches the *running* dashboard with no restart. (`quiet=True` keeps
   the provenance line and dangling-key warnings off the frame.) The `--_dashboard` loop only
   activates with a TTY + `$TMUX`; otherwise it degrades to `_ps_watch_passive`.
+  **Scrolling**: a page taller than the terminal scrolls with the selection
+  instead of overflowing — `_table_lines` builds each section as lines (flagging
+  the selected row's index) and `_draw_wip` draws only `body[top:top+view]` of
+  them between the pinned title and two-line footer, the diff-stat picker's
+  viewport scheme (stay put while the selection moves inside the view, follow it
+  past either edge; a `selected/total` cue in the header while overflowing; the
+  footer printed without a trailing newline so the last row can't scroll the
+  title off). The viewport top lives in `_wip_loop` — passed to `_draw_wip`,
+  which returns the adjusted value — since the renderer is called fresh each
+  frame; terminal height is re-read every frame, so a resize reshapes the next
+  draw.
   **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
-  data layer / `yolo list` / `ps` stay escape-free): `_draw_table` runs each row
+  data layer / `yolo list` / `ps` stay escape-free): `_table_lines` runs each row
   through a per-section `_color_*_row` that SGR-wraps every cell (`_fg`) — session
   SESSION/STATE by status group, worktree STATUS by `dirty`/`running`/`unmerged`,
   COMMITS with nonzero behind red / ahead green / zeros grey, projects with

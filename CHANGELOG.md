@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `wip` dashboard scrolls when the page outgrows the terminal.** With
+  enough sessions/worktrees/projects (e.g. multi-repo projects with several
+  worktrees) the page used to overflow, pushing the top off-screen; now only a
+  terminal-height viewport is drawn between the pinned header and footer, and
+  moving the selection (j/k/arrows) past either edge scrolls it. While the page
+  overflows, the header shows a `selected/total` position cue.
+
 - **The `wip` dashboard's `n` now asks before resuming an existing topic.**
   Typing a previously-used topic name (a live worktree, a surviving branch, or a
   finished topic's transcript) used to spawn `resume` immediately; it now

@@ -130,7 +130,10 @@ def run_loop(
     """
     monkeypatch.setattr(cy, "_wip_items", lambda home: sections)
     frames = []
-    monkeypatch.setattr(cy, "_draw_wip", lambda secs, sel, foot: frames.append((sel, foot)))
+    # The fake returns 0 — the viewport top _wip_loop carries into the next frame.
+    monkeypatch.setattr(
+        cy, "_draw_wip", lambda secs, sel, foot, top=0: frames.append((sel, foot)) or 0
+    )
     term = term or FakeTerm(keys, lines=lines, confirms=confirms, answers=answers)
     # home=None → per-worktree _worktree_config returns built-in defaults, so the
     # loop runs without touching real config. The loop ends either on `q` (only
@@ -441,6 +444,65 @@ def test_draw_wip_quit_hint_only_without_sessions(cy, capsys):
     busy = {"session": [session_item(cy)], "worktree": [], "project": []}
     cy._draw_wip(busy, "session:repo-topic", "")
     assert "q quit" not in capsys.readouterr().out
+
+
+def _tall_sections(cy, n=12):
+    """Sections whose body overflows a short terminal: n worktree rows t00..tNN."""
+    return {
+        "session": [],
+        "worktree": [
+            worktree_item(
+                cy,
+                key=f"worktree:repo:t{i:02}",
+                cols=(f"t{i:02}", "repo", "clean", "↓0 ↑0", "~/x"),
+            )
+            for i in range(n)
+        ],
+        "project": [],
+    }
+
+
+def test_draw_wip_scrolls_page_to_keep_selection_visible(cy, monkeypatch, capsys):
+    # 12 terminal rows - 4 chrome (title + blank, two footer lines) = 8-line
+    # viewport over a 21-line body (SESSIONS "(none)" block, 12 worktree rows +
+    # chrome, PROJECTS "(none)" block). Selecting the last row must scroll the
+    # page: the returned top jumps so the bar is on-screen, rows above the
+    # viewport are clipped, and the header gains a position cue.
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 12))
+    )
+    sections = _tall_sections(cy)
+    top = cy._draw_wip(sections, "worktree:repo:t11", "", 0)
+    out = capsys.readouterr().out
+    assert top > 0
+    assert "\x1b[7m" in out and "t11" in out  # the selected bar is visible
+    assert "t03" not in out  # scrolled off the top
+    assert "PROJECTS" not in out  # below the viewport
+    assert "12/12" in out  # position cue while the page overflows
+    # The footer stays pinned: last line, no trailing newline to scroll it away.
+    assert not out.endswith("\n")
+
+
+def test_draw_wip_viewport_holds_until_selection_crosses_edge(cy, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 12))
+    )
+    sections = _tall_sections(cy)
+    top = cy._draw_wip(sections, "worktree:repo:t11", "", 0)  # scrolled to the bottom
+    capsys.readouterr()
+    # Moving up inside the visible slice keeps the viewport put...
+    assert cy._draw_wip(sections, "worktree:repo:t06", "", top) == top
+    # ...and crossing the top edge drags it up just far enough.
+    assert cy._draw_wip(sections, "worktree:repo:t03", "", top) < top
+
+
+def test_draw_wip_short_page_has_no_position_cue(cy, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24))
+    )
+    sections = {"session": [session_item(cy)], "worktree": [], "project": []}
+    assert cy._draw_wip(sections, "session:repo-topic", "") == 0
+    assert "1/1" not in capsys.readouterr().out
 
 
 # --- loop: actions ----------------------------------------------------------

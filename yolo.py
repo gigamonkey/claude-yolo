@@ -7332,27 +7332,33 @@ def _color_project_row(it) -> tuple:
     return (_fg(repo, _BLUE), _fg(directory, _GREY))
 
 
-def _draw_table(title, title_code, headers, items, selected, colorize) -> None:
-    """Draw one dashboard section: a bold colored title, then its color-coded,
-    column-aligned table (or "(none)").
+def _table_lines(title, title_code, headers, items, selected, colorize) -> tuple:
+    """One dashboard section as rendered lines: a bold colored title, then its
+    color-coded, column-aligned table (or "(none)"), then a separating blank.
 
-    `colorize(item)` returns the row's color-wrapped cells; _format_table measures
-    *visible* width, so they still line up. The selected row is rendered as a plain
-    reverse-video bar (ANSI stripped, then reversed) — cleaner than tinting a row
-    that already carries per-cell colors, and it sidesteps grey-on-grey.
+    Returns `(lines, sel)`, where `sel` is the selected row's index within
+    `lines` (None when it isn't in this section) — `_draw_wip` needs it to keep
+    the selection inside the viewport. `colorize(item)` returns the row's
+    color-wrapped cells; _format_table measures *visible* width, so they still
+    line up. The selected row is rendered as a plain reverse-video bar (ANSI
+    stripped, then reversed) — cleaner than tinting a row that already carries
+    per-cell colors, and it sidesteps grey-on-grey.
     """
-    print(f"\x1b[1;{title_code}m{title}\x1b[0m")
+    lines = [f"\x1b[1;{title_code}m{title}\x1b[0m"]
+    sel = None
     if not items:
-        print("  (none)\n")
-        return
-    lines = _format_table(headers, [colorize(it) for it in items])
-    print(f"  \x1b[1m{lines[0]}\x1b[0m")
-    for it, line in zip(items, lines[1:], strict=True):
-        if it.key == selected:
-            print(f"> \x1b[7m{_SGR_RE.sub('', line)}\x1b[0m")
-        else:
-            print(f"  {line}")
-    print()
+        lines.append("  (none)")
+    else:
+        rows = _format_table(headers, [colorize(it) for it in items])
+        lines.append(f"  \x1b[1m{rows[0]}\x1b[0m")
+        for it, line in zip(items, rows[1:], strict=True):
+            if it.key == selected:
+                sel = len(lines)
+                lines.append(f"> \x1b[7m{_SGR_RE.sub('', line)}\x1b[0m")
+            else:
+                lines.append(f"  {line}")
+    lines.append("")
+    return lines, sel
 
 
 _WIP_HINTS = {
@@ -7363,7 +7369,7 @@ _WIP_HINTS = {
 }
 
 
-def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
+def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -> int:
     """One dashboard frame: the colored sections plus a status/help footer.
 
     The running sessions render as one SESSIONS table, ordered unknown → waiting →
@@ -7371,37 +7377,59 @@ def _draw_wip(sections: dict, selected: str | None, footer: str) -> None:
     the SESSION/STATE color (grey / green / cyan / yellow) is the group cue instead.
     Then the
     worktrees and projects, each column colored by _color_*_row.
+
+    A page taller than the terminal scrolls rather than overflowing: only
+    `body[top:top+view]` of the section lines is drawn between the pinned
+    header and footer, with the viewport staying put while the selection moves
+    inside it and following it past either edge — the diff-stat picker's
+    scheme, except the viewport top lives in `_wip_loop` (passed in, adjusted
+    top returned) because this renderer is called once per frame. While the
+    page overflows, the header carries a `selected/total` position cue.
+    Terminal height is re-read every frame, so a resize just reshapes the next
+    draw.
     """
+    body: list = []
+    sel_line = None
+    for title, code, headers, kind_key, colorize in (
+        ("SESSIONS", _CYAN, WIP_SESSION_HEADERS, "session", _color_session_row),
+        ("WORKTREES", _GREEN, WIP_WORKTREE_HEADERS, "worktree", _color_worktree_row),
+        ("PROJECTS", _MAGENTA, WIP_PROJECT_HEADERS, "project", _color_project_row),
+    ):
+        lines, sel = _table_lines(title, code, headers, sections[kind_key], selected, colorize)
+        if sel is not None:
+            sel_line = len(body) + sel
+        body.extend(lines)
+    rows = shutil.get_terminal_size((80, 24)).lines
+    view = max(1, rows - 4)  # minus title + blank above, the two footer lines below
+    top = max(0, min(top, len(body) - view))
+    if sel_line is not None:
+        top = min(top, sel_line)
+        if sel_line >= top + view:
+            top = sel_line - view + 1
+    nav_keys = [it.key for it in _wip_nav(sections)]
+    pos = ""
+    if len(body) > view and selected in nav_keys:
+        pos = f" · {nav_keys.index(selected) + 1}/{len(nav_keys)}"
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
-    print("\x1b[1;35myolo wip\x1b[0m \x1b[90m— dashboard\x1b[0m\n")
-    _draw_table(
-        "SESSIONS", _CYAN, WIP_SESSION_HEADERS, sections["session"], selected, _color_session_row
-    )
-    _draw_table(
-        "WORKTREES",
-        _GREEN,
-        WIP_WORKTREE_HEADERS,
-        sections["worktree"],
-        selected,
-        _color_worktree_row,
-    )
-    _draw_table(
-        "PROJECTS",
-        _MAGENTA,
-        WIP_PROJECT_HEADERS,
-        sections["project"],
-        selected,
-        _color_project_row,
-    )
+    print(f"\x1b[1;35myolo wip\x1b[0m \x1b[90m— dashboard{pos}\x1b[0m\n")
+    for line in body[top : top + view]:
+        print(line)
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")
     # q only works (and is only advertised) once no sessions are running — see
     # the quit guard in _wip_loop.
     quit_hint = "" if sections["session"] else " · q quit"
     print(f"\x1b[90mupdated {now} · a add-project · B rebuild-image · j/k move{quit_hint}\x1b[0m")
+    # No trailing newline: on a full page the footer sits on the terminal's last
+    # row, and a newline there would scroll the pinned title off the top.
     print(
-        f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m" if not footer else f"\x1b[1;33m{footer}\x1b[0m"
+        f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m"
+        if not footer
+        else f"\x1b[1;33m{footer}\x1b[0m",
+        end="",
+        flush=True,
     )
+    return top
 
 
 def _wip_nav(sections: dict) -> list:
@@ -7514,12 +7542,13 @@ def _wip_loop(home, session, term) -> None:
     nav = _wip_nav(sections)
     selected = nav[0].key if nav else None
     footer = ""
+    top = 0  # viewport top for _draw_wip; carried so the view only moves at the edges
     deadline = time.monotonic() + PS_WATCH_INTERVAL
     while True:
         keys = [it.key for it in nav]
         if selected not in keys:
             selected = keys[0] if keys else None
-        _draw_wip(sections, selected, footer)
+        top = _draw_wip(sections, selected, footer, top)
         key = term.wait_key(max(0.0, deadline - time.monotonic()))
         if key is None:  # refresh deadline, no keypress
             sections = _wip_items(home)
