@@ -1602,8 +1602,12 @@ gracefully outside one — there's just no repo slug to label/find by).
   footer printed without a trailing newline so the last row can't scroll the
   title off). The viewport top lives in `_wip_loop` — passed to `_draw_wip`,
   which returns the adjusted value — since the renderer is called fresh each
-  frame; terminal height is re-read every frame, so a resize reshapes the next
-  draw.
+  frame; terminal size is re-read every frame, so a resize reshapes the next
+  draw. Every drawn line is also clipped to the terminal width (`_clip_line` —
+  SGR-aware: escapes are zero-width and pass through, a truncated line gets a
+  trailing reset so a cut selected-row bar can't bleed reverse-video), because
+  the viewport accounts in logical lines: an over-wide row that *wrapped*
+  would eat extra physical rows and push the pinned title/footer off anyway.
   **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
   data layer / `yolo list` / `ps` stay escape-free): `_table_lines` runs each row
   through a per-section `_color_*_row` that SGR-wraps every cell (`_fg`) — session

@@ -10,7 +10,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   worktrees) the page used to overflow, pushing the top off-screen; now only a
   terminal-height viewport is drawn between the pinned header and footer, and
   moving the selection (j/k/arrows) past either edge scrolls it. While the page
-  overflows, the header shows a `selected/total` position cue.
+  overflows, the header shows a `selected/total` position cue. Rows (and the
+  footer hints) wider than the terminal are clipped rather than wrapped, so an
+  over-long directory path can't eat extra screen rows and push the page off
+  either.
 
 - **The `wip` dashboard's `n` now asks before resuming an existing topic.**
   Typing a previously-used topic name (a live worktree, a surviving branch, or a

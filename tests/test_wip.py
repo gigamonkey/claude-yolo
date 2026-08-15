@@ -496,6 +496,32 @@ def test_draw_wip_viewport_holds_until_selection_crosses_edge(cy, monkeypatch, c
     assert cy._draw_wip(sections, "worktree:repo:t03", "", top) < top
 
 
+def test_clip_line_cuts_visible_columns_keeping_escapes(cy):
+    assert cy._clip_line("short", 10) == "short"  # already fits → untouched
+    clipped = cy._clip_line("\x1b[7mabcdef\x1b[0m", 4)
+    assert cy._visible_len(clipped) == 4
+    assert "abcd" in clipped and "abcde" not in clipped
+    # the reverse-video escape survives the cut, and the line still ends reset
+    assert clipped.startswith("\x1b[7m") and clipped.endswith("\x1b[0m")
+
+
+def test_draw_wip_clips_wide_rows_to_terminal_width(cy, monkeypatch, capsys):
+    # A row (or footer hint) wider than the terminal is clipped, not wrapped —
+    # a wrapped line eats extra physical rows and breaks the viewport's
+    # line-count accounting, scrolling the pinned title/footer off-screen.
+    monkeypatch.setattr(
+        cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((40, 24))
+    )
+    wide = worktree_item(cy, cols=("topic", "repo", "clean", "↓0 ↑0", "~/" + "deep/" * 30))
+    sections = {"session": [], "worktree": [wide], "project": []}
+    cy._draw_wip(sections, "worktree:repo:old", "")
+    out = capsys.readouterr().out.replace("\x1b[H\x1b[2J", "")
+    assert all(cy._visible_len(line) <= 40 for line in out.split("\n"))
+    # the clipped selected bar still turns reverse-video off at its end
+    bar = next(line for line in out.split("\n") if line.startswith("> "))
+    assert bar.endswith("\x1b[0m")
+
+
 def test_draw_wip_short_page_has_no_position_cue(cy, monkeypatch, capsys):
     monkeypatch.setattr(
         cy.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24))

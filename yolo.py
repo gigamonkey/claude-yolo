@@ -6088,6 +6088,29 @@ def _visible_len(s: str) -> int:
     return len(_SGR_RE.sub("", s))
 
 
+def _clip_line(line: str, width: int) -> str:
+    """`line` cut to at most `width` *visible* columns, SGR escapes intact.
+
+    The wip dashboard's viewport accounts in lines, so a row wider than the
+    terminal must be clipped, not wrapped — a wrapped row eats extra physical
+    rows and pushes the pinned title/footer off-screen. Escapes are zero-width
+    and all pass through, even ones past the cut, and a clipped line gets a
+    trailing reset — its own may have been cut away, and without one a clipped
+    selected-row bar would bleed reverse-video across the rest of the frame.
+    """
+    if _visible_len(line) <= width:
+        return line
+    out, cols, pos = [], 0, 0
+    for m in _SGR_RE.finditer(line):
+        seg = line[pos : m.start()]
+        out.append(seg[: width - cols])
+        cols = min(width, cols + len(seg))
+        out.append(m.group())
+        pos = m.end()
+    out.append(line[pos:][: width - cols])
+    return "".join(out) + "\x1b[0m"
+
+
 def _format_table(headers: tuple, rows: list) -> list[str]:
     """Rows as column-aligned table lines (no trailing whitespace).
 
@@ -7385,8 +7408,10 @@ def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -
     scheme, except the viewport top lives in `_wip_loop` (passed in, adjusted
     top returned) because this renderer is called once per frame. While the
     page overflows, the header carries a `selected/total` position cue.
-    Terminal height is re-read every frame, so a resize just reshapes the next
-    draw.
+    Terminal size is re-read every frame, so a resize just reshapes the next
+    draw. Every drawn line is clipped to the terminal width (`_clip_line`), so
+    an over-wide row can't wrap into extra physical rows and break the
+    viewport's line accounting.
     """
     body: list = []
     sel_line = None
@@ -7399,8 +7424,8 @@ def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -
         if sel is not None:
             sel_line = len(body) + sel
         body.extend(lines)
-    rows = shutil.get_terminal_size((80, 24)).lines
-    view = max(1, rows - 4)  # minus title + blank above, the two footer lines below
+    size = shutil.get_terminal_size((80, 24))
+    view = max(1, size.lines - 4)  # minus title + blank above, the two footer lines below
     top = max(0, min(top, len(body) - view))
     if sel_line is not None:
         top = min(top, sel_line)
@@ -7411,24 +7436,23 @@ def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -
     if len(body) > view and selected in nav_keys:
         pos = f" · {nav_keys.index(selected) + 1}/{len(nav_keys)}"
     print("\x1b[H\x1b[2J", end="")  # clear screen, cursor home
-    print(f"\x1b[1;35myolo wip\x1b[0m \x1b[90m— dashboard{pos}\x1b[0m\n")
+    print(_clip_line(f"\x1b[1;35myolo wip\x1b[0m \x1b[90m— dashboard{pos}\x1b[0m", size.columns))
+    print()
     for line in body[top : top + view]:
-        print(line)
+        print(_clip_line(line, size.columns))
     kind = next((it.kind for sec in sections.values() for it in sec if it.key == selected), None)
     now = datetime.datetime.now().strftime("%H:%M:%S")
     # q only works (and is only advertised) once no sessions are running — see
     # the quit guard in _wip_loop.
     quit_hint = "" if sections["session"] else " · q quit"
-    print(f"\x1b[90mupdated {now} · a add-project · B rebuild-image · j/k move{quit_hint}\x1b[0m")
+    status = f"\x1b[90mupdated {now} · a add-project · B rebuild-image · j/k move{quit_hint}\x1b[0m"
+    print(_clip_line(status, size.columns))
     # No trailing newline: on a full page the footer sits on the terminal's last
     # row, and a newline there would scroll the pinned title off the top.
-    print(
-        f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m"
-        if not footer
-        else f"\x1b[1;33m{footer}\x1b[0m",
-        end="",
-        flush=True,
+    hints = (
+        f"\x1b[90m{_WIP_HINTS.get(kind, '')}\x1b[0m" if not footer else f"\x1b[1;33m{footer}\x1b[0m"
     )
+    print(_clip_line(hints, size.columns), end="", flush=True)
     return top
 
 
