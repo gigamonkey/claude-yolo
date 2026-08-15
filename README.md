@@ -490,7 +490,7 @@ Details:
   instead of number: `yolo browse --port api`, or type the label at the `wip`
   dashboard's port prompt (which lists each port as `web (8000)`). Labels are
   always optional — the container port number keeps working as a selector —
-  and show up in the `ps`/`wip` PORTS column as `web:55001->8000`.
+  and show up in the `ps` PORTS column as `web:55001->8000`.
 - If you run only one session at a time and want a stable, bookmarkable port,
   pin the host side: `--port 8000:8000` (`HOST:CONTAINER`). A second
   concurrent session then fails at launch with address-in-use, as it must.
@@ -605,7 +605,9 @@ in three sections:
   row for opening a session in any other directory (see `Enter` below).
 
 Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
-the selected row:
+the selected row. A page taller than the terminal scrolls with the selection
+(with a `selected/total` cue in the header), so a long worktree list never
+pushes the tables off-screen:
 
 | Key     | On…                              | Does |
 |---------|----------------------------------|------|

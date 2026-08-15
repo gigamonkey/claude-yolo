@@ -3,22 +3,22 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
-
-- **The `wip` dashboard's WORKTREES table dropped its DIRECTORY column.** The
-  worktree directory is derived from the repo and the topic, and it was the one
-  cell of unbounded width — the main source of over-long rows. `yolo list`
-  still shows it.
+## v0.32.0 — 2026-08-15
 
 - **The `wip` dashboard scrolls when the page outgrows the terminal.** With
   enough sessions/worktrees/projects (e.g. multi-repo projects with several
   worktrees) the page used to overflow, pushing the top off-screen; now only a
   terminal-height viewport is drawn between the pinned header and footer, and
   moving the selection (j/k/arrows) past either edge scrolls it. While the page
-  overflows, the header shows a `selected/total` position cue. Rows (and the
-  footer hints) wider than the terminal are clipped rather than wrapped, so an
-  over-long directory path can't eat extra screen rows and push the page off
-  either.
+  overflows, the header shows a `selected/total` position cue. Lines wider
+  than the terminal (a long topic name, the footer hints on a narrow pane) are
+  clipped rather than wrapped, so they can't eat extra screen rows and push
+  the page off either.
+
+- **The `wip` dashboard's WORKTREES table dropped its DIRECTORY column.** The
+  worktree directory is derived from the repo and the topic, and it was the one
+  cell of unbounded width — the main source of over-long rows. `yolo list`
+  still shows it.
 
 - **The `wip` dashboard's `n` now asks before resuming an existing topic.**
   Typing a previously-used topic name (a live worktree, a surviving branch, or a
