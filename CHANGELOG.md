@@ -3,6 +3,15 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **The `wip` dashboard's discard key split in two: `x` keeps the branch, `X`
+  deletes it too.** Lowercase `x` on a worktree row now removes just the
+  worktree (uncommitted changes included) and leaves the branch for later;
+  uppercase `X` is the old behavior — worktree *and* branch, unmerged commits
+  and all. Both always confirm, and on a multi-repo topic both take the whole
+  repo set.
+
 ## v0.32.0 — 2026-08-15
 
 - **The `wip` dashboard scrolls when the page outgrows the terminal.** With

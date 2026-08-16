@@ -1137,9 +1137,11 @@ def test_finish_waiting_session_allowed(cy, monkeypatch):
     assert calls == ["topic"]  # the idle session's worktree gets finished
 
 
-def test_discard_worktree_confirms_then_calls_core(cy, monkeypatch):
-    # `x` always confirms — even a fully-merged topic (no _finish_all_merged
-    # skip) — then runs the finish core with force=True and action="discard".
+@pytest.mark.parametrize(("key", "action"), [("x", "keep"), ("X", "discard")])
+def test_discard_worktree_confirms_then_calls_core(cy, monkeypatch, key, action):
+    # `x`/`X` always confirm — even a fully-merged topic (no _finish_all_merged
+    # skip) — then run the finish core with force=True; `x` keeps the branch
+    # (action="keep"), `X` deletes it too (action="discard").
     monkeypatch.setattr(cy, "_finish_all_merged", lambda *a: True)
     calls = []
     monkeypatch.setattr(
@@ -1148,18 +1150,19 @@ def test_discard_worktree_confirms_then_calls_core(cy, monkeypatch):
         lambda wt, mr, slug, topic, home, base, **k: calls.append((topic, k)) or "gone",
     )
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["x", "q"], confirms=[True])
+    frames = run_loop(cy, monkeypatch, sections, [key, "q"], confirms=[True])
     assert calls and calls[0][0] == "old"
     assert calls[0][1]["force"] is True
-    assert calls[0][1]["action"] == "discard"
+    assert calls[0][1]["action"] == action
     assert frames[-1][1] == "gone"
 
 
-def test_discard_declined_is_noop(cy, monkeypatch):
+@pytest.mark.parametrize("key", ["x", "X"])
+def test_discard_declined_is_noop(cy, monkeypatch, key):
     calls = []
     monkeypatch.setattr(cy, "finish_worktree", lambda *a, **k: calls.append(1) or "x")
     sections = {"session": [], "worktree": [worktree_item(cy)], "project": []}
-    frames = run_loop(cy, monkeypatch, sections, ["x", "q"], confirms=[False])
+    frames = run_loop(cy, monkeypatch, sections, [key, "q"], confirms=[False])
     assert calls == []
     assert frames[-1][1] == "cancelled."
 
@@ -1176,8 +1179,8 @@ def test_discard_on_session_row_is_noop(cy, monkeypatch):
 
 
 def test_discard_deletes_dirty_worktree_and_unmerged_branch(cy, run_cli, repo):
-    # The real thing end-to-end: a topic with an unmerged commit *and* an
-    # uncommitted file — everything `f` would refuse or preserve — is removed
+    # The real thing end-to-end for `X`: a topic with an unmerged commit *and*
+    # an uncommitted file — everything `f` would refuse or preserve — is removed
     # wholesale, branch included, and its overlay entry goes with it.
     r, home = repo
     run_cli(["start", "topic"], home=home, cwd=r)
@@ -1188,11 +1191,34 @@ def test_discard_deletes_dirty_worktree_and_unmerged_branch(cy, run_cli, repo):
     (wt / "dirty.txt").write_text("uncommitted\n")
     slug = cy._repo_root_of(r)[2]
     payload = {"worktree": wt, "main_root": r, "slug": slug, "topic": "topic"}
-    msg = cy._wip_discard("worktree", payload, home, FakeTerm([], confirms=[True]))
+    msg = cy._wip_discard(
+        "worktree", payload, home, FakeTerm([], confirms=[True]), delete_branch=True
+    )
     assert "Removed worktree" in msg and "Deleted branch 'topic'" in msg
     assert not wt.exists()
     branches = git(r, "branch", "--list", "topic").stdout.strip()
     assert branches == ""
+
+
+def test_discard_lowercase_keeps_branch(cy, run_cli, repo):
+    # `x` end-to-end: the dirty worktree goes (uncommitted file lost), but the
+    # branch — unmerged commit and all — survives.
+    r, home = repo
+    run_cli(["start", "topic"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    (wt / "work.txt").write_text("committed\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "work")
+    (wt / "dirty.txt").write_text("uncommitted\n")
+    slug = cy._repo_root_of(r)[2]
+    payload = {"worktree": wt, "main_root": r, "slug": slug, "topic": "topic"}
+    msg = cy._wip_discard(
+        "worktree", payload, home, FakeTerm([], confirms=[True]), delete_branch=False
+    )
+    assert "Removed worktree" in msg and "kept" in msg
+    assert not wt.exists()
+    branches = git(r, "branch", "--list", "topic").stdout.strip()
+    assert branches == "topic"
 
 
 def test_rebase_worktree_calls_core(cy, monkeypatch):

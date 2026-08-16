@@ -5384,7 +5384,9 @@ def finish_worktree(
 
     Besides the `--finish-action` choices (see `do_finish`), `action` accepts the
     internal `discard` — delete the branch unconditionally (`-D`) — used only by
-    the dashboard's `x` key (with `force=True`), behind its always-on confirm.
+    the dashboard's `X` key (with `force=True`), behind its always-on confirm.
+    (The dashboard's lowercase `x` is `keep` with `force=True`: the worktree
+    goes, the branch stays.)
     """
     if not worktree.is_dir():
         raise YoloError(f"no worktree '{topic}'; nothing to finish.")
@@ -5471,7 +5473,7 @@ def _finish_branch(
     if action == "keep":
         return f"{prefix} Branch '{topic}' kept ({_branch_status_note(topic, root)})."
     if action == "discard":
-        # The dashboard's `x`: the branch goes unconditionally, merged or not
+        # The dashboard's `X`: the branch goes unconditionally, merged or not
         # (-D). The always-on confirm upstream is the only guard, so a failure
         # here (e.g. the branch was deleted by hand) is reported, not raised.
         r = subprocess.run(
@@ -7387,7 +7389,7 @@ def _table_lines(title, title_code, headers, items, selected, colorize) -> tuple
 
 _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
-    "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle) · x discard",
+    "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle) · x discard · X discard+branch",
     "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
@@ -7658,7 +7660,9 @@ def _wip_action(key, item, home, session, term) -> str:
         if key == "f":
             return _wip_finish(kind, p, home, term)
         if key == "x":
-            return _wip_discard(kind, p, home, term)
+            return _wip_discard(kind, p, home, term, delete_branch=False)
+        if key == "X":
+            return _wip_discard(kind, p, home, term, delete_branch=True)
         if key == "r":
             return _wip_rebase(kind, p, home, term)
         if key == "m":
@@ -8024,17 +8028,17 @@ def _wip_finish(kind, p, home, term) -> str:
     return "finish applies to worktrees and idle sessions."
 
 
-def _wip_discard(kind, p, home, term) -> str:
-    """`x`: discard a worktree — delete it *and* its branch, work and all.
+def _wip_discard(kind, p, home, term, *, delete_branch) -> str:
+    """`x`/`X`: discard a worktree — `x` keeps the branch, `X` deletes it too.
 
     The destructive sibling of `f`: no merged-ness check, and `force=True` waves
     off the guards finish would apply (a running session is stopped through, a
-    dirty tree is removed anyway, the branch is deleted unmerged). So unlike
-    `f`, the confirm is **never** skipped — it's the only thing between a
-    keypress and losing un-integrated work. Routes an extra repo's row to the
-    topic's primary and discards the whole repo set, exactly as `f` does (and
-    for the same reason — discarding one repo of the set would half-dismantle
-    the topic).
+    dirty tree is removed anyway, and under `X` the branch is deleted unmerged).
+    So unlike `f`, the confirm is **never** skipped — it's the only thing
+    between a keypress and losing work: uncommitted changes under `x`, the
+    whole branch under `X`. Routes an extra repo's row to the topic's primary
+    and discards the whole repo set, exactly as `f` does (and for the same
+    reason — discarding one repo of the set would half-dismantle the topic).
     """
     if kind != "worktree":
         return "discard applies to worktrees."
@@ -8047,18 +8051,25 @@ def _wip_discard(kind, p, home, term) -> str:
         main_root, worktree = primary
         slug = pathlib.Path(worktree).parent.name
         multi = True
+    scope = "a multi-repo topic: delete every repo's worktree" if multi else "delete its worktree"
     prompt = (
-        f"Discard '{p['topic']}' — a multi-repo topic: delete every repo's worktree "
-        "AND branch, unmerged commits and uncommitted changes included?"
-        if multi
-        else f"Discard '{p['topic']}' — delete its worktree AND branch, "
+        f"Discard '{p['topic']}' — {scope} AND branch, "
         "unmerged commits and uncommitted changes included?"
+        if delete_branch
+        else f"Discard '{p['topic']}' — {scope}, uncommitted changes included (the branch is kept)?"
     )
     if not term.confirm(prompt):
         return "cancelled."
     base, _, _, _ = _worktree_config(home, main_root, worktree)
     return finish_worktree(
-        worktree, main_root, slug, p["topic"], home, base, force=True, action="discard"
+        worktree,
+        main_root,
+        slug,
+        p["topic"],
+        home,
+        base,
+        force=True,
+        action="discard" if delete_branch else "keep",
     )
 
 
