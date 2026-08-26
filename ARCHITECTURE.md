@@ -1444,10 +1444,25 @@ gracefully outside one — there's just no repo slug to label/find by).
   `~/.claude-yolo/recent-projects.json`, so a project shows up here even with no
   config entry; recent-only keys are dropped when their dir no longer exists,
   registered keys always shown — `registered` is still carried (the `a` key
-  registers a recent one) but no longer surfaced as a marker). Rendered as a
+  registers a recent one) but no longer surfaced as a marker). Each row also
+  gets a `hidden` flag — the **recently-used filter**: a row with no running
+  session (`active`), no worktree of its repo among the current worktree rows
+  (matched by resolved `main_root`), and no `last_opened` stamp within
+  `WIP_RECENT_DAYS` (14; `_opened_recently`, lenient like the registry) is
+  dropped from the default view. Whenever any rows are hidden `_wip_items`
+  appends an `allprojects` toggle row (`… N more` / `… show fewer`, stable key
+  `allprojects:toggle`) ahead of the trailing `+` row; Enter on it flips
+  `_wip_loop`'s `all_projects` flag — view state like the viewport top, handled
+  in the loop rather than `_wip_action`. `register_project` stamps the registry
+  too — registering counts as use — so a fresh entry isn't born hidden. (A
+  project whose `dir` is a *subdirectory* of its repo is stamped under the repo
+  root and so reads as unstamped — the same exact-resolved-path rule the
+  recent-list dedup uses; it stays visible via its worktrees/sessions or the
+  toggle.) Rendered as a
   **REPO / DIRECTORY** table (the repo basename + the `~`-relative path), every
-  row colored the same — the registered-vs-recent and active distinctions are
-  not shown. This registry is kept **separate from `projects.json`
+  visible row colored the same — the registered-vs-recent and active
+  distinctions are not shown; hidden rows, when revealed by the toggle, are
+  grey. This registry is kept **separate from `projects.json`
   on purpose**: `projects.json` stays a deliberate, config-only ledger (`yolo
   config` is its only writer), so the dangling-key warning and `require-project-entry`
   keep the meaning that auto-stamping it would dilute. The loop (`_wip_loop`, under

@@ -601,7 +601,12 @@ in three sections:
 - **Projects** — a PROJECT / DIRECTORY table (multi-repo projects show a
   `+N repos` tag) of the projects registered in
   `projects.json` *plus* any you've simply opened (yolo remembers those), so a
-  project shows up here without a `yolo config` step. The section ends with a `+`
+  project shows up here without a `yolo config` step. By default only
+  **recently-used** projects are listed — ones with a running session, an open
+  worktree, or opened in the last 14 days; the rest collapse behind a
+  `… N more` row (Enter reveals them, greyed, and hides them again).
+  Registering a project counts as use, so a fresh entry always shows. The
+  section ends with a `+`
   row for opening a session in any other directory (see `Enter` below).
 
 Navigate with `j`/`k` or the arrow keys; the footer shows the keys that apply to
@@ -615,6 +620,7 @@ pushes the tables off-screen:
 | `Enter` | a worktree                       | switch to its live session window if it's running, else resume it in a new window |
 | `Enter` | a project                        | switch to its live session window if running, else open a session there (resuming, or fresh if there's nothing to continue) |
 | `Enter` | the `+` row                      | prompt for a directory and start a session there — Tab completes the path (fills the common prefix, lists matches), `~` works like a shell |
+| `Enter` | the `… N more` row               | reveal the projects that aren't recently used (drawn grey); Enter again hides them |
 | `N`     | a worktree or project            | start a **fresh** session here (not a resume of the latest) — `start` for a project, `resume TOPIC --new` for a worktree; refuses if one is already running (Enter switches to it) |
 | `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent; on a project with **finished topics** (removed worktrees whose transcripts survive) it first offers those — picking one revives the topic, old session included |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there — a previously-used topic (live worktree, surviving branch, or finished topic's transcript) prompts, showing when the topic was last active: `y` resumes it, `n` starts a fresh session in the topic's worktree, Esc cancels |

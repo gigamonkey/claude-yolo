@@ -8,6 +8,7 @@ itself is covered in test_tmux (the `wip --_dashboard` command).
 """
 
 import contextlib
+import datetime
 import json
 import os
 import pathlib
@@ -115,6 +116,7 @@ def project_item(cy, **over):
             "name": over.pop("name", None),
             "path": over.pop("path", "/p"),
             "registered": over.pop("registered", True),
+            "hidden": over.pop("hidden", False),
             "window": over.pop("window", None),
         },
     )
@@ -127,8 +129,14 @@ def run_loop(
 
     Each frame is (selected_key, footer) as _draw_wip would have rendered it.
     Pass a prebuilt `term` to inspect it afterwards (e.g. confirm_prompts).
+    `sections` may be a callable taking the loop's all_projects flag, for tests
+    of the "… N more" toggle.
     """
-    monkeypatch.setattr(cy, "_wip_items", lambda home: sections)
+    monkeypatch.setattr(
+        cy,
+        "_wip_items",
+        lambda home, all_projects=False: sections(all_projects) if callable(sections) else sections,
+    )
     frames = []
     # The fake returns 0 — the viewport top _wip_loop carries into the next frame.
     monkeypatch.setattr(
@@ -351,6 +359,8 @@ def test_wip_projects_flags_active(cy, tmp_path):
     by_path = {str(p["path"]): p["active"] for p in projects}
     assert by_path == {"/work/a": True, "/work/b": False}
     assert all(p["registered"] for p in projects)
+    # active also keeps a row visible; the unstamped, worktree-less one hides
+    assert {str(p["path"]): p["hidden"] for p in projects} == {"/work/a": False, "/work/b": True}
 
 
 def _sess(cy, name, cwd):
@@ -400,6 +410,105 @@ def test_wip_projects_unions_recent_registry(cy, tmp_path):
     assert by_path == {str(tmp_path / "reg"): True, str(seen): False}  # gone/dup dropped
 
 
+# --- projects: the recently-used filter --------------------------------------
+
+
+def _stamp_days_ago(cy, days):
+    then = datetime.datetime.now().astimezone() - datetime.timedelta(days=days)
+    return then.isoformat(timespec="seconds")
+
+
+def test_opened_recently_cutoff_and_leniency(cy):
+    assert cy._opened_recently(_stamp_days_ago(cy, 1))
+    assert not cy._opened_recently(_stamp_days_ago(cy, cy.WIP_RECENT_DAYS + 1))
+    assert not cy._opened_recently("")  # never stamped
+    assert not cy._opened_recently("not-a-date")  # lenient like its registry
+
+
+def test_wip_projects_hidden_unless_active_worktree_or_recent(cy, tmp_path):
+    # A registered project hides unless a session runs there, a worktree of its
+    # repo exists, or its recent-projects stamp is within WIP_RECENT_DAYS.
+    home = tmp_path / "home"
+    (home / ".claude-yolo").mkdir(parents=True)
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({n: {"dir": f"/work/{n}"} for n in ("active", "recent", "stale", "wt")})
+    )
+    (home / ".claude-yolo" / "recent-projects.json").write_text(
+        json.dumps(
+            {
+                "/work/recent": {"last_opened": _stamp_days_ago(cy, 1)},
+                "/work/stale": {"last_opened": _stamp_days_ago(cy, cy.WIP_RECENT_DAYS + 1)},
+            }
+        )
+    )
+    sessions = [cy.WipSession("c", "n", "", "/work/active/sub", "", "1m", "waiting", 1)]
+    projects = cy._wip_projects(home, sessions, worktree_roots={pathlib.Path("/work/wt")})
+    hidden = {p["name"]: p["hidden"] for p in projects}
+    assert hidden == {"active": False, "recent": False, "stale": True, "wt": False}
+
+
+def test_wip_projects_recent_only_rows_age_out(cy, tmp_path):
+    # Unregistered recent dirs obey the same cutoff: old one-off dirs hide too.
+    home = tmp_path / "home"
+    (home / ".claude-yolo").mkdir(parents=True)
+    seen = tmp_path / "seen"
+    seen.mkdir()
+    (home / ".claude-yolo" / "recent-projects.json").write_text(
+        json.dumps({str(seen): {"last_opened": _stamp_days_ago(cy, cy.WIP_RECENT_DAYS + 1)}})
+    )
+    (row,) = cy._wip_projects(home, [])
+    assert row["registered"] is False and row["hidden"] is True
+
+
+def test_wip_items_collapses_hidden_projects_behind_toggle(cy, repo, monkeypatch):
+    # Default view: hidden projects are dropped and a "… N more" row precedes the
+    # `+` row; all_projects reveals them (flagged hidden) and relabels the toggle.
+    r, home = repo
+    (home / ".claude-yolo").mkdir(exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(
+        json.dumps({"used": {"dir": str(r)}, "dusty": {"dir": "/work/dusty"}})
+    )
+    cy._record_recent_project(home, str(r))
+    monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    monkeypatch.setattr(cy, "_worktree_rows", lambda *a, **k: [])
+    items = cy._wip_items(home)["project"]
+    assert [it.kind for it in items] == ["project", "allprojects", "newsession"]
+    assert items[0].payload["name"] == "used" and items[0].payload["hidden"] is False
+    assert items[1].cols == ("… 1 more", "") and items[1].key == "allprojects:toggle"
+    everything = cy._wip_items(home, all_projects=True)["project"]
+    assert [it.kind for it in everything] == ["project", "project", "allprojects", "newsession"]
+    dusty = next(it for it in everything if it.payload.get("name") == "dusty")
+    assert dusty.payload["hidden"] is True
+    assert everything[-2].cols == ("… show fewer", "")  # same key → selection is stable
+
+
+def test_wip_items_no_toggle_when_nothing_hidden(cy, repo, monkeypatch):
+    r, home = repo
+    (home / ".claude-yolo").mkdir(exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({"used": {"dir": str(r)}}))
+    cy._record_recent_project(home, str(r))
+    monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    monkeypatch.setattr(cy, "_worktree_rows", lambda *a, **k: [])
+    assert [it.kind for it in cy._wip_items(home)["project"]] == ["project", "newsession"]
+
+
+def test_wip_items_worktree_keeps_project_visible(cy, run_cli, repo, monkeypatch):
+    # A project with an open worktree shows however stale its stamp — no stamp at
+    # all here — because outstanding work is what the dashboard is for.
+    r, home = repo
+    run_cli(["start", "topic", "--no-tmux"], home=home, cwd=r)
+    (home / ".claude-yolo").mkdir(exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({"proj": {"dir": str(r)}}))
+    # drop the stamp the launch just wrote — visibility must come from the worktree
+    (home / ".claude-yolo" / "recent-projects.json").write_text("{}")
+    monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    items = cy._wip_items(home)["project"]
+    assert [it.payload.get("name") for it in items if it.kind == "project"] == ["proj"]
+
+
 # --- loop: navigation + refresh ---------------------------------------------
 
 
@@ -415,6 +524,34 @@ def test_loop_navigation_moves_across_sections(cy, monkeypatch):
         "worktree:repo:old",
         "project:/p",
     ]
+
+
+def test_loop_enter_on_toggle_flips_all_projects(cy, monkeypatch):
+    # Enter on the "… N more" row is view state handled in the loop: it re-fetches
+    # with all_projects flipped (no _wip_action, so no footer) and, the toggle row's
+    # key being stable, keeps it selected. A second Enter collapses again.
+    calls = []
+
+    def sections(all_projects):
+        calls.append(all_projects)
+        rows = [project_item(cy, key="project:used", cols=("used", "~/used"))]
+        if all_projects:
+            rows.append(
+                project_item(cy, key="project:dusty", cols=("dusty", "~/dusty"), hidden=True)
+            )
+        label = "… show fewer" if all_projects else "… 1 more"
+        rows.append(cy.WipItem("allprojects", "allprojects:toggle", (label, ""), {}))
+        return {"session": [], "worktree": [], "project": rows}
+
+    frames = run_loop(cy, monkeypatch, sections, ["down", "\r", "\r"])
+    assert calls == [False, True, False]
+    assert [sel for sel, _ in frames] == [
+        "project:used",
+        "allprojects:toggle",
+        "allprojects:toggle",
+        "allprojects:toggle",
+    ]
+    assert all(footer == "" for _, footer in frames)
 
 
 def test_loop_refresh_preserves_selection_by_key(cy, monkeypatch):
@@ -1913,12 +2050,17 @@ def test_wip_items_appends_new_session_row(cy, repo, monkeypatch):
 
 
 def test_color_project_row_blue_repo_grey_dir_uniform(cy):
-    # Every project row is colored the same — REPO blue, DIRECTORY grey (no
-    # active/recent distinction); registered vs recent look identical.
+    # Visible project rows are colored the same — REPO blue, DIRECTORY grey —
+    # registered vs recent look identical. A hidden row (only drawn when the
+    # "… N more" toggle reveals it) goes all grey, and so does the toggle itself.
     reg = cy._color_project_row(project_item(cy, cols=("r", "~/r"), registered=True))
     rec = cy._color_project_row(project_item(cy, cols=("r", "~/r"), registered=False))
     assert reg == rec
     assert reg == (f"\x1b[{cy._BLUE}mr\x1b[0m", f"\x1b[{cy._GREY}m~/r\x1b[0m")
+    hid = cy._color_project_row(project_item(cy, cols=("r", "~/r"), hidden=True))
+    assert hid == (f"\x1b[{cy._GREY}mr\x1b[0m", f"\x1b[{cy._GREY}m~/r\x1b[0m")
+    toggle = cy.WipItem("allprojects", "allprojects:toggle", ("… 3 more", ""), {})
+    assert cy._color_project_row(toggle) == (f"\x1b[{cy._GREY}m… 3 more\x1b[0m", "")
 
 
 def test_wip_items_project_cols_are_repo_and_dir(cy, repo, monkeypatch):
@@ -1928,6 +2070,7 @@ def test_wip_items_project_cols_are_repo_and_dir(cy, repo, monkeypatch):
     proj.mkdir()
     (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
     (home / ".claude-yolo" / "projects.json").write_text(json.dumps({str(proj): {}}))
+    cy._record_recent_project(home, str(proj))  # never-opened projects are filtered out
     monkeypatch.setattr(cy, "_wip_sessions", lambda h: [])
     monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
     item = next(it for it in cy._wip_items(home)["project"] if it.kind == "project")

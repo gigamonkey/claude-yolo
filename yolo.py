@@ -3075,6 +3075,9 @@ def register_project(home: pathlib.Path, project_dir: str, name: str | None = No
         )
     projects[name] = {"dir": project_dir}
     _write_projects_file(home, projects)
+    # Registering counts as use: without a stamp the new project would start out
+    # hidden behind the wip dashboard's recently-used filter.
+    _record_recent_project(home, resolved)
     return f"Registered project '{name}' ({project_dir}, no overrides)."
 
 
@@ -7034,6 +7037,28 @@ WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE")
 WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS")
 WIP_PROJECT_HEADERS = ("REPO", "DIRECTORY")
 
+# How recently a project must have been opened (its recent-projects.json stamp)
+# to show in the PROJECTS section by default; older rows collapse behind the
+# "… N more" toggle. Projects with a running session or a live worktree always
+# show, however stale their stamp.
+WIP_RECENT_DAYS = 14
+
+
+def _opened_recently(stamp: str) -> bool:
+    """Whether a recent-projects `last_opened` ISO stamp is within WIP_RECENT_DAYS.
+
+    Lenient like the registry itself: a missing/unparseable stamp is just "not
+    recent", never an error. A naive stamp is taken as local time.
+    """
+    try:
+        opened = datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return False
+    if opened.tzinfo is None:
+        opened = opened.astimezone()
+    now = datetime.datetime.now().astimezone()
+    return now - opened <= datetime.timedelta(days=WIP_RECENT_DAYS)
+
 
 def _wip_sessions(home: pathlib.Path) -> list:
     """Every running yolo container as a WipSession, from one `docker ps`.
@@ -7095,21 +7120,35 @@ def _order_sessions(sessions: list) -> list:
     return unknown + waiting + agenting + working
 
 
-def _wip_projects(home: pathlib.Path, sessions: list) -> list:
+def _wip_projects(home: pathlib.Path, sessions: list, worktree_roots=frozenset()) -> list:
     """Projects to offer in the dashboard: registered (projects.json) + recently opened.
 
-    Returns `[{name, path, repos, active, registered}]`. Registered rows are the
-    named projects.json entries (`name` set, `path` = their `dir`, `repos` the
-    extras count); the rest come from the recent-projects registry (every launch
-    stamps one) so a directory you've opened shows up even with no project —
+    Returns `[{name, path, repos, active, registered, hidden}]`. Registered rows
+    are the named projects.json entries (`name` set, `path` = their `dir`, `repos`
+    the extras count); the rest come from the recent-projects registry (every
+    launch stamps one) so a directory you've opened shows up even with no project —
     `a` can then register it (those rows have `name: None`). Recent-only paths
     whose directory no longer exists — or that are already some project's `dir` —
     are dropped; registered rows are kept regardless (a dangling dir is the
     config layer's warning to raise, not something to hide here). `active` is
     true when a running session's cwd is at or under the path — a hint that work
     is already happening there.
+
+    `hidden` marks the rows the dashboard collapses behind its "… N more" toggle:
+    not `active`, no worktree from the row's repo (`worktree_roots`, the resolved
+    main roots of the current worktree rows), and no `last_opened` stamp within
+    WIP_RECENT_DAYS. Every row is still returned — visibility is the caller's
+    call. Registered rows match their stamp by resolved dir, the same exact-path
+    rule the recent-list dedup uses (so a project whose dir is a subdirectory of
+    its repo — stamped under the repo root — reads as unstamped; it surfaces via
+    its worktrees/sessions or the toggle).
     """
     projects = _read_projects_file(home, lenient=True)
+    recent_raw = _read_recent_projects_file(home)
+    stamps = {
+        pathlib.Path(os.path.expanduser(k)).resolve(): v.get("last_opened", "")
+        for k, v in recent_raw.items()
+    }
     registered_dirs = set()
     rows = []
     for name in sorted(projects):
@@ -7120,8 +7159,15 @@ def _wip_projects(home: pathlib.Path, sessions: list) -> list:
         registered_dirs.add(path.resolve())
         repos = projects[name].get("repos", [])
         n = 1 if isinstance(repos, str) else len(repos) if isinstance(repos, list) else 0
-        rows.append({"name": name, "path": path, "repos": n, "registered": True})
-    recent_raw = _read_recent_projects_file(home)
+        rows.append(
+            {
+                "name": name,
+                "path": path,
+                "repos": n,
+                "registered": True,
+                "last_opened": stamps.get(path.resolve(), ""),
+            }
+        )
     recent = sorted(
         (
             k
@@ -7133,12 +7179,22 @@ def _wip_projects(home: pathlib.Path, sessions: list) -> list:
         reverse=True,  # most-recently-opened first, below the (alphabetical) registered ones
     )
     rows += [
-        {"name": None, "path": pathlib.Path(k), "repos": 0, "registered": False} for k in recent
+        {
+            "name": None,
+            "path": pathlib.Path(k),
+            "repos": 0,
+            "registered": False,
+            "last_opened": recent_raw[k].get("last_opened", ""),
+        }
+        for k in recent
     ]
     cwds = [pathlib.Path(s.cwd) for s in sessions if s.cwd]
     for row in rows:
         kp = row["path"]
         row["active"] = any(c == kp or kp in c.parents for c in cwds)
+        rp = kp.resolve()
+        has_worktree = any(r == rp or r in rp.parents for r in worktree_roots)
+        row["hidden"] = not (row["active"] or has_worktree or _opened_recently(row["last_opened"]))
     return rows
 
 
@@ -7180,7 +7236,7 @@ def _extra_session_window(slug, topic, sessions, windows) -> str | None:
     return None
 
 
-def _wip_items(home: pathlib.Path) -> dict:
+def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
     Sessions (ordered by _order_sessions), then every worktree (the `list --all`
@@ -7190,6 +7246,11 @@ def _wip_items(home: pathlib.Path) -> dict:
     docker call at the 2s refresh; each worktree's COMMITS/STATUS is judged against
     the base its *own* config sets, via the `_worktree_config` base resolver), then
     projects.
+
+    Projects `hidden` by `_wip_projects` (not recently used, no worktree, no
+    session) are dropped unless `all_projects`; whenever any exist, an
+    `allprojects` toggle row ("… N more" / "… show fewer") precedes the `+` row —
+    Enter on it flips the flag (view state, handled in `_wip_loop`).
     """
     sessions = _order_sessions(_wip_sessions(home))
     windows = _all_tmux_windows()
@@ -7211,7 +7272,11 @@ def _wip_items(home: pathlib.Path) -> dict:
     # The dashboard leads with TOPIC, so order to match (topic, then repo) rather
     # than _worktree_rows' repo-first order.
     worktrees.sort(key=lambda w: (w.topic, w.repo_name))
-    projects = _wip_projects(home, sessions)
+    wt_roots = {pathlib.Path(w.main_root).resolve() for w in worktrees if w.main_root}
+    projects = _wip_projects(home, sessions, worktree_roots=wt_roots)
+    n_hidden = sum(p["hidden"] for p in projects)
+    if not all_projects:
+        projects = [p for p in projects if not p["hidden"]]
 
     session_items = []
     for s in sessions:
@@ -7276,10 +7341,14 @@ def _wip_items(home: pathlib.Path) -> dict:
                     "name": p["name"],  # None for a recent (unregistered) dir
                     "path": p["path"],
                     "registered": p["registered"],  # `a` registers a recent (unregistered) one
+                    "hidden": p["hidden"],  # shown only via the toggle → drawn dim
                     "window": _session_window_for(p["path"], sessions, windows),
                 },
             )
         )
+    if n_hidden:
+        label = "… show fewer" if all_projects else f"… {n_hidden} more"
+        project_items.append(WipItem("allprojects", "allprojects:toggle", (label, ""), {}))
     # A trailing `+` row: Enter on it prompts for a directory and opens a session
     # there (see _wip_enter), so you can launch in a dir that isn't listed yet.
     project_items.append(WipItem("newsession", "newsession:+", ("+", ""), {}))
@@ -7354,7 +7423,11 @@ def _color_worktree_row(it) -> tuple:
 def _color_project_row(it) -> tuple:
     if it.kind == "newsession":  # the trailing `+` affordance
         return (_fg(it.cols[0], _GREEN), it.cols[1])
-    repo, directory = it.cols  # all projects the same — REPO blue, DIRECTORY grey
+    if it.kind == "allprojects":  # the "… N more" / "… show fewer" toggle
+        return (_fg(it.cols[0], _GREY), it.cols[1])
+    repo, directory = it.cols  # REPO blue, DIRECTORY grey
+    if it.payload.get("hidden"):  # only shown via the toggle: all grey, like the toggle
+        return (_fg(repo, _GREY), _fg(directory, _GREY))
     return (_fg(repo, _BLUE), _fg(directory, _GREY))
 
 
@@ -7391,6 +7464,7 @@ _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle) · x discard · X discard+branch",
     "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
+    "allprojects": "Enter show/hide projects not used in a while",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
 
@@ -7563,9 +7637,12 @@ def _wip_loop(home, session, term) -> None:
     row. `session` is the tmux session the dashboard lives in (for switch/spawn).
     base / finish settings aren't carried here: each worktree resolves its own from
     config (`_worktree_config`) at display and action time, so a config edit reaches
-    the running dashboard and each repo uses its own base.
+    the running dashboard and each repo uses its own base. `all_projects` (the
+    "… N more" toggle's state) is view state like `top`, so it lives here too —
+    Enter on the toggle row flips it in-loop rather than going through _wip_action.
     """
-    sections = _wip_items(home)
+    all_projects = False
+    sections = _wip_items(home, all_projects)
     nav = _wip_nav(sections)
     selected = nav[0].key if nav else None
     footer = ""
@@ -7578,7 +7655,7 @@ def _wip_loop(home, session, term) -> None:
         top = _draw_wip(sections, selected, footer, top)
         key = term.wait_key(max(0.0, deadline - time.monotonic()))
         if key is None:  # refresh deadline, no keypress
-            sections = _wip_items(home)
+            sections = _wip_items(home, all_projects)
             nav = _wip_nav(sections)
             deadline = time.monotonic() + PS_WATCH_INTERVAL
             continue
@@ -7588,7 +7665,7 @@ def _wip_loop(home, session, term) -> None:
             # sessions from their home base — so it's only allowed when nothing is
             # running. Re-list live first, so the decision reflects the world, not
             # a frame up to one refresh-tick stale.
-            sections = _wip_items(home)
+            sections = _wip_items(home, all_projects)
             nav = _wip_nav(sections)
             deadline = time.monotonic() + PS_WATCH_INTERVAL
             if not sections["session"]:
@@ -7605,10 +7682,13 @@ def _wip_loop(home, session, term) -> None:
             selected = keys[min(len(keys) - 1, keys.index(selected) + 1)]
             continue
         item = next((it for it in nav if it.key == selected), None)
-        footer = _wip_action(key, item, home, session, term) or ""
+        if key in ("\r", "\n") and item is not None and item.kind == "allprojects":
+            all_projects = not all_projects
+        else:
+            footer = _wip_action(key, item, home, session, term) or ""
         # An action may have changed the world (a stop, finish, launch): refresh now
         # rather than waiting out the tick, so the dashboard reflects it immediately.
-        sections = _wip_items(home)
+        sections = _wip_items(home, all_projects)
         nav = _wip_nav(sections)
         deadline = time.monotonic() + PS_WATCH_INTERVAL
 

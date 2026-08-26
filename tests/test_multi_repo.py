@@ -761,6 +761,7 @@ def test_wip_items_lists_named_project_rows(cy, repos, monkeypatch):
     (home / ".claude-yolo" / "projects.json").write_text(
         json.dumps({"chat": {"dir": str(app), "repos": [str(lib), str(proto)]}})
     )
+    cy._record_recent_project(home, str(app))  # never-opened projects are filtered out
     monkeypatch.setattr(cy, "_wip_sessions", lambda home_: [])
     monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
     monkeypatch.setattr(cy, "_worktree_rows", lambda *a, **k: [])

@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `wip` dashboard's PROJECTS section shows only recently-used projects
+  by default.** A project is listed when it has a running session, an open
+  worktree, or was opened in the last 14 days; the rest collapse behind a
+  `… N more` row — Enter on it reveals the full configured list (drawn grey)
+  and hides it again. Registering a project (`a` on the dashboard, or
+  `yolo config --init`) counts as use, so a fresh entry always shows.
+
 - **The `wip` dashboard's discard key split in two: `x` keeps the branch, `X`
   deletes it too.** Lowercase `x` on a worktree row now removes just the
   worktree (uncommitted changes included) and leaves the branch for later;

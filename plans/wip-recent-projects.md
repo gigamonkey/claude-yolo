@@ -51,7 +51,7 @@ A project row is shown by default when **any** of:
   root; the parent case covers a project dir inside a repo);
 
 - its `last_opened` stamp is within `WIP_RECENT_DAYS` days (new module
-  constant, **30**; no config key until someone actually wants to tune it).
+  constant, **14**; no config key until someone actually wants to tune it).
 
 The rule applies uniformly to registered and recent-only rows. Recent-only
 rows exist *because* of a stamp, so for them it's effectively just the
@@ -130,11 +130,11 @@ stamp is recent, and the registered row inherits the same dir/stamp.)
 - No pruning of `recent-projects.json` itself; old entries are harmless and
   the file stays a complete record.
 
-- No config key for the cutoff; `WIP_RECENT_DAYS = 30` is a constant.
+- No config key for the cutoff; `WIP_RECENT_DAYS = 14` is a constant.
 
 ## Implementation steps
 
-1. **`WIP_RECENT_DAYS = 30`** constant near the other wip constants.
+1. **`WIP_RECENT_DAYS = 14`** constant near the other wip constants.
 
 2. **`_wip_projects`**: add `worktree_roots=frozenset()` kwarg; compute per
    row `last_opened` (registered rows: registry lookup by resolved dir;
@@ -161,7 +161,7 @@ stamp is recent, and the registered row inherits the same dir/stamp.)
    `test_multi_repo.py`):
 
    - visibility rule: registered project with no stamp/worktree/session is
-     hidden; shown when (a) stamped within 30 days, (b) a worktree row's
+     hidden; shown when (a) stamped within 14 days, (b) a worktree row's
      `main_root` matches, (c) a session is running there; recent-only dir
      older than the cutoff is hidden.
 
@@ -179,7 +179,7 @@ stamp is recent, and the registered row inherits the same dir/stamp.)
      either stamp `last_opened` or assert against the unfiltered rows.
 
 8. **Docs**: README's wip section (default = recently-used projects, the
-   "… N more" reveal, the 30-day window); ARCHITECTURE.md's wip dashboard
+   "… N more" reveal, the 14-day window); ARCHITECTURE.md's wip dashboard
    section (visibility rule, where the state lives); CHANGELOG `## Unreleased`
    entry.
 

@@ -512,6 +512,15 @@ def test_config_init_writes_empty_entry(cy, run_cli, dirs, capsys):
     assert "Registered" in capsys.readouterr().out
 
 
+def test_config_init_stamps_recent_projects(cy, run_cli, dirs):
+    # Registering counts as use: without a stamp the new project would start out
+    # hidden behind the wip dashboard's recently-used filter.
+    home, work = dirs
+    run_cli(["config", "--init"], home=home, cwd=work)
+    recent = cy._read_recent_projects_file(home)
+    assert cy._opened_recently(recent[str(work.resolve())]["last_opened"])
+
+
 def test_config_init_satisfies_require_project_entry(cy, run_cli, dirs):
     home, work = dirs
     (home / ".yolo.json").write_text(json.dumps({"require-project-entry": True}))
