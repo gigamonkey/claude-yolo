@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `wip` dashboard's SESSIONS table gained a COMMITS column.** Like the
+  WORKTREES column, it shows the branch's `↓behind ↑ahead` divergence from its
+  base — for a multi-repo topic, summed across every repo's worktree the
+  session mounts. Current-directory sessions show `-`.
+
 - **The `wip` dashboard's PROJECTS section shows only recently-used projects
   by default.** A project is listed when it has a running session, an open
   worktree, or was opened in the last 14 days; the rest collapse behind a

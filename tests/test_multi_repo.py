@@ -963,6 +963,37 @@ def test_wip_rebase_on_session_row_rebases_whole_set(cy, run_cli, repos):
     assert (lwt / "l-main.txt").exists()  # the extra repo replayed too — whole set
 
 
+def test_wip_session_commits_sum_across_repos(cy, run_cli, repos, monkeypatch):
+    # A multi-repo session's COMMITS column is the sum of its worktrees' cells:
+    # the primary's plus each extra repo's same-topic worktree.
+    app, lib, proto, home = repos
+    awt, lwt = start_pair(cy, run_cli, repos)
+    (app / "a-main.txt").write_text("new on main\n")  # app: 1 behind
+    git(app, "add", ".")
+    git(app, "commit", "-qm", "advance main")
+    for i in range(2):  # app: 2 ahead
+        (awt / f"a{i}.txt").write_text("on branch\n")
+        git(awt, "add", ".")
+        git(awt, "commit", "-qm", "work")
+    (lwt / "l.txt").write_text("on branch\n")  # lib: 1 ahead
+    git(lwt, "add", ".")
+    git(lwt, "commit", "-qm", "work")
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    monkeypatch.setattr(
+        cy,
+        "_wip_sessions",
+        lambda h: [
+            cy.WipSession(
+                "cid", "app-feat", "feat", str(awt), "", "1m", "waiting", 5, "", lwt.parent.name
+            )
+        ],
+    )
+    sections = cy._wip_items(home)
+    by_wt = {it.payload["worktree"]: it.cols[3] for it in sections["worktree"]}
+    assert by_wt[awt] == "↓1 ↑2" and by_wt[lwt] == "↓0 ↑1"
+    assert sections["session"][0].cols[4] == "↓1 ↑3"
+
+
 def test_wip_extra_worktree_row_gets_primary_session_window(cy):
     # A running multi-repo session advertises its extras via the
     # yolo.extra-repos label; the extra's worktree row picks up that session's

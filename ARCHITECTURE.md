@@ -1429,7 +1429,12 @@ gracefully outside one — there's just no repo slug to label/find by).
   so reading down runs from least to most recently active) — which `_draw_wip`
   renders as **one SESSIONS table** (no blank lines between the groups; the
   SESSION/STATE color — grey unknown / green waiting / cyan agenting / yellow
-  working — is the group cue instead); then
+  working — is the group cue instead; its **COMMITS** column is
+  `_sum_commits` over the COMMITS cells of the worktrees the session touches —
+  `_session_worktrees`: the cwd label's worktree plus, for a multi-repo topic,
+  each `yolo.extra-repos` slug's same-topic worktree — looked up from the same
+  `_worktree_rows` pass, so no extra git calls; unreadable cells (`-`) are
+  skipped and a cwd session shows `-`); then
   **worktrees** (the `_worktree_rows` extracted from `do_list` — *every* worktree,
   including ones with a running session, which also appear as a session row;
   `running_paths`, from the same single `docker ps`, both marks each `running` in

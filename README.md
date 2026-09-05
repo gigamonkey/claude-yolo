@@ -588,7 +588,10 @@ and focuses the dashboard window) or, from inside the tmux session, with
 in three sections:
 
 - **Sessions** — every running yolo session across all repos, in one table
-  (SESSION / TOPIC / CREATED / STATE). Rows are grouped by state — unknown
+  (SESSION / TOPIC / CREATED / STATE / COMMITS). COMMITS is the session's
+  worktree divergence as `↓behind ↑ahead` (see Worktrees below), summed across
+  every repo the session touches for a multi-repo topic; a current-directory
+  session shows `-`. Rows are grouped by state — unknown
   (a `yolo shell`, or a session that hasn't taken a turn) first, then **waiting**,
   then **agenting**, then **working** — and within each group sorted by
   least-recent activity first,

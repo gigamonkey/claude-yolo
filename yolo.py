@@ -7031,7 +7031,9 @@ WipSession = collections.namedtuple(
 # section's table, and the payload an action needs.
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
-WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE")
+# COMMITS is the session's worktree COMMITS cell(s) summed — for a multi-repo
+# topic, across every repo's same-topic worktree the session mounts.
+WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE", "COMMITS")
 # No DIRECTORY column: the worktree dir is derived from repo + topic (and it was
 # the one unbounded-width cell in the table); `yolo list` still shows it.
 WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS")
@@ -7236,6 +7238,39 @@ def _extra_session_window(slug, topic, sessions, windows) -> str | None:
     return None
 
 
+def _sum_commits(cells) -> str:
+    """Sum `↓behind ↑ahead` COMMITS cells into one — a session's total across the
+    worktrees it touches.
+
+    Cells that aren't a count pair (`-`: orphaned, mid-rebase, unresolvable) are
+    skipped; if none counts, the sum is `-` too. So a multi-repo session whose
+    extra repo is mid-rebase still shows the primary's numbers rather than
+    nothing.
+    """
+    ahead = behind = 0
+    counted = False
+    for cell in cells:
+        m = re.fullmatch(r"↓(\d+) ↑(\d+)", cell or "")
+        if m:
+            behind += int(m.group(1))
+            ahead += int(m.group(2))
+            counted = True
+    return f"↓{behind} ↑{ahead}" if counted else "-"
+
+
+def _session_worktrees(s, home: pathlib.Path) -> list:
+    """The worktree dirs a worktree session touches: its own (the cwd label) plus,
+    for a multi-repo topic, each extra repo's same-topic worktree (via the
+    `yolo.extra-repos` slug list the launch stamped). Empty for a cwd session."""
+    if not s.topic or not s.cwd:
+        return []
+    paths = [pathlib.Path(s.cwd)]
+    if s.extra:
+        root = home / ".claude-yolo" / "worktrees"
+        paths += [root / slug / s.topic for slug in s.extra.split(",")]
+    return paths
+
+
 def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
     """The dashboard's three sections as ordered WipItem lists.
 
@@ -7278,9 +7313,13 @@ def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
     if not all_projects:
         projects = [p for p in projects if not p["hidden"]]
 
+    # Each session's COMMITS is the sum of its worktrees' cells (a multi-repo
+    # session mounts one per repo); a cwd session touches no worktree → "-".
+    commits_by_wt = {w.worktree: w.commits for w in worktrees}
     session_items = []
     for s in sessions:
         win = windows.get(s.name)
+        commits = _sum_commits(commits_by_wt.get(wt) for wt in _session_worktrees(s, home))
         is_wt = bool(s.topic)
         cwdp = pathlib.Path(s.cwd) if s.cwd else None
         state_disp = f"{s.state} {_humanize_secs(s.age)}" if s.state else "-"
@@ -7300,6 +7339,7 @@ def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
             s.topic or "-",
             s.created,
             state_disp,
+            commits,
         )
         session_items.append(WipItem("session", f"session:{s.name}", cols, payload))
 
@@ -7371,13 +7411,14 @@ def _fg(s: str, code: int) -> str:
 
 
 def _color_session_row(it) -> tuple:
-    name, topic, created, state = it.cols
+    name, topic, created, state, commits = it.cols
     g = _SESSION_GROUP.get(it.payload.get("state"), _GREY)
     return (
         _fg(name, g),
         _fg(topic, _CYAN),
         _fg(created, _BLUE),
         _fg(state, g),
+        _color_commits(commits),
     )
 
 

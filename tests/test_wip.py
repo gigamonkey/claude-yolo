@@ -92,7 +92,7 @@ def session_item(cy, **over):
         "main_root": "/repo",
     }
     p.update(over.pop("payload", {}))
-    cols = over.pop("cols", ("repo-topic", "topic", "waiting 5m", "1m"))
+    cols = over.pop("cols", ("repo-topic", "topic", "1m", "waiting 5m", "↓0 ↑1"))
     return cy.WipItem("session", over.pop("key", "session:repo-topic"), cols, p)
 
 
@@ -191,19 +191,19 @@ def test_draw_wip_renders_one_sessions_table_grouped(cy, capsys):
     sections = {
         "session": [
             session_item(
-                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "1m", "-")
+                cy, key="session:s1", payload={"state": None}, cols=("s1", "-", "1m", "-", "-")
             ),
             session_item(
                 cy,
                 key="session:w1",
                 payload={"state": "waiting"},
-                cols=("w1", "-", "1m", "waiting 9m"),
+                cols=("w1", "-", "1m", "waiting 9m", "-"),
             ),
             session_item(
                 cy,
                 key="session:k1",
                 payload={"state": "working"},
-                cols=("k1", "-", "1m", "working 2m"),
+                cols=("k1", "-", "1m", "working 2m", "-"),
             ),
         ],
         "worktree": [],
@@ -225,19 +225,19 @@ def test_draw_wip_sessions_no_blank_lines_grouped_by_color(cy, capsys):
                 cy,
                 key="session:w1",
                 payload={"state": "waiting"},
-                cols=("w1", "-", "1m", "waiting 9m"),
+                cols=("w1", "-", "1m", "waiting 9m", "-"),
             ),
             session_item(
                 cy,
                 key="session:a1",
                 payload={"state": "agenting"},
-                cols=("a1", "-", "1m", "agenting 3m"),
+                cols=("a1", "-", "1m", "agenting 3m", "-"),
             ),
             session_item(
                 cy,
                 key="session:k1",
                 payload={"state": "working"},
-                cols=("k1", "-", "1m", "working 1m"),
+                cols=("k1", "-", "1m", "working 1m", "-"),
             ),
         ],
         "worktree": [],
@@ -307,6 +307,63 @@ def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monke
     sess = sections["session"][0]
     assert sess.payload["worktree"] == wt_alpha
     assert sess.payload["main_root"] is not None
+    # cols are (SESSION, TOPIC, CREATED, STATE, COMMITS) — COMMITS is the
+    # session's worktree cell (summed across repos for a multi-repo topic)
+    assert len(sess.cols) == 5
+    assert sess.cols[4] == wt_by_topic_item(sections, "alpha").cols[3] == "↓0 ↑0"
+
+
+def wt_by_topic_item(sections, topic):
+    return next(it for it in sections["worktree"] if it.payload["topic"] == topic)
+
+
+def test_wip_items_cwd_session_has_no_commits(cy, repo, monkeypatch):
+    # A cwd session (no topic) touches no worktree, so its COMMITS is "-".
+    r, home = repo
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    monkeypatch.setattr(
+        cy,
+        "_wip_sessions",
+        lambda h: [cy.WipSession("cid", "repo", "", str(r), "", "1m", "waiting", 9)],
+    )
+    sess = cy._wip_items(home)["session"][0]
+    assert sess.cols[1] == "-" and sess.cols[4] == "-"
+
+
+def test_sum_commits_adds_pairs_and_skips_blanks(cy):
+    assert cy._sum_commits(["↓1 ↑2", "↓3 ↑4"]) == "↓4 ↑6"
+    assert cy._sum_commits(["↓0 ↑0"]) == "↓0 ↑0"
+    # an unreadable cell (orphaned / mid-rebase / not a worktree row) is skipped,
+    # not poisoning the total; nothing countable at all → "-"
+    assert cy._sum_commits(["↓1 ↑2", "-", None]) == "↓1 ↑2"
+    assert cy._sum_commits(["-"]) == "-"
+    assert cy._sum_commits([]) == "-"
+
+
+def test_session_worktrees_primary_plus_extras(cy, tmp_path):
+    home = tmp_path
+    root = home / ".claude-yolo" / "worktrees"
+    s = cy.WipSession(
+        "cid",
+        "chat-feat",
+        "feat",
+        str(root / "app-1" / "feat"),
+        "",
+        "1m",
+        "waiting",
+        5,
+        "",
+        "lib-2,proto-3",
+    )
+    assert cy._session_worktrees(s, home) == [
+        root / "app-1" / "feat",
+        root / "lib-2" / "feat",
+        root / "proto-3" / "feat",
+    ]
+    solo = cy.WipSession("cid", "repo-t", "t", str(root / "repo-1" / "t"), "", "1m", None, 0)
+    assert cy._session_worktrees(solo, home) == [root / "repo-1" / "t"]
+    cwd = cy.WipSession("cid", "repo", "", str(tmp_path / "repo"), "", "1m", None, 0)
+    assert cy._session_worktrees(cwd, home) == []
 
 
 def test_worktree_rows_report_commits(cy, run_cli, repo):
@@ -342,6 +399,20 @@ def test_draw_wip_renders_commits_column(cy, capsys):
     assert "COMMITS" in out and "↓3" in out and "↑1" in out
     assert f"\x1b[{cy._RED}m↓3" in out  # nonzero behind in red
     assert f"\x1b[{cy._GREEN}m↑1" in out  # nonzero ahead in green
+
+
+def test_draw_wip_session_commits_column_colored(cy, capsys):
+    sections = {
+        "session": [session_item(cy, cols=("repo-topic", "topic", "1m", "waiting 5m", "↓2 ↑5"))],
+        "worktree": [],
+        "project": [],
+    }
+    cy._draw_wip(sections, None, "")
+    out = capsys.readouterr().out
+    plain = cy._SGR_RE.sub("", out)
+    header = next(ln for ln in plain.splitlines() if "SESSION" in ln and "STATE" in ln)
+    assert header.split() == ["SESSION", "TOPIC", "CREATED", "STATE", "COMMITS"]
+    assert f"\x1b[{cy._RED}m↓2" in out and f"\x1b[{cy._GREEN}m↑5" in out
 
 
 def test_color_status_orphaned_is_red_even_when_running(cy):
