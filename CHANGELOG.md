@@ -10,7 +10,7 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   base — for a multi-repo topic, summed across every repo's worktree the
   session mounts. Current-directory sessions show `-`; a session with a
   worktree stuck mid-rebase (`conflicts` in WORKTREES) shows a red
-  `unresolved` so the stuck rebase is visible from the SESSIONS table too.
+  `conflicts` so the stuck rebase is visible from the SESSIONS table too.
 
 - **The `wip` dashboard's PROJECTS section shows only recently-used projects
   by default.** A project is listed when it has a running session, an open

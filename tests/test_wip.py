@@ -330,11 +330,11 @@ def test_wip_items_cwd_session_has_no_commits(cy, repo, monkeypatch):
     assert sess.cols[1] == "-" and sess.cols[4] == "-"
 
 
-def test_wip_items_session_commits_unresolved_when_worktree_mid_rebase(
+def test_wip_items_session_commits_conflicts_when_worktree_mid_rebase(
     cy, run_cli, repo, monkeypatch
 ):
     # A session whose worktree is stuck mid-rebase (STATUS `conflicts`) shows
-    # `unresolved` in its COMMITS cell rather than `-`/a sum, so the stuck rebase
+    # `conflicts` in its COMMITS cell rather than `-`/a sum, so the stuck rebase
     # is visible from the SESSIONS table too.
     r, home = repo
     run_cli(["start", "wip"], home=home, cwd=r)
@@ -357,11 +357,11 @@ def test_wip_items_session_commits_unresolved_when_worktree_mid_rebase(
     )
     sections = cy._wip_items(home)
     assert wt_by_topic_item(sections, "wip").cols[2] == "running, conflicts"
-    assert sections["session"][0].cols[4] == "unresolved"
+    assert sections["session"][0].cols[4] == "conflicts"
 
 
-def test_color_commits_unresolved_is_red(cy):
-    assert cy._color_commits("unresolved") == f"\x1b[{cy._RED}munresolved\x1b[0m"
+def test_color_commits_conflicts_is_red(cy):
+    assert cy._color_commits("conflicts") == f"\x1b[{cy._RED}mconflicts\x1b[0m"
     assert cy._color_commits("-") == f"\x1b[{cy._GREY}m-\x1b[0m"
 
 
