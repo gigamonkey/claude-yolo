@@ -1428,8 +1428,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   `created_at` field), then each of the other groups longest first,
   so reading down runs from least to most recently active) — which `_draw_wip`
   renders as **one SESSIONS table** (no blank lines between the groups; the
-  SESSION/STATE color — grey unknown / green waiting / cyan agenting / yellow
-  working — is the group cue instead; its **COMMITS** column is
+  PROJECT/STATE color — grey unknown / green waiting / cyan agenting / yellow
+  working — is the group cue instead; its **PROJECT** column is
+  `_project_display_name` over the session's main repo (a worktree session,
+  its overlay pointer picking the entry) or cwd — the container name minus the
+  `-{topic}` suffix, so PROJECT + TOPIC read as two columns; its **COMMITS** column is
   `_sum_commits` over the COMMITS cells of the worktrees the session touches —
   `_session_worktrees`: the cwd label's worktree plus, for a multi-repo topic,
   each `yolo.extra-repos` slug's same-topic worktree — looked up from the same
@@ -1636,7 +1639,7 @@ gracefully outside one — there's just no repo slug to label/find by).
   **Coloring** is full "angry fruit salad", applied only in the draw layer (so the
   data layer / `yolo list` / `ps` stay escape-free): `_table_lines` runs each row
   through a per-section `_color_*_row` that SGR-wraps every cell (`_fg`) — session
-  SESSION/STATE by status group, worktree STATUS by `dirty`/`running`/`unmerged`,
+  PROJECT/STATE by status group, worktree STATUS by `dirty`/`running`/`unmerged`,
   COMMITS with nonzero behind red / ahead green / zeros grey, projects with
   REPO blue / DIRECTORY grey (uniform). `_format_table` measures **visible** width (`_visible_len` strips
   the SGR via `_SGR_RE`) so colored cells still align; the selected row is rendered

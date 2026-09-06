@@ -307,14 +307,38 @@ def test_wip_items_lists_all_worktrees_flagging_running(cy, run_cli, repo, monke
     sess = sections["session"][0]
     assert sess.payload["worktree"] == wt_alpha
     assert sess.payload["main_root"] is not None
-    # cols are (SESSION, TOPIC, CREATED, STATE, COMMITS) — COMMITS is the
+    # cols are (PROJECT, TOPIC, CREATED, STATE, COMMITS) — PROJECT is the repo's
+    # basename with no project entry (` *`: no tmux window), COMMITS the
     # session's worktree cell (summed across repos for a multi-repo topic)
     assert len(sess.cols) == 5
+    assert sess.cols[:2] == (f"{r.name} *", "alpha") and sess.payload["project"] == r.name
     assert sess.cols[4] == wt_by_topic_item(sections, "alpha").cols[3] == "↓0 ↑0"
 
 
 def wt_by_topic_item(sections, topic):
     return next(it for it in sections["worktree"] if it.payload["topic"] == topic)
+
+
+def test_wip_items_session_project_column_uses_project_name(cy, run_cli, repo, monkeypatch):
+    # PROJECT is the matching projects.json entry's name — for a worktree
+    # session via its main repo, for a cwd session via the cwd — not the
+    # container name (which is `{project}-{topic}`).
+    r, home = repo
+    (home / ".claude-yolo").mkdir(parents=True, exist_ok=True)
+    (home / ".claude-yolo" / "projects.json").write_text(json.dumps({"myproj": {"dir": str(r)}}))
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("alpha"))
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {"myproj-alpha": ("@1", 0)})
+    monkeypatch.setattr(
+        cy,
+        "_wip_sessions",
+        lambda h: [
+            cy.WipSession("c1", "myproj-alpha", "alpha", str(wt), "", "1m", "waiting", 9),
+            cy.WipSession("c2", "myproj", "", str(r), "", "2m", "working", 3),
+        ],
+    )
+    cols = [it.cols[:2] for it in cy._wip_items(home)["session"]]
+    assert cols == [("myproj", "alpha"), ("myproj *", "-")]
 
 
 def test_wip_items_cwd_session_has_no_commits(cy, repo, monkeypatch):
@@ -445,8 +469,8 @@ def test_draw_wip_session_commits_column_colored(cy, capsys):
     cy._draw_wip(sections, None, "")
     out = capsys.readouterr().out
     plain = cy._SGR_RE.sub("", out)
-    header = next(ln for ln in plain.splitlines() if "SESSION" in ln and "STATE" in ln)
-    assert header.split() == ["SESSION", "TOPIC", "CREATED", "STATE", "COMMITS"]
+    header = next(ln for ln in plain.splitlines() if "PROJECT" in ln and "STATE" in ln)
+    assert header.split() == ["PROJECT", "TOPIC", "CREATED", "STATE", "COMMITS"]
     assert f"\x1b[{cy._RED}m↓2" in out and f"\x1b[{cy._GREEN}m↑5" in out
 
 

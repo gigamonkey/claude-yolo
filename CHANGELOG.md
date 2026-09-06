@@ -5,6 +5,11 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **The `wip` dashboard's SESSIONS table leads with a PROJECT column** in place
+  of SESSION: the project's name (its `projects.json` entry, else the repo
+  directory's basename) with the topic in the TOPIC column beside it, rather
+  than the combined `project-topic` container name repeating the topic.
+
 - **The `wip` dashboard's SESSIONS table gained a COMMITS column.** Like the
   WORKTREES column, it shows the branch's `↓behind ↑ahead` divergence from its
   base — for a multi-repo topic, summed across every repo's worktree the

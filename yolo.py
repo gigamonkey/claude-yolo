@@ -7031,9 +7031,12 @@ WipSession = collections.namedtuple(
 # section's table, and the payload an action needs.
 WipItem = collections.namedtuple("WipItem", "kind key cols payload")
 
+# PROJECT is the name the session runs under (`_project_display_name`: the
+# matching project entry's name, else the repo dir's basename) — the container
+# name minus its `-{topic}` suffix, so PROJECT + TOPIC read as two columns.
 # COMMITS is the session's worktree COMMITS cell(s) summed — for a multi-repo
 # topic, across every repo's same-topic worktree the session mounts.
-WIP_SESSION_HEADERS = ("SESSION", "TOPIC", "CREATED", "STATE", "COMMITS")
+WIP_SESSION_HEADERS = ("PROJECT", "TOPIC", "CREATED", "STATE", "COMMITS")
 # No DIRECTORY column: the worktree dir is derived from repo + topic (and it was
 # the one unbounded-width cell in the table); `yolo list` still shows it.
 WIP_WORKTREE_HEADERS = ("TOPIC", "REPO", "STATUS", "COMMITS")
@@ -7330,20 +7333,34 @@ def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
             commits = _sum_commits(commits_by_wt.get(wt) for wt in wts)
         is_wt = bool(s.topic)
         cwdp = pathlib.Path(s.cwd) if s.cwd else None
+        main_root = _worktree_main_repo(cwdp) if is_wt and cwdp else None
         state_disp = f"{s.state} {_humanize_secs(s.age)}" if s.state else "-"
+        # PROJECT: the name the launch ran under (project entry, else the repo
+        # dir's basename) — resolved from the worktree's main repo (its overlay
+        # pointer picks the entry) or, for a cwd session, the cwd itself. An
+        # orphaned worktree (no main repo) falls back to its slug.
+        if is_wt:
+            project = (
+                _project_display_name(home, main_root, cwdp)
+                if main_root
+                else (cwdp.parent.name if cwdp else "-")
+            )
+        else:
+            project = _project_display_name(home, cwdp) if cwdp else "-"
         payload = {
             "cid": s.cid,
             "name": s.name,
             "topic": s.topic,
+            "project": project,
             "state": s.state,
             "cwd": cwdp,  # the session's working dir (an `S`-shell window's -c)
             "window": win[0] if win else None,
             "worktree": cwdp if is_wt else None,
             "slug": cwdp.parent.name if is_wt and cwdp else None,
-            "main_root": _worktree_main_repo(cwdp) if is_wt and cwdp else None,
+            "main_root": main_root,
         }
         cols = (
-            s.name + ("" if win else " *"),
+            project + ("" if win else " *"),
             s.topic or "-",
             s.created,
             state_disp,
@@ -7408,7 +7425,7 @@ def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
 # aixterm bright-black) doubles as "dim". Color is added only in the draw layer, so
 # the data layer / `yolo list` / `ps` stay escape-free.
 _GREY, _RED, _GREEN, _YELLOW, _BLUE, _MAGENTA, _CYAN = 90, 31, 32, 33, 34, 35, 36
-# Per-status-group accent for a session's SESSION/STATE cells (the cue that
+# Per-status-group accent for a session's PROJECT/STATE cells (the cue that
 # replaces the old blank lines between groups).
 _SESSION_GROUP = {None: _GREY, "waiting": _GREEN, "agenting": _CYAN, "working": _YELLOW}
 
@@ -7419,10 +7436,10 @@ def _fg(s: str, code: int) -> str:
 
 
 def _color_session_row(it) -> tuple:
-    name, topic, created, state, commits = it.cols
+    project, topic, created, state, commits = it.cols
     g = _SESSION_GROUP.get(it.payload.get("state"), _GREY)
     return (
-        _fg(name, g),
+        _fg(project, g),
         _fg(topic, _CYAN),
         _fg(created, _BLUE),
         _fg(state, g),
@@ -7527,7 +7544,7 @@ def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -
 
     The running sessions render as one SESSIONS table, ordered unknown → waiting →
     agenting → working by _order_sessions — no blank lines between groups anymore;
-    the SESSION/STATE color (grey / green / cyan / yellow) is the group cue instead.
+    the PROJECT/STATE color (grey / green / cyan / yellow) is the group cue instead.
     Then the
     worktrees and projects, each column colored by _color_*_row.
 

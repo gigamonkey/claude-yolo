@@ -588,7 +588,10 @@ and focuses the dashboard window) or, from inside the tmux session, with
 in three sections:
 
 - **Sessions** — every running yolo session across all repos, in one table
-  (SESSION / TOPIC / CREATED / STATE / COMMITS). COMMITS is the session's
+  (PROJECT / TOPIC / CREATED / STATE / COMMITS). PROJECT is the name the
+  session runs under — its project entry's name, else the repo directory's
+  basename — and TOPIC its worktree topic (`-` for a current-directory
+  session); together they're the container name. COMMITS is the session's
   worktree divergence as `↓behind ↑ahead` (see Worktrees below), summed across
   every repo the session touches for a multi-repo topic; a current-directory
   session shows `-`, and a session with any worktree stuck mid-rebase (flagged
