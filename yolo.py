@@ -7314,12 +7314,20 @@ def _wip_items(home: pathlib.Path, all_projects: bool = False) -> dict:
         projects = [p for p in projects if not p["hidden"]]
 
     # Each session's COMMITS is the sum of its worktrees' cells (a multi-repo
-    # session mounts one per repo); a cwd session touches no worktree → "-".
+    # session mounts one per repo); a cwd session touches no worktree → "-". A
+    # worktree stopped mid-rebase (STATUS `conflicts`) has no counts, and the
+    # stuck rebase matters more than the other repos' numbers, so the session's
+    # cell says `unresolved` instead (red in the draw layer).
     commits_by_wt = {w.worktree: w.commits for w in worktrees}
+    conflicted_wts = {w.worktree for w in worktrees if "conflicts" in w.status}
     session_items = []
     for s in sessions:
         win = windows.get(s.name)
-        commits = _sum_commits(commits_by_wt.get(wt) for wt in _session_worktrees(s, home))
+        wts = _session_worktrees(s, home)
+        if any(wt in conflicted_wts for wt in wts):
+            commits = "unresolved"
+        else:
+            commits = _sum_commits(commits_by_wt.get(wt) for wt in wts)
         is_wt = bool(s.topic)
         cwdp = pathlib.Path(s.cwd) if s.cwd else None
         state_disp = f"{s.state} {_humanize_secs(s.age)}" if s.state else "-"
@@ -7439,7 +7447,11 @@ def _color_status(status: str) -> str:
 
 
 def _color_commits(commits: str) -> str:
-    """Color a `↓behind ↑ahead` cell: nonzero behind red, nonzero ahead green, zeros grey."""
+    """Color a `↓behind ↑ahead` cell: nonzero behind red, nonzero ahead green, zeros
+    grey. A session's `unresolved` (a worktree mid-rebase) is red like the
+    worktree's `conflicts` STATUS."""
+    if commits == "unresolved":
+        return _fg(commits, _RED)
     parts = commits.split()
     if len(parts) != 2:
         return _fg(commits, _GREY)  # "-"

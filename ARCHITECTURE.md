@@ -1434,7 +1434,8 @@ gracefully outside one — there's just no repo slug to label/find by).
   `_session_worktrees`: the cwd label's worktree plus, for a multi-repo topic,
   each `yolo.extra-repos` slug's same-topic worktree — looked up from the same
   `_worktree_rows` pass, so no extra git calls; unreadable cells (`-`) are
-  skipped and a cwd session shows `-`); then
+  skipped and a cwd session shows `-`; if any of those worktrees is mid-rebase
+  (STATUS `conflicts`) the cell is `unresolved` instead of a sum, drawn red); then
   **worktrees** (the `_worktree_rows` extracted from `do_list` — *every* worktree,
   including ones with a running session, which also appear as a session row;
   `running_paths`, from the same single `docker ps`, both marks each `running` in

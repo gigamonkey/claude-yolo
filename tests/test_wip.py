@@ -330,6 +330,41 @@ def test_wip_items_cwd_session_has_no_commits(cy, repo, monkeypatch):
     assert sess.cols[1] == "-" and sess.cols[4] == "-"
 
 
+def test_wip_items_session_commits_unresolved_when_worktree_mid_rebase(
+    cy, run_cli, repo, monkeypatch
+):
+    # A session whose worktree is stuck mid-rebase (STATUS `conflicts`) shows
+    # `unresolved` in its COMMITS cell rather than `-`/a sum, so the stuck rebase
+    # is visible from the SESSIONS table too.
+    r, home = repo
+    run_cli(["start", "wip"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("wip"))
+    (wt / "README").write_text("branch\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "branch edit")
+    (r / "README").write_text("main\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "main edit")
+    with pytest.raises(SystemExit):  # single-repo conflict raises
+        run_cli(["rebase", "wip"], home=home, cwd=r)
+    assert cy._rebase_in_progress(wt)
+
+    monkeypatch.setattr(cy, "_all_tmux_windows", lambda: {})
+    monkeypatch.setattr(
+        cy,
+        "_wip_sessions",
+        lambda h: [cy.WipSession("cid", "repo-wip", "wip", str(wt), "", "1m", "waiting", 9)],
+    )
+    sections = cy._wip_items(home)
+    assert wt_by_topic_item(sections, "wip").cols[2] == "running, conflicts"
+    assert sections["session"][0].cols[4] == "unresolved"
+
+
+def test_color_commits_unresolved_is_red(cy):
+    assert cy._color_commits("unresolved") == f"\x1b[{cy._RED}munresolved\x1b[0m"
+    assert cy._color_commits("-") == f"\x1b[{cy._GREY}m-\x1b[0m"
+
+
 def test_sum_commits_adds_pairs_and_skips_blanks(cy):
     assert cy._sum_commits(["↓1 ↑2", "↓3 ↑4"]) == "↓4 ↑6"
     assert cy._sum_commits(["↓0 ↑0"]) == "↓0 ↑0"

@@ -591,7 +591,8 @@ in three sections:
   (SESSION / TOPIC / CREATED / STATE / COMMITS). COMMITS is the session's
   worktree divergence as `↓behind ↑ahead` (see Worktrees below), summed across
   every repo the session touches for a multi-repo topic; a current-directory
-  session shows `-`. Rows are grouped by state — unknown
+  session shows `-`, and a session with any worktree stuck mid-rebase (flagged
+  `conflicts` in Worktrees) shows a red `unresolved` instead. Rows are grouped by state — unknown
   (a `yolo shell`, or a session that hasn't taken a turn) first, then **waiting**,
   then **agenting**, then **working** — and within each group sorted by
   least-recent activity first,
