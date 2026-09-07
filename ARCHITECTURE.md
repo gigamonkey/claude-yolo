@@ -1276,7 +1276,11 @@ gracefully outside one — there's just no repo slug to label/find by).
   (e.g. a locked worktree) is surfaced verbatim — the rm fallback is scoped to
   the submodule case only.
 - **`rebase TOPIC`** (`do_rebase`) — rebase a worktree's branch onto `base` (the
-  same `--base`/`base` ref as `start`/`list`/`finish`, default `HEAD`). Resolves
+  same `--base`/`base` ref as `start`/`list`/`finish`, default `HEAD`). A
+  remote-tracking `base` is **fetched first**, per repo (`_fetch_remote_base`,
+  as in `start`; under the dashboard's `capture=True` the progress line is
+  suppressed and a fetch warning is folded into the result message rather than
+  printed, so nothing scribbles over the frame). Resolves
   `base` to a concrete commit **in the main checkout** first (`git rev-parse` from
   the cwd, so a `HEAD` base means the main repo's tip, not the worktree's own
   branch — the same reason `_branch_merged` runs from the main repo), then runs
@@ -2359,7 +2363,9 @@ entry, and a malformed-file error. `test_verbs.py` also covers the
 **remote-base fetch** on `start` (a commit landed on a bare `upstream` since
 the last fetch is what the topic branches from; a never-fetched base is created
 by the fetch; a dead remote warns and uses the stale ref; a slashed local
-branch and a reattach don't fetch) and **`dockerfile-branch`** (the image tag
+branch and a reattach don't fetch; `rebase` fetches too, warns via its result
+message on a dead remote, and prints nothing under `capture=True`) and
+**`dockerfile-branch`** (the image tag
 is the branch's text in worktree and cwd mode, from a subdirectory, and over a
 differing checked-out copy; missing file/ref and absolute-path errors; the
 `config` verb persisting and cross-validating the pair).

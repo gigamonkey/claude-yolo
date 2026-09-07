@@ -1578,35 +1578,42 @@ def _remote_base(base: str, repo: pathlib.Path) -> tuple[str, str] | None:
     return remote, branch
 
 
-def _fetch_remote_base(base: str, repo: pathlib.Path) -> None:
+def _fetch_remote_base(base: str, repo: pathlib.Path, *, quiet: bool = False) -> str | None:
     """Fetch `base`'s branch from its remote when `base` is a remote-tracking ref.
 
-    `start` branches a worktree off `base`; when that's `upstream/main` the point
-    is to start from upstream's *current* tip, which a local remote-tracking ref
-    only reflects as of the last fetch. So refresh it right before branching: a
-    `git fetch <remote> <branch>` updates `refs/remotes/<remote>/<branch>` (and
-    creates it, if the user configured a base they've never fetched). A fetch
-    failure — offline, remote gone — is a warning, not an error: the worktree
-    is then created off the last-fetched ref, and if there is none the caller's
-    resolve check reports the missing base as usual.
+    `start` branches a worktree off `base` and `rebase` replays onto it; when
+    that's `upstream/main` the point is upstream's *current* tip, which a local
+    remote-tracking ref only reflects as of the last fetch. So refresh it right
+    before use: a `git fetch <remote> <branch>` updates
+    `refs/remotes/<remote>/<branch>` (and creates it, if the user configured a
+    base they've never fetched). A fetch failure — offline, remote gone — is a
+    warning, not an error: the caller carries on with the last-fetched ref, and
+    if there is none its own resolve check reports the missing base as usual.
+
+    Returns the warning text on failure (None otherwise) rather than printing it,
+    so a caller that owns the terminal (the `wip` dashboard's rebase, which can't
+    let anything scribble over its frame) can fold it into its result message. The
+    "fetching …" progress line *is* printed (to stderr, before the possibly slow
+    fetch) unless `quiet`, for the same reason.
     """
     rb = _remote_base(base, repo)
     if rb is None:
-        return
+        return None
     remote, branch = rb
-    print(f"fetching {base}...", file=sys.stderr)
+    if not quiet:
+        print(f"fetching {base}...", file=sys.stderr)
     r = subprocess.run(
         ["git", "-C", str(repo), "fetch", "--quiet", remote, branch],
         capture_output=True,
         text=True,
     )
-    if r.returncode != 0:
-        detail = r.stderr.strip().removeprefix("fatal: ")
-        print(
-            f"warning: fetching {base} failed ({detail}); using the last-fetched "
-            f"{base} if there is one.",
-            file=sys.stderr,
-        )
+    if r.returncode == 0:
+        return None
+    detail = r.stderr.strip().removeprefix("fatal: ")
+    return (
+        f"warning: fetching {base} failed ({detail}); using the last-fetched "
+        f"{base} if there is one."
+    )
 
 
 def setup_worktree(
@@ -1649,7 +1656,8 @@ def setup_worktree(
     if _branch_exists(name, main_root):
         tail = [str(worktree), name]
     else:
-        _fetch_remote_base(base, main_root)
+        if warning := _fetch_remote_base(base, main_root):
+            print(warning, file=sys.stderr)
         resolves = subprocess.run(
             ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
             capture_output=True,
@@ -3614,7 +3622,7 @@ PARSER.add_argument(
     "ref a worktree's branch is rebased onto; for `list`/`finish`: the ref a branch "
     "is judged merged against (default: HEAD). Also settable as `base` in config "
     '(e.g. "origin/main"). A remote-tracking base is fetched before `start` '
-    "branches off it.",
+    "branches off it or `rebase` replays onto it.",
 )
 PARSER.add_argument(
     "--stat",
@@ -5797,7 +5805,10 @@ def rebase_worktree(
     session from two places at once, so in practice it's a non-issue.
 
     A dirty worktree is always refused (no `force` bypass): `git rebase` needs a
-    clean tree regardless. For a multi-repo topic (see `_topic_repo_set`) the
+    clean tree regardless. A `base` naming a remote-tracking branch is fetched
+    first, per repo (`_fetch_remote_base`, the same refresh `start` does), so the
+    rebase lands on the remote's current tip; a failed fetch becomes a warning
+    line in the result and the stale ref is used. For a multi-repo topic (see `_topic_repo_set`) the
     whole set rebases: the dirty guard runs across every repo first, then each
     worktree rebases onto `base` resolved in its *own* main repo. A conflict in
     one repo doesn't stop the rest — that worktree is left in-progress (to
@@ -5856,6 +5867,12 @@ def rebase_worktree(
             )
     rebased, conflicts = [], []
     for wt, root, _ in repo_set:
+        # A remote-tracking base (`upstream/main`) is refreshed first, as `start`
+        # does, so the branch is replayed onto the remote's *current* tip. Under
+        # `capture` (the dashboard) the progress line is suppressed and a fetch
+        # warning rides in the result message instead of hitting the terminal.
+        if warning := _fetch_remote_base(base, root, quiet=capture):
+            msgs.append(f"[{root.name}] {warning}" if multi else warning)
         rev = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", base],
             capture_output=True,

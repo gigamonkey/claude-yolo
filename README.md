@@ -268,7 +268,8 @@ Verb details:
   old session right where it left off. A topic with no worktree, branch, *or*
   transcript (a typo) still errors.
 
-- **`rebase TOPIC`** rebases the worktree's branch onto `--base` (default
+- **`rebase TOPIC`** rebases the worktree's branch onto `--base` (fetched
+  first if it's a remote-tracking branch; default
   `HEAD`, the same ref `start` branches off and `finish`/`list` judge against),
   replaying the branch's commits on top of work that landed on the base since it
   branched — exactly like running `git rebase main` from the branch. It refuses
@@ -1427,11 +1428,11 @@ checkout is on.
 
 When `base` names a **remote-tracking branch** — `<remote>/<branch>` where
 `<remote>` is one of the repo's remotes, like `upstream/main` — `yolo start`
-**fetches that branch first**, so the new topic starts from the remote's current
-tip rather than whatever the last fetch left behind (and a base you've configured
-but never fetched simply gets fetched into existence). If the fetch fails
-(offline, remote gone) yolo warns and branches off the last-fetched ref instead;
-only if there is none does the start error. A local branch whose name contains a
+and `yolo rebase` **fetch that branch first**, so a new topic starts from, and
+a rebase lands on, the remote's current tip rather than whatever the last fetch
+left behind (and a base you've configured but never fetched simply gets fetched
+into existence). If the fetch fails (offline, remote gone) yolo warns and uses
+the last-fetched ref instead; only if there is none does the verb error. A local branch whose name contains a
 slash (`feature/foo`) isn't mistaken for a remote one. Combine with
 [`dockerfile-branch`](#dockerfile-branch---dockerfile-branch-ref) to contribute
 to someone else's repo with a custom image of your own that stays out of your PRs.
