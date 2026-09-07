@@ -11,11 +11,10 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   your own that is never merged — for contributing to someone else's repo with
   `base` set to their upstream branch, without the Dockerfile polluting your
   PRs. Requires a relative `dockerfile` path; `yolo config` validates the pair.
-- **`yolo start` and `yolo rebase` fetch a remote-tracking `base` first**: a
-  `base` like `upstream/main` (a `<remote>/` prefix matching one of the repo's
-  remotes) is fetched right before the topic branch is created or rebased, so
-  it starts from / lands on the remote's current tip; a failed fetch warns and
-  uses the last-fetched ref.
+- **`yolo start` fetches a remote-tracking `base` first**: a `base` like
+  `upstream/main` (a `<remote>/` prefix matching one of the repo's remotes) is
+  fetched right before the topic branch is created, so it starts from the
+  remote's current tip; a failed fetch warns and uses the last-fetched ref.
 - **The `wip` dashboard's SESSIONS table leads with a PROJECT column** in place
   of SESSION: the project's name (its `projects.json` entry, else the repo
   directory's basename) with the topic in the TOPIC column beside it, rather

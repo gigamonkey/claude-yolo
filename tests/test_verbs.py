@@ -1586,61 +1586,6 @@ def test_start_reattaching_a_surviving_branch_skips_the_fetch(cy, run_cli, repo,
     assert "fetching" not in capsys.readouterr().err
 
 
-def test_rebase_fetches_remote_base_first(cy, run_cli, repo, tmp_path, capsys):
-    # `rebase` onto `upstream/main` replays onto upstream's *current* tip: a
-    # commit landed upstream since the last fetch is what the branch ends up on.
-    r, home = repo
-    _, other = _bare_upstream(tmp_path, r)
-    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
-    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
-    (wt / "work.txt").write_text("done")
-    git(wt, "add", ".")
-    git(wt, "commit", "-qm", "work")
-    (other / "new").write_text("new\n")
-    git(other, "add", ".")
-    git(other, "commit", "-qm", "landed upstream")
-    git(other, "push", "-q", "origin", "main")
-    newest = git(other, "rev-parse", "HEAD").stdout.strip()
-    capsys.readouterr()
-    run_cli(["rebase", "topic", "--base", "upstream/main"], home=home, cwd=r)
-    assert git(wt, "rev-parse", "HEAD~1").stdout.strip() == newest
-    assert (wt / "new").exists()
-    assert "fetching upstream/main" in capsys.readouterr().err
-
-
-def test_rebase_remote_base_fetch_failure_warns_and_uses_stale_ref(
-    cy, run_cli, repo, tmp_path, capsys
-):
-    r, home = repo
-    git(r, "remote", "add", "upstream", str(tmp_path / "gone.git"))
-    git(r, "update-ref", "refs/remotes/upstream/main", "HEAD")
-    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
-    capsys.readouterr()
-    run_cli(["rebase", "topic", "--base", "upstream/main"], home=home, cwd=r)
-    out = capsys.readouterr()
-    assert "warning: fetching upstream/main failed" in out.out  # in the result message
-    assert "Rebased 'topic' onto 'upstream/main'" in out.out
-
-
-def test_rebase_core_under_capture_keeps_the_fetch_off_the_terminal(
-    cy, run_cli, repo, tmp_path, capsys
-):
-    # The dashboard's path: nothing is printed (it would scribble over the
-    # frame); the fetch warning is folded into the returned message instead.
-    r, home = repo
-    git(r, "remote", "add", "upstream", str(tmp_path / "gone.git"))
-    git(r, "update-ref", "refs/remotes/upstream/main", "HEAD")
-    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
-    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
-    _, main_root, slug = cy._repo_paths(r)
-    capsys.readouterr()
-    msg = cy.rebase_worktree(wt, main_root, slug, "topic", home, "upstream/main", capture=True)
-    assert "warning: fetching upstream/main failed" in msg
-    assert "Rebased 'topic'" in msg
-    out = capsys.readouterr()
-    assert out.out == "" and out.err == ""
-
-
 # --- dockerfile-branch: the Dockerfile read out of a git ref ------------------
 
 DF_TEXT = "FROM ubuntu:24.04\nARG HOST_UID\nRUN echo from-branch\n"
