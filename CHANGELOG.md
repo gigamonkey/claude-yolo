@@ -3,7 +3,7 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.33.0 — 2026-09-07
 
 - **New `yolo-config-branch` config key** (`--yolo-config-branch REF`): read
   the `dockerfile` and `yolorc` paths out of a git ref (`git show REF:./PATH`)
@@ -13,10 +13,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   without yolo's files polluting your PRs. The rc's text is staged into the
   session's private run dir and mounted from there. Requires relative paths;
   `yolo config` validates the files against the branch.
+
 - **`yolo start` fetches a remote-tracking `base` first**: a `base` like
   `upstream/main` (a `<remote>/` prefix matching one of the repo's remotes) is
   fetched right before the topic branch is created, so it starts from the
   remote's current tip; a failed fetch warns and uses the last-fetched ref.
+
 - **The `wip` dashboard's SESSIONS table leads with a PROJECT column** in place
   of SESSION: the project's name (its `projects.json` entry, else the repo
   directory's basename) with the topic in the TOPIC column beside it, rather
