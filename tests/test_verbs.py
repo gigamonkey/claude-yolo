@@ -5,6 +5,7 @@ worktree machinery against a throwaway repo, and stub only `running_container_fo
 (docker) plus the launch side effects via the `run_cli` fixture.
 """
 
+import pathlib
 import re
 import subprocess
 import time
@@ -1586,7 +1587,7 @@ def test_start_reattaching_a_surviving_branch_skips_the_fetch(cy, run_cli, repo,
     assert "fetching" not in capsys.readouterr().err
 
 
-# --- dockerfile-branch: the Dockerfile read out of a git ref ------------------
+# --- yolo-config-branch: Dockerfile / .yolorc read out of a git ref ----------
 
 DF_TEXT = "FROM ubuntu:24.04\nARG HOST_UID\nRUN echo from-branch\n"
 
@@ -1606,13 +1607,13 @@ def _image_tag(argv):
     return next(a for a in argv if a.startswith("claude-yolo:"))
 
 
-def test_dockerfile_branch_reads_the_file_out_of_git_in_a_worktree(cy, run_cli, repo):
+def test_config_branch_reads_the_file_out_of_git_in_a_worktree(cy, run_cli, repo):
     import os
 
     r, home = repo
     _dockerfile_on_branch(r)
     argv = run_cli(
-        ["start", "topic", "--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        ["start", "topic", "--dockerfile", "Dockerfile.yolo", "--yolo-config-branch", "yolo-cfg"],
         home=home,
         cwd=r,
     )
@@ -1621,18 +1622,18 @@ def test_dockerfile_branch_reads_the_file_out_of_git_in_a_worktree(cy, run_cli, 
     assert not (wt / "Dockerfile.yolo").exists()  # the worktree tree stays clean of it
 
 
-def test_dockerfile_branch_reads_the_file_out_of_git_in_cwd_mode(cy, run_cli, repo):
+def test_config_branch_reads_the_file_out_of_git_in_cwd_mode(cy, run_cli, repo):
     import os
 
     r, home = repo
     _dockerfile_on_branch(r)
     argv = run_cli(
-        ["--dockerfile", "./Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r
+        ["--dockerfile", "./Dockerfile.yolo", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r
     )
     assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
 
 
-def test_dockerfile_branch_relative_path_is_from_the_session_dir(cy, run_cli, repo):
+def test_config_branch_relative_path_is_from_the_session_dir(cy, run_cli, repo):
     # Like the filesystem rule: a relative path names the *session dir's* copy —
     # launched from a subdirectory, `Dockerfile.yolo` is that subdirectory's.
     import os
@@ -1641,36 +1642,36 @@ def test_dockerfile_branch_relative_path_is_from_the_session_dir(cy, run_cli, re
     _dockerfile_on_branch(r, path="sub/Dockerfile.yolo", text="FROM x\nARG HOST_UID\n# sub\n")
     (r / "sub").mkdir()
     argv = run_cli(
-        ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        ["--dockerfile", "Dockerfile.yolo", "--yolo-config-branch", "yolo-cfg"],
         home=home,
         cwd=r / "sub",
     )
     assert _image_tag(argv) == cy._image_tag("FROM x\nARG HOST_UID\n# sub\n", os.getuid())
 
 
-def test_dockerfile_branch_missing_file_on_branch_exits(cy, run_cli, repo):
+def test_config_branch_missing_file_on_branch_exits(cy, run_cli, repo):
     r, home = repo
     _dockerfile_on_branch(r)
     with pytest.raises(SystemExit) as e:
-        run_cli(["--dockerfile", "Other", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r)
+        run_cli(["--dockerfile", "Other", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r)
     assert "can't read Other from branch 'yolo-cfg'" in str(e.value)
     with pytest.raises(SystemExit) as e:
         run_cli(
-            ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "nope"], home=home, cwd=r
+            ["--dockerfile", "Dockerfile.yolo", "--yolo-config-branch", "nope"], home=home, cwd=r
         )
     assert "from branch 'nope'" in str(e.value)
 
 
-def test_dockerfile_branch_rejects_an_absolute_dockerfile(cy, run_cli, repo, tmp_path):
+def test_config_branch_rejects_an_absolute_dockerfile(cy, run_cli, repo, tmp_path):
     r, home = repo
     df = tmp_path / "Dockerfile.abs"
     df.write_text(DF_TEXT)
     with pytest.raises(SystemExit) as e:
-        run_cli(["--dockerfile", str(df), "--dockerfile-branch", "main"], home=home, cwd=r)
+        run_cli(["--dockerfile", str(df), "--yolo-config-branch", "main"], home=home, cwd=r)
     assert "must be a relative, in-repo path" in str(e.value)
 
 
-def test_dockerfile_branch_does_not_need_the_file_in_the_working_tree(cy, run_cli, repo, capsys):
+def test_config_branch_does_not_need_the_file_in_the_working_tree(cy, run_cli, repo, capsys):
     # A checked-out copy that differs is ignored: the branch's text is what builds.
     import os
 
@@ -1678,27 +1679,27 @@ def test_dockerfile_branch_does_not_need_the_file_in_the_working_tree(cy, run_cl
     _dockerfile_on_branch(r)
     (r / "Dockerfile.yolo").write_text("FROM stale\nARG HOST_UID\n")
     argv = run_cli(
-        ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r
+        ["--dockerfile", "Dockerfile.yolo", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r
     )
     assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
 
 
-def test_config_verb_persists_and_validates_dockerfile_branch(cy, run_cli, repo):
+def test_config_verb_persists_and_validates_config_branch(cy, run_cli, repo):
     import json
 
     r, home = repo
     _dockerfile_on_branch(r)
     run_cli(
-        ["config", "--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        ["config", "--dockerfile", "Dockerfile.yolo", "--yolo-config-branch", "yolo-cfg"],
         home=home,
         cwd=r,
     )
     entries = json.loads((home / ".claude-yolo" / "projects.json").read_text())
     (entry,) = entries.values()
-    assert entry["dockerfile"] == "Dockerfile.yolo" and entry["dockerfile-branch"] == "yolo-cfg"
+    assert entry["dockerfile"] == "Dockerfile.yolo" and entry["yolo-config-branch"] == "yolo-cfg"
     # Re-pointing the branch alone is validated against the pinned dockerfile...
     with pytest.raises(SystemExit) as e:
-        run_cli(["config", "--dockerfile-branch", "nope"], home=home, cwd=r)
+        run_cli(["config", "--yolo-config-branch", "nope"], home=home, cwd=r)
     assert "from branch 'nope'" in str(e.value)
     # ...and re-pointing the path alone against the pinned branch.
     with pytest.raises(SystemExit) as e:
@@ -1709,3 +1710,64 @@ def test_config_verb_persists_and_validates_dockerfile_branch(cy, run_cli, repo)
 
     argv = run_cli([], home=home, cwd=r)
     assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
+
+
+RC_TEXT = "export FROM_BRANCH=1\n"
+
+
+def _yolorc_mount(cy, argv):
+    """Host path bind-mounted at the fixed rc container path, else None."""
+    for i, a in enumerate(argv):
+        if a == "-v" and argv[i + 1].endswith(f":{cy._YOLORC_CONTAINER_PATH}:ro"):
+            return pathlib.Path(argv[i + 1].split(":")[0])
+    return None
+
+
+def test_config_branch_stages_the_rc_from_git_into_the_run_dir(cy, run_cli, repo):
+    # The rc isn't in the tree; its branch text is written (chmod 600) into the
+    # session's run dir and that copy is what's mounted at the fixed path.
+    r, home = repo
+    _dockerfile_on_branch(r, path=".yolorc", text=RC_TEXT)
+    argv = run_cli(["--yolorc", ".yolorc", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r)
+    staged = _yolorc_mount(cy, argv)
+    assert staged is not None and staged.is_relative_to(home / ".claude-yolo-run")
+    assert staged.read_text() == RC_TEXT
+    assert staged.stat().st_mode & 0o777 == 0o600
+    assert f"YOLO_RC={cy._YOLORC_CONTAINER_PATH}" in argv
+    assert not (r / ".yolorc").exists()
+
+
+def test_config_branch_rc_ignores_a_checked_out_copy(cy, run_cli, repo):
+    r, home = repo
+    _dockerfile_on_branch(r, path=".yolorc", text=RC_TEXT)
+    (r / ".yolorc").write_text("export STALE=1\n")
+    argv = run_cli(["--yolorc", ".yolorc", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r)
+    assert _yolorc_mount(cy, argv).read_text() == RC_TEXT
+
+
+def test_config_branch_missing_rc_on_branch_exits(cy, run_cli, repo):
+    r, home = repo
+    _dockerfile_on_branch(r)  # the branch holds only the Dockerfile
+    (r / ".yolorc").write_text("export STALE=1\n")  # a tree copy doesn't rescue it
+    with pytest.raises(SystemExit) as e:
+        run_cli(["--yolorc", ".yolorc", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r)
+    assert "yolorc: can't read .yolorc from branch 'yolo-cfg'" in str(e.value)
+
+
+def test_config_verb_validates_the_rc_against_the_config_branch(cy, run_cli, repo):
+    import json
+
+    r, home = repo
+    _dockerfile_on_branch(r, path=".yolorc", text=RC_TEXT)
+    run_cli(["config", "--yolorc", ".yolorc", "--yolo-config-branch", "yolo-cfg"], home=home, cwd=r)
+    (entry,) = json.loads((home / ".claude-yolo" / "projects.json").read_text()).values()
+    assert entry["yolorc"] == ".yolorc" and entry["yolo-config-branch"] == "yolo-cfg"
+    with pytest.raises(SystemExit) as e:
+        run_cli(["config", "--yolorc", "other.rc"], home=home, cwd=r)
+    assert "yolorc: can't read other.rc from branch 'yolo-cfg'" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        run_cli(["config", "--yolo-config-branch", "main"], home=home, cwd=r)
+    assert "yolorc: can't read .yolorc from branch 'main'" in str(e.value)
+    # A persisted pair drives a flagless launch.
+    argv = run_cli([], home=home, cwd=r)
+    assert _yolorc_mount(cy, argv).read_text() == RC_TEXT

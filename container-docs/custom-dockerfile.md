@@ -82,9 +82,10 @@ USER claude
 - Or use it for a single run: `yolo --dockerfile ./Dockerfile.yolo`
 - If the file must stay out of the project's branches (e.g. the user contributes
   to someone else's repo and doesn't want it in their PRs), they can commit it on
-  a branch of their own and add `--dockerfile-branch THAT-BRANCH` to the config
-  command: yolo then reads it from that branch (`git show`) rather than the
-  working tree, so no topic worktree needs to carry it.
+  a branch of their own and add `--yolo-config-branch THAT-BRANCH` to the config
+  command: yolo then reads it (and a `--yolorc` file, if configured) from that
+  branch (`git show`) rather than the working tree, so no topic worktree needs
+  to carry it.
 
 Then the user exits this session and starts a new one; the new image builds on
 that launch. If they save the file but run neither command, yolo ignores it and

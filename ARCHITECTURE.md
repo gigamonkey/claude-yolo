@@ -467,16 +467,22 @@ on top of whichever auth is chosen:
   image and ignores it — so a launch **warns** (launch-only, beside the
   dockerfile-exists check) when `cwd/Dockerfile.yolo` is present but no
   `dockerfile` key is set, pointing at `yolo config --dockerfile
-  ./Dockerfile.yolo`. **`--dockerfile-branch REF`** (`dockerfile-branch` in
-  config) reads the path **out of git** instead of the working tree:
-  `_read_dockerfile` — the one reader shared by `_build_image`, the launch
-  pre-flight, and the `config`-time validation — runs `git show REF:./PATH` from
-  the session dir (the `./` prefix makes git resolve the path relative to the
-  cwd, matching the filesystem rule), requires a relative `dockerfile`, and
-  raises `YoloError` naming the branch/path on any git failure. The use case is
-  contributing to someone else's repo: `base` set to `upstream/main` for clean
-  PRs, and the Dockerfile.yolo on a branch of the fork that is never merged, so
-  no topic worktree ever contains it. **Caveat:** a `dockerfile` pointing at a file *inside*
+  ./Dockerfile.yolo`. **`--yolo-config-branch REF`** (`yolo-config-branch` in
+  config) reads the `dockerfile` *and* `yolorc` paths **out of git** instead of
+  the working tree: `_read_config_file` — the one reader shared by
+  `_build_image`, `launch_container`'s rc staging, the launch pre-flight, and
+  the `config`-time validation (which checks both files against the branch
+  whenever any of the three keys changes) — runs `git show REF:./PATH` from the
+  session dir (the `./` prefix makes git resolve the path relative to the cwd,
+  matching the filesystem rule), requires a relative path, and raises
+  `YoloError` naming the key/branch/path on any git failure. The Dockerfile is
+  just text to build; the rc has to be a *file* to bind-mount, so its branch
+  text is written chmod-600 into the session's run dir (`_write_run_file`, the
+  secrets transport) and that copy is mounted at the fixed rc path — GC'd with
+  the container's run dir. The use case is contributing to someone else's repo:
+  `base` set to `upstream/main` for clean PRs, and the Dockerfile.yolo /
+  .yolorc on a branch of the fork that is never merged, so no topic worktree
+  ever contains them. **Caveat:** a `dockerfile` pointing at a file *inside*
   the bind-mounted working tree (e.g. `./Dockerfile.yolo`) is editable by Claude
   between runs, so Claude could alter the next image build. The *key* still lives
   in host-side `projects.json` (Claude can't add it), only the referenced file is
@@ -991,7 +997,7 @@ and then the CLI values (those lists accumulate; everything else replaces).
 Keys mirror the flag names (dashes or underscores both accepted). Supported:
 `project` (a topic overlay's pointer to its project — stamped by `start
 --project`, not set by hand — see the naming note below),
-`config-dir`, `dockerfile`, `dockerfile-branch`, `yolorc`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
+`config-dir`, `dockerfile`, `yolorc`, `yolo-config-branch`, `auth` (one of `keychain`/`oauth-token`/`bedrock` —
 validated against `AUTH_CHOICES` in `_parse_yolo_dict`, since `set_defaults`
 bypasses argparse's `choices` check), `aws-profile`, `aws-region`,
 `bedrock-model`, `subscription-type` (plan tier forwarded as
@@ -2359,10 +2365,12 @@ entry, and a malformed-file error. `test_verbs.py` also covers the
 **remote-base fetch** on `start` (a commit landed on a bare `upstream` since
 the last fetch is what the topic branches from; a never-fetched base is created
 by the fetch; a dead remote warns and uses the stale ref; a slashed local
-branch and a reattach don't fetch) and **`dockerfile-branch`** (the image tag
+branch and a reattach don't fetch) and **`yolo-config-branch`** (the image tag
 is the branch's text in worktree and cwd mode, from a subdirectory, and over a
-differing checked-out copy; missing file/ref and absolute-path errors; the
-`config` verb persisting and cross-validating the pair).
+differing checked-out copy; the rc staged from git into the run dir chmod 600
+and mounted from there, over a differing checked-out copy; missing file/ref and
+absolute-path errors for both; the `config` verb persisting and
+cross-validating the files against the branch).
 `test_multi_repo.py` covers multi-repo projects against **three real throwaway
 repos**: the `repos` key end-to-end (`config --add-repo`/`--remove-repo`
 persist/dedupe/validate, a project-entry `repos` reaching the launch), the

@@ -265,41 +265,44 @@ def _resolve_dockerfile(dockerfile: str, base: pathlib.Path) -> pathlib.Path:
     return path if path.is_absolute() else base / path
 
 
-def _read_dockerfile(dockerfile: str, branch: str | None, base: pathlib.Path) -> str:
-    """The text of the `--dockerfile` / `dockerfile`-config file, or raise YoloError.
+def _read_config_file(key: str, path: str, branch: str | None, base: pathlib.Path) -> str:
+    """The text of a `dockerfile` / `yolorc` config file, or raise YoloError.
 
-    Without `branch` (the `dockerfile-branch` key) the file is read from the
-    filesystem, resolved by _resolve_dockerfile against `base` (the session
-    working dir). With `branch`, the path is read **out of git** instead —
-    `git show <branch>:./<path>` run from `base` — so the Dockerfile can live on a
-    branch that is never checked out in the session and never merged: the
-    contributor-to-someone-else's-repo case, where `base` points at an upstream
-    branch to make clean PRs from and the Dockerfile.yolo lives on a private
-    branch of the fork. `branch` is any git ref, resolved in the repo containing
-    `base` (a worktree shares its main checkout's refs). The `./` prefix makes git
-    resolve the path relative to `base` rather than the repo root, matching the
-    filesystem rule (a relative path names the session dir's copy). An absolute
-    `dockerfile` has no in-repo meaning, so it's rejected with `branch` set.
+    `key` names the config key for messages. Without `branch` (the
+    `yolo-config-branch` key) the file is read from the filesystem, resolved
+    against `base` (the session working dir) by the shared rule (relative → the
+    session dir's copy; absolute / `~` as-is). With `branch`, the path is read
+    **out of git** instead — `git show <branch>:./<path>` run from `base` — so
+    the file can live on a branch that is never checked out in the session and
+    never merged: the contributor-to-someone-else's-repo case, where `base`
+    points at an upstream branch to make clean PRs from and the Dockerfile.yolo /
+    .yolorc live on a private branch of the fork. `branch` is any git ref,
+    resolved in the repo containing `base` (a worktree shares its main checkout's
+    refs). The `./` prefix makes git resolve the path relative to `base` rather
+    than the repo root, matching the filesystem rule. An absolute path has no
+    in-repo meaning, so it's rejected with `branch` set.
 
-    Used for the launch-time read (`_build_image`) *and* the existence checks
-    (`config`-time validation and the launch pre-flight), so all three agree on
-    what "the Dockerfile" is.
+    The one reader behind the launch-time uses (`_build_image`; the rc staged
+    into the run dir by `launch_container`) *and* the existence checks (the
+    `config`-time validation and the launch pre-flight), so they all agree on
+    what "the file" is.
     """
+    expanded = pathlib.Path(os.path.expanduser(path))
     if not branch:
-        path = _resolve_dockerfile(dockerfile, base)
-        if not path.is_file():
-            raise YoloError(f"dockerfile: not a file: {dockerfile}")
-        return path.read_text()
-    if pathlib.Path(os.path.expanduser(dockerfile)).is_absolute():
+        resolved = expanded if expanded.is_absolute() else base / expanded
+        if not resolved.is_file():
+            raise YoloError(f"{key}: not a file: {path}")
+        return resolved.read_text()
+    if expanded.is_absolute():
         raise YoloError(
-            f"dockerfile-branch: `dockerfile` must be a relative, in-repo path to read "
-            f"it from branch '{branch}'; {dockerfile} is absolute."
+            f"yolo-config-branch: `{key}` must be a relative, in-repo path to read "
+            f"it from branch '{branch}'; {path} is absolute."
         )
-    spec = f"{branch}:./{os.path.normpath(dockerfile)}"
+    spec = f"{branch}:./{os.path.normpath(path)}"
     r = subprocess.run(["git", "-C", str(base), "show", spec], capture_output=True, text=True)
     if r.returncode != 0:
         detail = r.stderr.strip().removeprefix("fatal: ") or f"git show {spec} failed"
-        raise YoloError(f"dockerfile: can't read {dockerfile} from branch '{branch}': {detail}")
+        raise YoloError(f"{key}: can't read {path} from branch '{branch}': {detail}")
     return r.stdout
 
 
@@ -325,9 +328,9 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
     """Build the container image for this launch and return its tag.
 
     Default path: build the inline DEFAULT_DOCKERFILE. Custom `--dockerfile` path:
-    build that file instead (read via _read_dockerfile against `cwd`, the session
+    build that file instead (read via _read_config_file against `cwd`, the session
     working dir, so a relative path tracks the worktree — or, with
-    `dockerfile-branch` set, out of that git ref). If the custom
+    `yolo-config-branch` set, out of that git ref). If the custom
     file references YOLO_BASE — i.e. it does `FROM ${YOLO_BASE}` to *layer on*
     yolo's default rather than replace it — first build the default as the base
     image and pass its tag in as the YOLO_BASE build arg, then verify the resulting
@@ -343,7 +346,8 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
         build_docker_image(DEFAULT_DOCKERFILE, tag, uid, no_cache=no_cache)
         return tag
 
-    text = _read_dockerfile(dockerfile, getattr(parsed, "dockerfile_branch", None), cwd)
+    branch = getattr(parsed, "yolo_config_branch", None)
+    text = _read_config_file("dockerfile", dockerfile, branch, cwd)
     build_args = {}
     if YOLO_BASE_ARG in text:
         base_tag = _image_tag(DEFAULT_DOCKERFILE, uid)
@@ -1681,7 +1685,7 @@ YOLO_KEYS = {
     "project": ("project", "str"),
     "config_dir": ("config_dir", "path"),
     "dockerfile": ("dockerfile", "path"),
-    "dockerfile_branch": ("dockerfile_branch", "str"),
+    "yolo_config_branch": ("yolo_config_branch", "str"),
     "yolorc": ("yolorc", "path"),
     "auth": ("auth", "auth"),
     "aws_profile": ("aws_profile", "str"),
@@ -2723,20 +2727,19 @@ def _apply_config_edits(
     # repos: validated *and* normalized to absolute repo roots — a stored relative
     # path would later resolve against whatever cwd the reader happens to have.
     explicit = _normalize_repo_specs(explicit)
-    # dockerfile / dockerfile-branch: validated together — a typo'd path or a
-    # branch that doesn't hold the file can't be pinned. Either key being set
-    # here triggers the check, against the other's value in this layer (if any).
-    if "dockerfile" in explicit or "dockerfile-branch" in explicit:
-        df = explicit.get("dockerfile", _layer_get(current, "dockerfile"))
-        branch = explicit.get("dockerfile-branch", _layer_get(current, "dockerfile-branch"))
-        if df is not None:
-            try:
-                _read_dockerfile(df, branch, base_dir)
-            except YoloError as e:
-                sys.exit(str(e))
-    rc = explicit.get("yolorc")
-    if rc is not None and not _resolve_yolorc(rc, base_dir).is_file():
-        sys.exit(f"yolorc: not a file: {rc}")  # a typo'd path can't be pinned
+    # dockerfile / yolorc / yolo-config-branch: validated together — a typo'd
+    # path, or a branch that doesn't hold the file, can't be pinned. Any of the
+    # three being set here triggers the check, against the others' values in
+    # this layer (if any).
+    if any(k in explicit for k in ("dockerfile", "yolorc", "yolo-config-branch")):
+        branch = explicit.get("yolo-config-branch", _layer_get(current, "yolo-config-branch"))
+        for key in ("dockerfile", "yolorc"):
+            path = explicit.get(key, _layer_get(current, key))
+            if path is not None:
+                try:
+                    _read_config_file(key, path, branch, base_dir)
+                except YoloError as e:
+                    sys.exit(str(e))
 
     entry = dict(current)
     for k, v in explicit.items():
@@ -3982,15 +3985,16 @@ PARSER.add_argument(
     "for its non-root user to keep bind-mount ownership correct.",
 )
 PARSER.add_argument(
-    "--dockerfile-branch",
-    dest="dockerfile_branch",
+    "--yolo-config-branch",
+    dest="yolo_config_branch",
     default=None,
     metavar="REF",
-    help="Read the --dockerfile path out of this git ref (`git show REF:PATH`) "
-    "instead of the session's working tree (or set `dockerfile-branch` in config). "
-    "Lets a Dockerfile.yolo live on a branch of your own that is never merged — "
-    "e.g. when `base` is an upstream branch you make PRs against and the "
-    "Dockerfile must stay out of them. Requires a relative --dockerfile path.",
+    help="Read the --dockerfile and --yolorc paths out of this git ref "
+    "(`git show REF:PATH`) instead of the session's working tree (or set "
+    "`yolo-config-branch` in config). Lets a Dockerfile.yolo / .yolorc live on a "
+    "branch of your own that is never merged — e.g. when `base` is an upstream "
+    "branch you make PRs against and yolo's files must stay out of them. "
+    "Requires relative --dockerfile/--yolorc paths.",
 )
 PARSER.add_argument(
     "--yolorc",
@@ -5124,8 +5128,20 @@ def launch_container(
     # var rides the container's runtime env); claude launches source it via the
     # command wrapper below (claude isn't a shell, so .bashrc never runs for it).
     # Read-only here even for an in-tree rc; the rw cwd mount is the editable copy
-    # (same Claude-can-edit-between-runs caveat as an in-tree --dockerfile).
-    yolorc_host = _resolve_yolorc(parsed.yolorc, cwd) if parsed.yolorc else None
+    # (same Claude-can-edit-between-runs caveat as an in-tree --dockerfile). With
+    # `yolo-config-branch` the rc isn't a file in the tree at all: its text is
+    # read out of git and staged (chmod 600) into this session's run dir, and
+    # *that* copy is mounted — the run dir is GC'd with the container's.
+    yolorc_host = None
+    branch = getattr(parsed, "yolo_config_branch", None)
+    if parsed.yolorc and branch:
+        try:
+            rc_text = _read_config_file("yolorc", parsed.yolorc, branch, cwd)
+        except YoloError as e:
+            sys.exit(str(e))
+        yolorc_host = pathlib.Path(_write_run_file(run_dir, "yolorc", rc_text.encode()))
+    elif parsed.yolorc:
+        yolorc_host = _resolve_yolorc(parsed.yolorc, cwd)
     if yolorc_host:
         args += ["-v", f"{yolorc_host}:{_YOLORC_CONTAINER_PATH}:ro"]
         args += ["-e", f"YOLO_RC={_YOLORC_CONTAINER_PATH}"]
@@ -9824,11 +9840,11 @@ def _main():
     # launch paths only (like the mount/port resolution above), so a stale
     # `dockerfile` config path can't break `list`/`finish`/`config`. Resolved
     # against the now-final `cwd` (the worktree dir in worktree mode), so a
-    # relative path points at the session's own copy (or, with `dockerfile-branch`,
-    # the copy on that ref) — matching _build_image.
+    # relative path points at the session's own copy (or, with
+    # `yolo-config-branch`, the copy on that ref) — matching _build_image.
     if parsed.dockerfile:
         try:
-            _read_dockerfile(parsed.dockerfile, parsed.dockerfile_branch, cwd)
+            _read_config_file("dockerfile", parsed.dockerfile, parsed.yolo_config_branch, cwd)
         except YoloError as e:
             sys.exit(str(e))
     elif (cwd / "Dockerfile.yolo").is_file():
@@ -9846,11 +9862,14 @@ def _main():
 
     # A --yolorc rc file must exist and be a readable file, resolved against the
     # final cwd (the worktree dir in worktree mode) so a relative path points at
-    # the session's own copy — matching launch_container's resolution. Launch-path
-    # only, like the dockerfile check, so a stale config path can't break the
-    # terminal verbs.
-    if parsed.yolorc and not _resolve_yolorc(parsed.yolorc, cwd).is_file():
-        sys.exit(f"yolorc: not a file: {parsed.yolorc}")
+    # the session's own copy (or, with `yolo-config-branch`, the copy on that
+    # ref) — matching launch_container's resolution. Launch-path only, like the
+    # dockerfile check, so a stale config path can't break the terminal verbs.
+    if parsed.yolorc:
+        try:
+            _read_config_file("yolorc", parsed.yolorc, parsed.yolo_config_branch, cwd)
+        except YoloError as e:
+            sys.exit(str(e))
 
     # Session-activity hooks (Stop/UserPromptSubmit) write to this file, which
     # `ps` reads for the STATE column. Path is the container-side mount location

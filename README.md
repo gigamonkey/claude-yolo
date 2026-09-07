@@ -1294,6 +1294,11 @@ Claude between runs (the read-only mount is of the same file the rw cwd mount
 exposes) — an accepted trade-off for an opt-in feature, but prefer an
 out-of-tree rc when that matters.
 
+To keep the rc out of the project's branches entirely — say you're
+contributing to someone else's repo — commit it on a branch of your own and
+point [`yolo-config-branch`](#yolo-config-branch---yolo-config-branch-ref) at
+that branch; the rc is then read out of git rather than the working tree.
+
 ### `dockerfile` (`--dockerfile PATH`)
 
 Build the container image from your own Dockerfile instead of the built-in
@@ -1358,34 +1363,6 @@ ignored and you get the default image. To catch that, a launch **warns** when a
 `Dockerfile.yolo` is present in the session directory but no `dockerfile` config
 is set, pointing you at `yolo config --dockerfile ./Dockerfile.yolo`.
 
-#### `dockerfile-branch` (`--dockerfile-branch REF`)
-
-Read the `dockerfile` path **out of a git ref** instead of the session's working
-tree. This is for working in someone else's repository: you set
-[`base`](#base---base-ref-default-head) to their upstream branch so each topic
-branches from it and pushes to your fork as a clean PR, but a `Dockerfile.yolo`
-committed on the topic branch would ride along into that PR. With
-`dockerfile-branch` the Dockerfile lives on a branch that exists only in your
-clone (and your fork, if you push it) and is never merged anywhere:
-
-```bash
-git checkout -b yolo-config            # a branch of your own, off anything
-yolo dockerfile --custom > Dockerfile.yolo
-git add Dockerfile.yolo && git commit -m "yolo image"
-git checkout main
-yolo config --base upstream/main --dockerfile ./Dockerfile.yolo --dockerfile-branch yolo-config
-```
-
-Every launch then builds from `git show yolo-config:./Dockerfile.yolo`; the
-topic worktrees never contain the file, so it can't leak into a PR. `REF` is any
-git ref (a branch, a tag, a commit) resolved in the session's repo — a worktree
-shares its main checkout's refs. The `dockerfile` path must be **relative** (an
-absolute path has no in-repo meaning and is refused with this key set), and it
-resolves against the session directory the same way the filesystem rule does. A
-checked-out copy of the file, if there is one, is ignored: the branch's text is
-what builds. `yolo config` validates the pair when either key is set, so a branch
-that doesn't hold the file can't be pinned.
-
 **Is a custom Dockerfile safe?** Mostly yes, and it's worth understanding why,
 since the file usually lives in your project directory, where Claude could edit
 it between runs. The short version is that a Dockerfile changes *what's in the
@@ -1418,6 +1395,41 @@ In other words, treat a Dockerfile you didn't write with the same caution as any
 third-party Dockerfile, but it doesn't widen yolo's blast radius beyond the
 mounts and credentials you already chose to hand over.
 
+### `yolo-config-branch` (`--yolo-config-branch REF`)
+
+Read the [`dockerfile`](#dockerfile---dockerfile-path) and
+[`yolorc`](#yolorc---yolorc-path) paths **out of a git ref** instead of the
+session's working tree. This is for working in someone else's repository: you
+set [`base`](#base---base-ref-default-head) to their upstream branch so each
+topic branches from it and pushes to your fork as a clean PR, but a
+`Dockerfile.yolo` or `.yolorc` committed on the topic branch would ride along
+into that PR. With `yolo-config-branch` those files live on a branch that
+exists only in your clone (and your fork, if you push it) and is never merged:
+
+```bash
+git checkout -b yolo-config            # a branch of your own, off anything
+yolo dockerfile --custom > Dockerfile.yolo
+printf 'export FOO=bar\n' > .yolorc
+git add Dockerfile.yolo .yolorc && git commit -m "yolo config"
+git checkout main
+yolo config --base upstream/main --yolo-config-branch yolo-config \
+            --dockerfile ./Dockerfile.yolo --yolorc ./.yolorc
+```
+
+Every launch then builds the image from `git show yolo-config:./Dockerfile.yolo`
+and sources the rc from `git show yolo-config:./.yolorc` (its text is staged
+into the session's private run dir and mounted from there, like a secret). The
+topic worktrees never contain either file, so nothing can leak into a PR.
+`REF` is any git ref (a branch, a tag, a commit) resolved in the session's repo
+— a worktree shares its main checkout's refs. Both paths must be **relative**
+(an absolute path has no in-repo meaning and is refused with this key set),
+and they resolve against the session directory the same way the filesystem
+rule does. A checked-out copy of either file, if there is one, is ignored: the
+branch's text is what runs. `yolo config` validates the files against the
+branch whenever any of the three keys is set, so a branch that doesn't hold a
+configured file can't be pinned. Either file may be configured alone; the key
+applies to whichever are set.
+
 ### `base` (`--base REF`, default `HEAD`)
 
 The git ref worktree branches are created from (`yolo start TOPIC`) and judged
@@ -1433,7 +1445,7 @@ but never fetched simply gets fetched into existence). If the fetch fails
 (offline, remote gone) yolo warns and branches off the last-fetched ref instead;
 only if there is none does the start error. A local branch whose name contains a
 slash (`feature/foo`) isn't mistaken for a remote one. Combine with
-[`dockerfile-branch`](#dockerfile-branch---dockerfile-branch-ref) to contribute
+[`yolo-config-branch`](#yolo-config-branch---yolo-config-branch-ref) to contribute
 to someone else's repo with a custom image of your own that stays out of your PRs.
 
 ### `finish-action` (`--finish-action MODE`, default `delete-if-merged`)
