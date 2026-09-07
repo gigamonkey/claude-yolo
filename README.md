@@ -249,7 +249,8 @@ Verb details:
 
 - **`start TOPIC`** creates the worktree on a new branch `TOPIC`, branched off
   `HEAD` by default (change with `--base REF`, e.g. `--base origin/main`, or
-  the `base` config key), and launches a fresh session named `<project>:<TOPIC>`
+  the `base` config key; a remote-tracking base is fetched first, so the branch
+  starts from the remote's current tip), and launches a fresh session named `<project>:<TOPIC>`
   — the project being the repo basename, unless the [project's name](#projects)
   differs — (the name shown above Claude's prompt and in
   `claude --resume`; the project prefix keeps it distinct from the same topic in
@@ -1357,6 +1358,34 @@ ignored and you get the default image. To catch that, a launch **warns** when a
 `Dockerfile.yolo` is present in the session directory but no `dockerfile` config
 is set, pointing you at `yolo config --dockerfile ./Dockerfile.yolo`.
 
+#### `dockerfile-branch` (`--dockerfile-branch REF`)
+
+Read the `dockerfile` path **out of a git ref** instead of the session's working
+tree. This is for working in someone else's repository: you set
+[`base`](#base---base-ref-default-head) to their upstream branch so each topic
+branches from it and pushes to your fork as a clean PR, but a `Dockerfile.yolo`
+committed on the topic branch would ride along into that PR. With
+`dockerfile-branch` the Dockerfile lives on a branch that exists only in your
+clone (and your fork, if you push it) and is never merged anywhere:
+
+```bash
+git checkout -b yolo-config            # a branch of your own, off anything
+yolo dockerfile --custom > Dockerfile.yolo
+git add Dockerfile.yolo && git commit -m "yolo image"
+git checkout main
+yolo config --base upstream/main --dockerfile ./Dockerfile.yolo --dockerfile-branch yolo-config
+```
+
+Every launch then builds from `git show yolo-config:./Dockerfile.yolo`; the
+topic worktrees never contain the file, so it can't leak into a PR. `REF` is any
+git ref (a branch, a tag, a commit) resolved in the session's repo — a worktree
+shares its main checkout's refs. The `dockerfile` path must be **relative** (an
+absolute path has no in-repo meaning and is refused with this key set), and it
+resolves against the session directory the same way the filesystem rule does. A
+checked-out copy of the file, if there is one, is ignored: the branch's text is
+what builds. `yolo config` validates the pair when either key is set, so a branch
+that doesn't hold the file can't be pinned.
+
 **Is a custom Dockerfile safe?** Mostly yes, and it's worth understanding why,
 since the file usually lives in your project directory, where Claude could edit
 it between runs. The short version is that a Dockerfile changes *what's in the
@@ -1395,6 +1424,17 @@ The git ref worktree branches are created from (`yolo start TOPIC`) and judged
 `merged`/`unmerged` against (`yolo list`). Set it to e.g. `"origin/main"` if
 your worktrees should branch from the remote rather than whatever the main
 checkout is on.
+
+When `base` names a **remote-tracking branch** — `<remote>/<branch>` where
+`<remote>` is one of the repo's remotes, like `upstream/main` — `yolo start`
+**fetches that branch first**, so the new topic starts from the remote's current
+tip rather than whatever the last fetch left behind (and a base you've configured
+but never fetched simply gets fetched into existence). If the fetch fails
+(offline, remote gone) yolo warns and branches off the last-fetched ref instead;
+only if there is none does the start error. A local branch whose name contains a
+slash (`feature/foo`) isn't mistaken for a remote one. Combine with
+[`dockerfile-branch`](#dockerfile-branch---dockerfile-branch-ref) to contribute
+to someone else's repo with a custom image of your own that stays out of your PRs.
 
 ### `finish-action` (`--finish-action MODE`, default `delete-if-merged`)
 

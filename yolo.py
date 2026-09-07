@@ -265,6 +265,44 @@ def _resolve_dockerfile(dockerfile: str, base: pathlib.Path) -> pathlib.Path:
     return path if path.is_absolute() else base / path
 
 
+def _read_dockerfile(dockerfile: str, branch: str | None, base: pathlib.Path) -> str:
+    """The text of the `--dockerfile` / `dockerfile`-config file, or raise YoloError.
+
+    Without `branch` (the `dockerfile-branch` key) the file is read from the
+    filesystem, resolved by _resolve_dockerfile against `base` (the session
+    working dir). With `branch`, the path is read **out of git** instead —
+    `git show <branch>:./<path>` run from `base` — so the Dockerfile can live on a
+    branch that is never checked out in the session and never merged: the
+    contributor-to-someone-else's-repo case, where `base` points at an upstream
+    branch to make clean PRs from and the Dockerfile.yolo lives on a private
+    branch of the fork. `branch` is any git ref, resolved in the repo containing
+    `base` (a worktree shares its main checkout's refs). The `./` prefix makes git
+    resolve the path relative to `base` rather than the repo root, matching the
+    filesystem rule (a relative path names the session dir's copy). An absolute
+    `dockerfile` has no in-repo meaning, so it's rejected with `branch` set.
+
+    Used for the launch-time read (`_build_image`) *and* the existence checks
+    (`config`-time validation and the launch pre-flight), so all three agree on
+    what "the Dockerfile" is.
+    """
+    if not branch:
+        path = _resolve_dockerfile(dockerfile, base)
+        if not path.is_file():
+            raise YoloError(f"dockerfile: not a file: {dockerfile}")
+        return path.read_text()
+    if pathlib.Path(os.path.expanduser(dockerfile)).is_absolute():
+        raise YoloError(
+            f"dockerfile-branch: `dockerfile` must be a relative, in-repo path to read "
+            f"it from branch '{branch}'; {dockerfile} is absolute."
+        )
+    spec = f"{branch}:./{os.path.normpath(dockerfile)}"
+    r = subprocess.run(["git", "-C", str(base), "show", spec], capture_output=True, text=True)
+    if r.returncode != 0:
+        detail = r.stderr.strip().removeprefix("fatal: ") or f"git show {spec} failed"
+        raise YoloError(f"dockerfile: can't read {dockerfile} from branch '{branch}': {detail}")
+    return r.stdout
+
+
 # Container path the resolved `--yolorc` file is bind-mounted to (read-only) and
 # the value of the YOLO_RC env var. A fixed mount point — uniform regardless of
 # the host path — that the .bashrc and the claude-launch wrapper both source.
@@ -287,8 +325,9 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
     """Build the container image for this launch and return its tag.
 
     Default path: build the inline DEFAULT_DOCKERFILE. Custom `--dockerfile` path:
-    build that file instead (resolved via _resolve_dockerfile against `cwd`, the
-    session working dir, so a relative path tracks the worktree). If the custom
+    build that file instead (read via _read_dockerfile against `cwd`, the session
+    working dir, so a relative path tracks the worktree — or, with
+    `dockerfile-branch` set, out of that git ref). If the custom
     file references YOLO_BASE — i.e. it does `FROM ${YOLO_BASE}` to *layer on*
     yolo's default rather than replace it — first build the default as the base
     image and pass its tag in as the YOLO_BASE build arg, then verify the resulting
@@ -304,7 +343,7 @@ def _build_image(parsed, cwd: pathlib.Path) -> str:
         build_docker_image(DEFAULT_DOCKERFILE, tag, uid, no_cache=no_cache)
         return tag
 
-    text = _resolve_dockerfile(dockerfile, cwd).read_text()
+    text = _read_dockerfile(dockerfile, getattr(parsed, "dockerfile_branch", None), cwd)
     build_args = {}
     if YOLO_BASE_ARG in text:
         base_tag = _image_tag(DEFAULT_DOCKERFILE, uid)
@@ -1523,6 +1562,53 @@ def _branch_exists(name: str, repo: pathlib.Path | None = None) -> bool:
     return subprocess.run([*cmd, f"refs/heads/{name}"]).returncode == 0
 
 
+def _remote_base(base: str, repo: pathlib.Path) -> tuple[str, str] | None:
+    """`(remote, branch)` if `base` is `<remote>/<branch>` for a remote of `repo`.
+
+    Matched against the repo's configured remotes (`git remote`), so a plain
+    local branch that happens to contain a slash (`feature/foo`) isn't mistaken
+    for one — only a prefix that *is* a remote counts.
+    """
+    if "/" not in base:
+        return None
+    remote, branch = base.split("/", 1)
+    r = subprocess.run(["git", "-C", str(repo), "remote"], capture_output=True, text=True)
+    if r.returncode != 0 or remote not in r.stdout.split():
+        return None
+    return remote, branch
+
+
+def _fetch_remote_base(base: str, repo: pathlib.Path) -> None:
+    """Fetch `base`'s branch from its remote when `base` is a remote-tracking ref.
+
+    `start` branches a worktree off `base`; when that's `upstream/main` the point
+    is to start from upstream's *current* tip, which a local remote-tracking ref
+    only reflects as of the last fetch. So refresh it right before branching: a
+    `git fetch <remote> <branch>` updates `refs/remotes/<remote>/<branch>` (and
+    creates it, if the user configured a base they've never fetched). A fetch
+    failure — offline, remote gone — is a warning, not an error: the worktree
+    is then created off the last-fetched ref, and if there is none the caller's
+    resolve check reports the missing base as usual.
+    """
+    rb = _remote_base(base, repo)
+    if rb is None:
+        return
+    remote, branch = rb
+    print(f"fetching {base}...", file=sys.stderr)
+    r = subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--quiet", remote, branch],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        detail = r.stderr.strip().removeprefix("fatal: ")
+        print(
+            f"warning: fetching {base} failed ({detail}); using the last-fetched "
+            f"{base} if there is one.",
+            file=sys.stderr,
+        )
+
+
 def setup_worktree(
     name: str, home: pathlib.Path, base: str = "HEAD", repo: pathlib.Path | None = None
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
@@ -1543,9 +1629,14 @@ def setup_worktree(
     creating fresh — `start` pre-flights both the worktree and the branch away, so
     from `start` this always creates a new branch off `base`.
 
-    A `base` that doesn't resolve to a commit in the target repo (a config-set
-    `"base": "main"` meeting a `master` repo, say) raises YoloError before any
-    worktree is created, rather than surfacing git's failure as a traceback.
+    A `base` naming a remote-tracking branch (`upstream/main` — a `<remote>/`
+    prefix matching one of the repo's remotes) is **fetched first**
+    (`_fetch_remote_base`), so the new branch starts from the remote's current
+    tip rather than whatever the last fetch left behind; a failed fetch (offline)
+    warns and falls back to the stale ref. A `base` that doesn't resolve to a
+    commit in the target repo (a config-set `"base": "main"` meeting a `master`
+    repo, say) raises YoloError before any worktree is created, rather than
+    surfacing git's failure as a traceback.
     """
     if repo is None:
         common_git, main_root, slug = _repo_paths()
@@ -1558,6 +1649,7 @@ def setup_worktree(
     if _branch_exists(name, main_root):
         tail = [str(worktree), name]
     else:
+        _fetch_remote_base(base, main_root)
         resolves = subprocess.run(
             ["git", "-C", str(main_root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
             capture_output=True,
@@ -1589,6 +1681,7 @@ YOLO_KEYS = {
     "project": ("project", "str"),
     "config_dir": ("config_dir", "path"),
     "dockerfile": ("dockerfile", "path"),
+    "dockerfile_branch": ("dockerfile_branch", "str"),
     "yolorc": ("yolorc", "path"),
     "auth": ("auth", "auth"),
     "aws_profile": ("aws_profile", "str"),
@@ -2524,6 +2617,14 @@ def _spec_path(spec: str) -> pathlib.Path:
     return pathlib.Path(os.path.expanduser(spec)).resolve()
 
 
+def _layer_get(entry: dict, key: str, default=None):
+    """`entry[key]` in either its dash or underscore spelling, else `default`."""
+    for k in (key, key.replace("-", "_")):
+        if k in entry:
+            return entry[k]
+    return default
+
+
 def _take_list_key(entry: dict, key: str, where: str) -> list[str]:
     """Pop `key` (in either dash/underscore spelling) out of `entry`, as a list.
 
@@ -2622,9 +2723,17 @@ def _apply_config_edits(
     # repos: validated *and* normalized to absolute repo roots — a stored relative
     # path would later resolve against whatever cwd the reader happens to have.
     explicit = _normalize_repo_specs(explicit)
-    df = explicit.get("dockerfile")
-    if df is not None and not _resolve_dockerfile(df, base_dir).is_file():
-        sys.exit(f"dockerfile: not a file: {df}")  # a typo'd path can't be pinned
+    # dockerfile / dockerfile-branch: validated together — a typo'd path or a
+    # branch that doesn't hold the file can't be pinned. Either key being set
+    # here triggers the check, against the other's value in this layer (if any).
+    if "dockerfile" in explicit or "dockerfile-branch" in explicit:
+        df = explicit.get("dockerfile", _layer_get(current, "dockerfile"))
+        branch = explicit.get("dockerfile-branch", _layer_get(current, "dockerfile-branch"))
+        if df is not None:
+            try:
+                _read_dockerfile(df, branch, base_dir)
+            except YoloError as e:
+                sys.exit(str(e))
     rc = explicit.get("yolorc")
     if rc is not None and not _resolve_yolorc(rc, base_dir).is_file():
         sys.exit(f"yolorc: not a file: {rc}")  # a typo'd path can't be pinned
@@ -3504,7 +3613,8 @@ PARSER.add_argument(
     help="For `start`: git ref the new branch is created from; for `rebase`: the "
     "ref a worktree's branch is rebased onto; for `list`/`finish`: the ref a branch "
     "is judged merged against (default: HEAD). Also settable as `base` in config "
-    '(e.g. "origin/main").',
+    '(e.g. "origin/main"). A remote-tracking base is fetched before `start` '
+    "branches off it.",
 )
 PARSER.add_argument(
     "--stat",
@@ -3870,6 +3980,17 @@ PARSER.add_argument(
     "default (or set `dockerfile` in config). The host UID is passed in as the "
     "HOST_UID build ARG, so the custom Dockerfile should `ARG HOST_UID` and use it "
     "for its non-root user to keep bind-mount ownership correct.",
+)
+PARSER.add_argument(
+    "--dockerfile-branch",
+    dest="dockerfile_branch",
+    default=None,
+    metavar="REF",
+    help="Read the --dockerfile path out of this git ref (`git show REF:PATH`) "
+    "instead of the session's working tree (or set `dockerfile-branch` in config). "
+    "Lets a Dockerfile.yolo live on a branch of your own that is never merged — "
+    "e.g. when `base` is an upstream branch you make PRs against and the "
+    "Dockerfile must stay out of them. Requires a relative --dockerfile path.",
 )
 PARSER.add_argument(
     "--yolorc",
@@ -9703,10 +9824,13 @@ def _main():
     # launch paths only (like the mount/port resolution above), so a stale
     # `dockerfile` config path can't break `list`/`finish`/`config`. Resolved
     # against the now-final `cwd` (the worktree dir in worktree mode), so a
-    # relative path points at the session's own copy — matching _build_image.
+    # relative path points at the session's own copy (or, with `dockerfile-branch`,
+    # the copy on that ref) — matching _build_image.
     if parsed.dockerfile:
-        if not _resolve_dockerfile(parsed.dockerfile, cwd).is_file():
-            sys.exit(f"dockerfile: not a file: {parsed.dockerfile}")
+        try:
+            _read_dockerfile(parsed.dockerfile, parsed.dockerfile_branch, cwd)
+        except YoloError as e:
+            sys.exit(str(e))
     elif (cwd / "Dockerfile.yolo").is_file():
         # An unconfigured Dockerfile.yolo sitting in the session dir is almost
         # always one someone meant to use — the feature is opt-in via the config

@@ -1507,3 +1507,205 @@ def test_dir_rejects_second_extra_arg(cy, run_cli, repo):
     with pytest.raises(SystemExit) as e:
         run_cli(["dir", "alpha", str(r), "extra"], home=home, cwd=r)
     assert "unexpected argument" in str(e.value)
+
+
+# --- start: fetch a remote-tracking base first --------------------------------
+
+
+def _bare_upstream(tmp_path, r):
+    """A bare remote `upstream` holding r's main, plus a second clone to push from."""
+    up = tmp_path / "up.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(up)], check=True)
+    git(r, "remote", "add", "upstream", str(up))
+    git(r, "push", "-q", "upstream", "main")
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(up), str(other)], check=True)
+    git(other, "config", "user.email", "o@example.com")
+    git(other, "config", "user.name", "Other")
+    return up, other
+
+
+def test_start_remote_base_is_fetched_before_branching(cy, run_cli, repo, tmp_path, capsys):
+    # `base: upstream/main` means "upstream's *current* tip": a commit landed
+    # upstream since the last fetch is picked up, not the stale tracking ref.
+    r, home = repo
+    _, other = _bare_upstream(tmp_path, r)
+    (other / "new").write_text("new\n")
+    git(other, "add", ".")
+    git(other, "commit", "-qm", "landed upstream")
+    git(other, "push", "-q", "origin", "main")
+    newest = git(other, "rev-parse", "HEAD").stdout.strip()
+    assert git(r, "rev-parse", "upstream/main").stdout.strip() != newest  # stale locally
+    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() == newest
+    assert "fetching upstream/main" in capsys.readouterr().err
+
+
+def test_start_remote_base_never_fetched_is_created_by_the_fetch(cy, run_cli, repo, tmp_path):
+    # A configured remote the user never fetched: the pre-branch fetch creates
+    # the tracking ref, so the base resolves instead of erroring as missing.
+    r, home = repo
+    up, _ = _bare_upstream(tmp_path, r)
+    git(r, "update-ref", "-d", "refs/remotes/upstream/main")
+    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() == git(r, "rev-parse", "main").stdout.strip()
+
+
+def test_start_remote_base_fetch_failure_warns_and_uses_stale_ref(
+    cy, run_cli, repo, tmp_path, capsys
+):
+    # Offline / remote gone: warn, then branch off whatever the last fetch left.
+    r, home = repo
+    git(r, "remote", "add", "upstream", str(tmp_path / "gone.git"))
+    git(r, "update-ref", "refs/remotes/upstream/main", "HEAD")
+    run_cli(["start", "topic", "--base", "upstream/main"], home=home, cwd=r)
+    err = capsys.readouterr().err
+    assert "warning: fetching upstream/main failed" in err
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() == git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_start_slashed_local_base_is_not_fetched(cy, run_cli, repo, capsys):
+    # `feature/foo` is a local branch with a slash, not `<remote>/<branch>`:
+    # no remote named `feature`, so no fetch is attempted.
+    r, home = repo
+    git(r, "branch", "feature/foo")
+    run_cli(["start", "topic", "--base", "feature/foo"], home=home, cwd=r)
+    assert "fetching" not in capsys.readouterr().err
+
+
+def test_start_reattaching_a_surviving_branch_skips_the_fetch(cy, run_cli, repo, tmp_path, capsys):
+    # A revived topic reattaches to its branch; `base` isn't consulted, so
+    # neither is the remote.
+    r, home = repo
+    git(r, "remote", "add", "upstream", str(tmp_path / "gone.git"))
+    git(r, "branch", "topic")
+    run_cli(["resume", "topic", "--base", "upstream/main"], home=home, cwd=r)
+    assert "fetching" not in capsys.readouterr().err
+
+
+# --- dockerfile-branch: the Dockerfile read out of a git ref ------------------
+
+DF_TEXT = "FROM ubuntu:24.04\nARG HOST_UID\nRUN echo from-branch\n"
+
+
+def _dockerfile_on_branch(r, branch="yolo-cfg", path="Dockerfile.yolo", text=DF_TEXT):
+    """Commit `text` at `path` on `branch` only; main never has the file."""
+    git(r, "checkout", "-q", "-b", branch)
+    (r / path).parent.mkdir(parents=True, exist_ok=True)
+    (r / path).write_text(text)
+    git(r, "add", path)
+    git(r, "commit", "-qm", "yolo config")
+    git(r, "checkout", "-q", "main")
+    assert not (r / path).exists()
+
+
+def _image_tag(argv):
+    return next(a for a in argv if a.startswith("claude-yolo:"))
+
+
+def test_dockerfile_branch_reads_the_file_out_of_git_in_a_worktree(cy, run_cli, repo):
+    import os
+
+    r, home = repo
+    _dockerfile_on_branch(r)
+    argv = run_cli(
+        ["start", "topic", "--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        home=home,
+        cwd=r,
+    )
+    assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("topic"))
+    assert not (wt / "Dockerfile.yolo").exists()  # the worktree tree stays clean of it
+
+
+def test_dockerfile_branch_reads_the_file_out_of_git_in_cwd_mode(cy, run_cli, repo):
+    import os
+
+    r, home = repo
+    _dockerfile_on_branch(r)
+    argv = run_cli(
+        ["--dockerfile", "./Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r
+    )
+    assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
+
+
+def test_dockerfile_branch_relative_path_is_from_the_session_dir(cy, run_cli, repo):
+    # Like the filesystem rule: a relative path names the *session dir's* copy —
+    # launched from a subdirectory, `Dockerfile.yolo` is that subdirectory's.
+    import os
+
+    r, home = repo
+    _dockerfile_on_branch(r, path="sub/Dockerfile.yolo", text="FROM x\nARG HOST_UID\n# sub\n")
+    (r / "sub").mkdir()
+    argv = run_cli(
+        ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        home=home,
+        cwd=r / "sub",
+    )
+    assert _image_tag(argv) == cy._image_tag("FROM x\nARG HOST_UID\n# sub\n", os.getuid())
+
+
+def test_dockerfile_branch_missing_file_on_branch_exits(cy, run_cli, repo):
+    r, home = repo
+    _dockerfile_on_branch(r)
+    with pytest.raises(SystemExit) as e:
+        run_cli(["--dockerfile", "Other", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r)
+    assert "can't read Other from branch 'yolo-cfg'" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        run_cli(
+            ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "nope"], home=home, cwd=r
+        )
+    assert "from branch 'nope'" in str(e.value)
+
+
+def test_dockerfile_branch_rejects_an_absolute_dockerfile(cy, run_cli, repo, tmp_path):
+    r, home = repo
+    df = tmp_path / "Dockerfile.abs"
+    df.write_text(DF_TEXT)
+    with pytest.raises(SystemExit) as e:
+        run_cli(["--dockerfile", str(df), "--dockerfile-branch", "main"], home=home, cwd=r)
+    assert "must be a relative, in-repo path" in str(e.value)
+
+
+def test_dockerfile_branch_does_not_need_the_file_in_the_working_tree(cy, run_cli, repo, capsys):
+    # A checked-out copy that differs is ignored: the branch's text is what builds.
+    import os
+
+    r, home = repo
+    _dockerfile_on_branch(r)
+    (r / "Dockerfile.yolo").write_text("FROM stale\nARG HOST_UID\n")
+    argv = run_cli(
+        ["--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"], home=home, cwd=r
+    )
+    assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())
+
+
+def test_config_verb_persists_and_validates_dockerfile_branch(cy, run_cli, repo):
+    import json
+
+    r, home = repo
+    _dockerfile_on_branch(r)
+    run_cli(
+        ["config", "--dockerfile", "Dockerfile.yolo", "--dockerfile-branch", "yolo-cfg"],
+        home=home,
+        cwd=r,
+    )
+    entries = json.loads((home / ".claude-yolo" / "projects.json").read_text())
+    (entry,) = entries.values()
+    assert entry["dockerfile"] == "Dockerfile.yolo" and entry["dockerfile-branch"] == "yolo-cfg"
+    # Re-pointing the branch alone is validated against the pinned dockerfile...
+    with pytest.raises(SystemExit) as e:
+        run_cli(["config", "--dockerfile-branch", "nope"], home=home, cwd=r)
+    assert "from branch 'nope'" in str(e.value)
+    # ...and re-pointing the path alone against the pinned branch.
+    with pytest.raises(SystemExit) as e:
+        run_cli(["config", "--dockerfile", "Other"], home=home, cwd=r)
+    assert "from branch 'yolo-cfg'" in str(e.value)
+    # The launch then uses the persisted pair with no flags.
+    import os
+
+    argv = run_cli([], home=home, cwd=r)
+    assert _image_tag(argv) == cy._image_tag(DF_TEXT, os.getuid())

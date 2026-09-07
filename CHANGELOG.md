@@ -5,6 +5,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **New `dockerfile-branch` config key** (`--dockerfile-branch REF`): read the
+  `dockerfile` path out of a git ref (`git show REF:./PATH`) instead of the
+  session's working tree, so a custom `Dockerfile.yolo` can live on a branch of
+  your own that is never merged — for contributing to someone else's repo with
+  `base` set to their upstream branch, without the Dockerfile polluting your
+  PRs. Requires a relative `dockerfile` path; `yolo config` validates the pair.
+- **`yolo start` fetches a remote-tracking `base` first**: a `base` like
+  `upstream/main` (a `<remote>/` prefix matching one of the repo's remotes) is
+  fetched right before the topic branch is created, so it starts from the
+  remote's current tip; a failed fetch warns and uses the last-fetched ref.
 - **The `wip` dashboard's SESSIONS table leads with a PROJECT column** in place
   of SESSION: the project's name (its `projects.json` entry, else the repo
   directory's basename) with the topic in the TOPIC column beside it, rather
