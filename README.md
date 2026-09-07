@@ -347,7 +347,9 @@ another) without them stepping on each other.
 
 There are also three token-management verbs — `setup-token`, `tokens`, and
 `forget-token` — described under [Authentication modes](#authentication-modes),
-and a `config` verb described under [Configuration](#configuration).
+a `config` verb described under [Configuration](#configuration), and a
+[`doctor` verb](#the-doctor-verb) that audits everything yolo keeps on the host
+for stale or inconsistent records.
 
 ### Projects
 
@@ -1646,6 +1648,67 @@ or edit its keys with the same flags (plus `--dir PATH` for its primary
 directory, inferred from the cwd's repo on creation). **`--name NEW`** renames
 a project (re-pointing its topics' overlays); **`--delete`** removes one,
 refusing while it has live worktrees unless `--force`.
+
+### The `doctor` verb
+
+```bash
+yolo doctor         # audit yolo's host-side state; exit 1 if any problem is found
+yolo doctor --fix   # ...and apply the safe bookkeeping fixes
+```
+
+yolo keeps a fair amount of state on the host — the config files, the
+projects/worktrees/tokens/secrets registries, the worktree directory, the
+credential store, the per-session run dir, and the content-addressed images —
+and each piece can drift out of step with the others when a directory is moved
+or deleted, a worktree is removed by hand, or yolo is upgraded. A launch warns
+about some of that (a project whose `dir` is gone, a leftover in-directory
+`.yolo.json`) on every run, but only about what that launch happens to touch.
+`yolo doctor` walks all of it in one place and reports, per section, every
+record that points at something that no longer exists or that a launch would
+refuse:
+
+- **environment** — docker on PATH and answering, git, tmux (optional), and
+  which credential store is in use.
+
+- **`~/.yolo.json`, `projects.json`, `worktrees.json`** — files that don't
+  parse, unknown keys, invalid project names, a project `dir` that no longer
+  exists (with the `yolo config --project NAME --dir .` / `--delete` fix
+  spelled out), a topic overlay that still points at a deleted project, and,
+  in every layer, the paths a launch would resolve: missing `mounts` sources,
+  `plugin-dirs`, `repos`, `config-dir`, an unreadable `dockerfile`/`yolorc`
+  (out of `yolo-config-branch` when set), and a `secrets` name that isn't
+  stored at any scope the layer could resolve it from. Projects that share a
+  `dir` are noted (launches from there need `--project`).
+
+- **`~/.claude-yolo/worktrees/`** — orphaned worktrees (the main repo moved or
+  was deleted), a worktree filed under the wrong repo slug (the repo moved and
+  was `git worktree repair`ed, so `yolo resume` there won't find it), empty
+  per-repo dirs, and worktrees git still lists but whose directory is gone.
+
+- **the registries** — `tokens.json`/`secrets.json` rows whose value is no
+  longer in the credential store, a token whose config dir is gone, expired or
+  expiring tokens, a token cached with no registry row (minted by an older
+  yolo, so no expiry estimate), a project-scope secret for a deleted project,
+  vanished `recent-projects.json` entries, and — on the file credential store —
+  wrong permissions or `.cred` files no registry knows about.
+
+- **docker** — leftover run-dir files from sessions that are no longer running,
+  and `claude-yolo:*` images no configured Dockerfile builds any more (every
+  Dockerfile edit and yolo update leaves one behind; `docker rmi` hints).
+  Skipped with a note when docker isn't answering.
+
+- **leftovers** — an in-directory `.yolo.json` at or above the cwd, migration
+  backups, and (macOS) a `.credentials.json` a past container wrote into a
+  config dir.
+
+Findings are **problems** (a launch or verb would warn, fail, or misbehave; the
+exit status is 1 while any remain) or **notes** (harmless leftovers and
+advisories). Each comes with the command that resolves it. **`--fix`** applies
+only the fixes that are pure bookkeeping — dropping a registry or overlay entry
+whose subject no longer exists, `git worktree prune`, removing empty dirs and
+leftover run-dir files, restoring credential-file permissions, deleting
+migration backups — and never a project entry, a worktree, a stored token or
+secret value, or an image: the report names the command for those instead.
 
 ## Extra `docker run` arguments
 

@@ -66,6 +66,8 @@ through the `_HOST` / `_is_macos()` / `_is_linux()` helpers). Run it directly:
 ./yolo.py setup-token              # mint+cache the long-lived OAuth token explicitly
 ./yolo.py tokens                   # list minted tokens (mint date, est. expiry, status)
 ./yolo.py forget-token             # delete this config dir's token (local only)
+./yolo.py doctor                   # audit yolo's host-side state for stale/inconsistent records
+./yolo.py doctor --fix             # ...and apply the safe bookkeeping fixes
 ./yolo.py secret set GH_TOKEN      # store a secret in the credential store (stdin/prompt)
 ./yolo.py secret set GH_TOKEN --clipboard   # ...read the value from the clipboard
 ./yolo.py secret set DB_PW --project-scope  # ...at project scope (not global)
@@ -109,7 +111,7 @@ The **auth mechanism** is a single mutually-exclusive choice via `--auth`
 is an **orthogonal flag** that composes freely with the chosen auth mode and
 with each other. The only positional args are an optional `verb`
 (`config`/`start`/`resume`/`shell`/`stop`/`browse`/`finish`/`rebase`/`merge`/`diff`/`list`/`ps`/`wip`/`dir`/
-`dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`) and its `TOPIC` (for
+`dockerfile`/`setup-token`/`tokens`/`forget-token`/`secret`/`doctor`) and its `TOPIC` (for
 `secret` the TOPIC is the subcommand `set`/`list`/`rm`, with the secret NAME as a
 trailing positional; `dir` takes an optional project directory as its trailing
 positional); see [Workflow verbs](#workflow-verbs).
@@ -1690,6 +1692,41 @@ gracefully outside one — there's just no repo slug to label/find by).
   dispatched *before* `load_yolo_config` specifically so the config provenance
   note doesn't pollute the command-substitution output. A terminal verb — no
   container.
+- **`doctor [--fix]`** — audit yolo's host-side state (`do_doctor`); a
+  terminal verb, no container, no config load — it reads every file itself,
+  catching the `SystemExit`/`YoloError` the strict readers raise and reporting
+  them as findings, so it works precisely when a launch wouldn't. The checks
+  (`_doctor_*`, one per section, each writing into a `_DoctorReport`): the
+  environment (docker on PATH *and* the daemon answering — the docker-backed
+  checks are skipped with a note otherwise — git, tmux, which credential store);
+  `~/.yolo.json` / `projects.json` / `worktrees.json` (parse errors, invalid
+  names, dangling `dir`s — the launch-time `_warn_dangling_keys` warning with
+  its fix spelled out — dangling overlay `project` pointers, shared dirs, and
+  via `_doctor_config_keys` every path a launch resolves in each layer:
+  `config-dir`, `mounts`, `plugin-dirs`, `repos`, `dockerfile`/`yolorc` through
+  `_read_config_file` against the layer's session dir, and `secrets` names
+  resolved the way `_resolve_secret_value` would — project scope then global,
+  the global layer also accepting any project-scope row since it applies to
+  every project); the worktree dir (orphaned worktrees via `_repo_root_of`,
+  worktrees under the wrong slug, empty slug dirs, and `git worktree list
+  --porcelain` entries under the yolo root whose dir is gone — scanned in every
+  main repo yolo knows: live worktrees, the cwd's, project dirs + `repos`, and
+  the recent-projects roots); `recent-projects.json`; `tokens.json` vs the
+  store (`_keychain_has`), config dirs gone, expired/expiring per
+  `_token_expiry`, and store entries with no row (the default service plus one
+  per config dir seen in the config layers); `secrets.json` vs the store; the
+  file credential store (700/600 modes, `.cred` files no registry names — never
+  deleted, a lost row doesn't make the value unreachable); the run dir vs
+  `docker ps`; `claude-yolo:*` images vs the tags the default Dockerfile and
+  every configured custom one build to (`_custom_image_tag`, the tag rule
+  factored out of `_build_image`) and the images running containers use; and
+  the leftovers the launch warns about (in-directory `.yolo.json`, migration
+  `.bak`s, macOS `.credentials.json`). Findings are `problem` (exit 1 while any
+  remain) or `note`; `--fix` runs each finding's `fix` callable — only the pure
+  bookkeeping: dropping a stale registry/overlay row or pointer, `worktree
+  prune`, empty dirs, leftover run dirs, chmods, `.bak`s — and re-renders it as
+  `fixed`. Deliberately never removes a project entry, a worktree, a stored
+  value, or an image (the report names the command instead).
 
 Implementation shape:
 
@@ -1719,11 +1756,13 @@ Implementation shape:
   the config (and its sentinel re-parse needs pristine parser defaults).
   Everything else re-parses with the config defaults layered in first
   (`dockerfile`, which just prints `DEFAULT_DOCKERFILE`, `dir`, which prints a
-  path, `secret`, which manages the credential store, and `stop`, which `docker stop`s a
-  container, are dispatched right after
+  path, `secret`, which manages the credential store, `stop`, which `docker stop`s a
+  container, and `doctor`, which audits the config files themselves, are dispatched
+  right after
   `config` — before that re-parse — since they need no yolo config at all; `dir`
   in particular keeps its stdout free of the config
-  provenance note). The other
+  provenance note, and `doctor` must run precisely when the config load would
+  exit on the breakage it's meant to report). The other
   terminal verbs (`list`, `ps`, `wip`, `tokens`, `forget-token`, `finish`, `rebase`,
   `merge`, `diff`, `setup-token`,
   and `shell`'s exec-into-running case) then handle-and-return — `setup-token` sits
@@ -2404,6 +2443,20 @@ same-dir absorption, `.bak` backups) and the global-`repos` rejection live in
 `test_tokens.py` covers the token registry, the registry-sourced expiry warning
 (`_token_minted`), the implicit-mint consent prompt, and the `tokens` /
 `forget-token` verbs (the credential-store wrapping helpers stubbed).
+`test_doctor.py` covers the `doctor` verb against planted inconsistencies under
+an isolated HOME (the environment probe stubbed, so docker reads as unreachable
+and its checks as skipped): the clean-state zero exit, `--fix` gating, every
+projects.json finding (dangling dir + hints and that `--fix` never deletes the
+entry, missing mount/plugin-dir/repo targets, unstored vs stored-at-either-scope
+secrets, shared dirs, malformed file, invalid name), the global-layer checks,
+overlay findings (stale entry fixed, dangling pointer fixed keeping the rest,
+keys checked against the worktree), the worktree-dir findings against a real
+repo (orphaned, rm -rf'd → prune + overlay + empty slug dir all fixed, wrong
+slug after `worktree repair`), recent-projects, the token findings (stale row
+fixed, expired/expiring, no-row, vanished config dir), secrets (stale row fixed,
+vanished project), credential-file modes fixed / strays kept, `_doctor_images`
+with a canned docker (and that `_custom_image_tag` matches `_build_image`'s
+scheme), the leftovers, and the summary line.
 `test_platform.py` covers the host-platform abstraction: the `_HOST`/`_is_*`
 helpers, `_open_url` routing through `webbrowser`, the credential store
 (file-fallback round-trip get/set/delete/exists + a faked keyring backend), the

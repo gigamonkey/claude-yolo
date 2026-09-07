@@ -49,7 +49,7 @@ shape at a glance:
 - **Workflow verbs:** `start` / `resume` / `shell` / `stop` (optional `TOPIC` →
   git-worktree mode, else the cwd), plus `finish` / `rebase` / `merge` / `diff` /
   `list` / `ps` / `wip` / `browse` / `dir` / `config` / `secret` / `setup-token` /
-  `tokens` / `forget-token` / `dockerfile`. A bare `yolo` == `yolo start`.
+  `tokens` / `forget-token` / `dockerfile` / `doctor`. A bare `yolo` == `yolo start`.
 - **Config** is host-side only: global `~/.yolo.json` < per-project
   `~/.claude-yolo/projects.json` < per-worktree `~/.claude-yolo/worktrees.json` <
   CLI flags, written via the `config` verb. Projects are **named** entries

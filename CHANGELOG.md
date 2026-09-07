@@ -3,6 +3,25 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **New `doctor` verb** (`yolo doctor [--fix]`): audits everything yolo keeps
+  on the host for stale or inconsistent records — the config files (parse
+  errors, a project `dir` that no longer exists, a topic overlay pointing at a
+  deleted project, missing mount/plugin-dir/repo/config-dir paths, unreadable
+  `dockerfile`/`yolorc`, referenced secrets that aren't stored), the worktree
+  directory (orphaned worktrees, worktrees under the wrong repo slug, empty
+  dirs, entries git still lists but whose directory is gone), the token and
+  secret registries vs the credential store (stale rows, expired tokens, a
+  cached token with no registry row), stale recent-projects entries, the file
+  credential store's permissions, leftover run-dir files, images no configured
+  Dockerfile builds any more, and the leftovers every launch warns about. Each
+  finding names the command that resolves it; problems make the exit status 1;
+  `--fix` applies the pure-bookkeeping fixes (drops stale registry/overlay
+  rows and pointers, `git worktree prune`, empty dirs, run-dir leftovers,
+  chmods, migration backups) and never removes a project entry, a worktree, a
+  stored value, or an image.
+
 ## v0.33.0 — 2026-09-07
 
 - **New `yolo-config-branch` config key** (`--yolo-config-branch REF`): read
