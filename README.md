@@ -323,7 +323,14 @@ Verb details:
   branch --merged` semantics, so `merged` means it's ready to `finish`; a
   squash-merge reads as `unmerged`), or `orphaned` when git can't resolve the
   worktree's main repo at all (it was moved or deleted — `list` then prints a hint
-  to run `git worktree repair`). Each worktree is judged against the base *its* own
+  to run `git worktree repair`; if the repo is still where it was, its record of
+  the worktree was pruned instead, which is unrecoverable by `repair` — re-add
+  the worktree by hand). Sessions guard against the common cause of that: a
+  container can't see its sibling worktrees' directories, so plain git would
+  consider them prunable from inside; yolo mounts each sibling's `.git` pointer
+  file read-only at its host path and sets `gc.worktreePruneExpire=never`, so
+  neither a `git worktree prune` in the container nor auto-gc can orphan them.
+  Each worktree is judged against the base *its* own
   repo's config sets. COMMITS shows how far the branch has diverged
   from its base as `↓behind ↑ahead`. The branch name is folded into TOPIC and shown
   only when it differs from the topic — e.g. if someone switched branches inside

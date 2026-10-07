@@ -2400,6 +2400,59 @@ def _repo_root_of(path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str] 
     return common_git, main_root, re.sub(r"[^a-zA-Z0-9]", "-", str(main_root))
 
 
+def _sibling_worktree_gitfiles(
+    main_root: pathlib.Path, mounted: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """The `.git` pointer files of the repo's linked worktrees that a session does
+    *not* mount — the ones the container must still be able to "see".
+
+    A container mounts the repo's shared `.git` read-write (worktree mode mounts
+    it explicitly; a cwd session at the repo root has it inside the mount) but
+    only its own worktree dir(s). From inside, every other linked worktree's
+    recorded `.git` path is therefore missing, and git marks it `prunable` in
+    `git worktree list`: a `git worktree prune` run there — an agent tidying up
+    after seeing that label, or `gc --auto` reaping a long-idle one — deletes the
+    sibling's `.git/worktrees/<id>` record **on the host**, orphaning a worktree
+    that is perfectly intact. The fix is to bind-mount each sibling's one-line
+    `.git` file read-only at its host path: git's existence check passes, so
+    nothing in the container ever sees a sibling as prunable, and none of the
+    sibling's contents are exposed. (`launch_container` also pins
+    `gc.worktreePruneExpire=never` so auto-gc can't prune anything at all.)
+
+    Lists `git worktree list --porcelain` for `main_root`, skipping the main
+    checkout, every path in `mounted` (the session's own worktrees), and any
+    worktree whose `.git` isn't a plain file — a genuinely dead one has nothing to
+    mount, and docker would create a host *directory* for a missing `-v` source.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(main_root), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return []
+    skip = {_resolved(main_root), *(_resolved(m) for m in mounted)}
+    files = []
+    for line in out.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        wt = pathlib.Path(line[len("worktree ") :])
+        if _resolved(wt) in skip:
+            continue
+        gitfile = wt / ".git"
+        if gitfile.is_file():
+            files.append(gitfile)
+    return files
+
+
+def _resolved(path: pathlib.Path) -> pathlib.Path:
+    """`path.resolve()` that tolerates a missing path (resolves what exists)."""
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
 def _parse_repo_spec(spec: str) -> pathlib.Path:
     """One --repo / `repos` value -> its repo's main root.
 
@@ -5163,6 +5216,7 @@ def launch_container(
     # edit them, and they're yolo's data — not a host-config source.
     args += ["-v", f"{_DOCS_DATA_DIR}:{_DOCS_CONTAINER_DIR}:ro"]
 
+    git_config: list[tuple[str, str]] = []  # (key, value) run-time git config, emitted below
     if parsed.ssh_agent:
         # Forward the host ssh-agent. The source socket differs by host:
         #   - macOS / Windows (Docker Desktop or OrbStack): the raw host
@@ -5185,20 +5239,15 @@ def launch_container(
             # Mount host known_hosts so SSH host key verification succeeds
             "-v",
             f"{home}/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro",
-            # Route GitHub HTTPS git operations over SSH so they reuse the forwarded agent —
-            # no tokens ever enter the container (HTTPS auth is a bearer token, which would
-            # have to; SSH is challenge-response, so the key stays on the host). Remotes can
-            # stay https://github.com/...; git rewrites them to git@github.com: before
-            # connecting. Applied as run-time git config via GIT_CONFIG_* env (highest
-            # precedence) ONLY here, so without --ssh-agent plain HTTPS clones of public
-            # repos still work instead of being rewritten to an SSH URL that can't auth.
-            "-e",
-            "GIT_CONFIG_COUNT=1",
-            "-e",
-            "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf",
-            "-e",
-            "GIT_CONFIG_VALUE_0=https://github.com/",
         ]
+        # Route GitHub HTTPS git operations over SSH so they reuse the forwarded agent —
+        # no tokens ever enter the container (HTTPS auth is a bearer token, which would
+        # have to; SSH is challenge-response, so the key stays on the host). Remotes can
+        # stay https://github.com/...; git rewrites them to git@github.com: before
+        # connecting. Applied as run-time git config ONLY here, so without --ssh-agent
+        # plain HTTPS clones of public repos still work instead of being rewritten to
+        # an SSH URL that can't auth.
+        git_config.append(("url.git@github.com:.insteadOf", "https://github.com/"))
 
     # Worktree mode: mount the shared .git at its real host path so the worktree's
     # absolute gitdir pointers resolve and commits persist to the host.
@@ -5210,6 +5259,34 @@ def launch_container(
     # worktree — so git works in each and commits persist on the host.
     for extra_wt, extra_git, _ in extra_repos:
         args += ["-v", f"{extra_wt}:{extra_wt}", "-v", f"{extra_git}:{extra_git}"]
+
+    # Guard the repo's *other* worktrees against being pruned from inside. The
+    # container sees each mounted repo's shared .git read-write but not its sibling
+    # worktrees, so git would call every sibling `prunable` and a `git worktree
+    # prune` in the container (an agent tidying up, or auto-gc) would delete the
+    # sibling's admin record on the host — orphaning it. Mounting each sibling's
+    # one-line `.git` pointer file read-only at its host path makes git's existence
+    # check pass without exposing the sibling's files (`_sibling_worktree_gitfiles`);
+    # `gc.worktreePruneExpire=never` closes the auto-gc route too. Applies to every
+    # repo whose .git the container can see: the primary (worktree mode mounts it;
+    # a cwd session at the repo root has it inside the cwd mount) and the extras.
+    mounted = [cwd, *(wt for wt, _, _ in extra_repos)]
+    if common_git:
+        repo_roots = [common_git.parent]
+    else:
+        ident = _repo_root_of(cwd)
+        repo_roots = [ident[1]] if ident and _resolved(ident[1]) == _resolved(cwd) else []
+    repo_roots += [extra_git.parent for _, extra_git, _ in extra_repos]
+    for root in repo_roots:
+        for gitfile in _sibling_worktree_gitfiles(root, mounted):
+            args += ["-v", f"{gitfile}:{gitfile}:ro"]
+    git_config.append(("gc.worktreePruneExpire", "never"))
+
+    # Run-time git config rides in as GIT_CONFIG_* env (highest precedence, nothing
+    # baked into the image or written to a mounted config).
+    args += ["-e", f"GIT_CONFIG_COUNT={len(git_config)}"]
+    for i, (key, value) in enumerate(git_config):
+        args += ["-e", f"GIT_CONFIG_KEY_{i}={key}", "-e", f"GIT_CONFIG_VALUE_{i}={value}"]
 
     # Credential/config assembly. The config axes (a, b) are independent of the
     # auth mechanism (c), which is a single mutually-exclusive choice (--auth):

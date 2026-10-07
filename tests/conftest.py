@@ -103,3 +103,16 @@ def flag_values():
         return [argv[i + 1] for i, tok in enumerate(argv) if tok == flag]
 
     return _values
+
+
+@pytest.fixture
+def git_config(flag_values):
+    """Return a helper: the run-time git config a `docker run` argv carries, as a
+    {key: value} dict decoded from its GIT_CONFIG_COUNT/KEY_i/VALUE_i env vars."""
+
+    def _config(argv):
+        envs = dict(e.split("=", 1) for e in flag_values(argv, "-e") if "=" in e)
+        n = int(envs.get("GIT_CONFIG_COUNT", "0"))
+        return {envs[f"GIT_CONFIG_KEY_{i}"]: envs[f"GIT_CONFIG_VALUE_{i}"] for i in range(n)}
+
+    return _config

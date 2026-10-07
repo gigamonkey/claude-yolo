@@ -119,6 +119,95 @@ def test_start_nonexistent_base_errors_before_creating_anything(cy, run_cli, rep
     assert not git(r, "branch", "--list", "topic").stdout.strip()
 
 
+# --- sibling worktrees: guard against being pruned from inside -----------------
+
+
+def sibling_gitfile_mounts(argv, flag_values):
+    """The read-only `.git` pointer-file mounts a launch adds for sibling worktrees."""
+    return sorted(m for m in flag_values(argv, "-v") if m.endswith("/.git:ro"))
+
+
+def test_worktree_session_mounts_sibling_gitfiles_read_only(cy, run_cli, repo, flag_values):
+    # A worktree-mode container mounts the shared .git read-write but not its
+    # sibling worktrees, so from inside, git would call every sibling `prunable` and
+    # a `git worktree prune` there would delete the sibling's admin record on the
+    # host. Each sibling's one-line `.git` pointer file is therefore mounted
+    # read-only at its host path — and nothing else of the sibling.
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    run_cli(["start", "beta"], home=home, cwd=r)
+    argv = run_cli(["resume", "alpha"], home=home, cwd=r)
+    wts = home / ".claude-yolo" / "worktrees"
+    alpha, beta = next(wts.rglob("alpha")), next(wts.rglob("beta"))
+    assert sibling_gitfile_mounts(argv, flag_values) == [f"{beta}/.git:{beta}/.git:ro"]
+    # the session's own worktree and the main checkout are mounted whole, not as a
+    # pointer file; the sibling's working files are not mounted at all
+    mounts = flag_values(argv, "-v")
+    assert f"{alpha}:{alpha}" in mounts
+    assert f"{r / '.git'}:{r / '.git'}" in mounts
+    assert not any(m.startswith(f"{beta}:") for m in mounts)
+
+
+def test_cwd_session_at_repo_root_mounts_sibling_gitfiles(cy, run_cli, repo, flag_values):
+    # A cwd session at the repo root has the shared .git inside its mount, so the
+    # same hazard applies to every linked worktree of the repo — mount their
+    # pointer files too.
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    argv = run_cli(["start"], home=home, cwd=r)
+    alpha = next((home / ".claude-yolo" / "worktrees").rglob("alpha"))
+    assert sibling_gitfile_mounts(argv, flag_values) == [f"{alpha}/.git:{alpha}/.git:ro"]
+
+
+def test_cwd_session_in_subdir_mounts_no_sibling_gitfiles(cy, run_cli, repo, flag_values):
+    # From a subdirectory the container can't see the shared .git at all, so there
+    # is nothing to guard (and nothing to clutter the mounts with)
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    sub = r / "sub"
+    sub.mkdir()
+    argv = run_cli(["start"], home=home, cwd=sub)
+    assert sibling_gitfile_mounts(argv, flag_values) == []
+
+
+def test_dead_sibling_worktree_is_not_mounted(cy, run_cli, repo, flag_values):
+    # A sibling whose directory is gone (genuinely prunable) has no pointer file to
+    # mount — and a missing `-v` source would make docker create a host directory
+    # in its place, so it must be skipped, not mounted blindly.
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    run_cli(["start", "gone"], home=home, cwd=r)
+    gone = next((home / ".claude-yolo" / "worktrees").rglob("gone"))
+    import shutil
+
+    shutil.rmtree(gone)
+    assert "prunable" in git(r, "worktree", "list").stdout
+    argv = run_cli(["resume", "alpha"], home=home, cwd=r)
+    assert sibling_gitfile_mounts(argv, flag_values) == []
+    assert not gone.exists()
+
+
+def test_sibling_gitfile_mount_defeats_prune(cy, repo, tmp_path):
+    # The mechanism itself: with only the sibling's `.git` pointer file present at
+    # its path (what the container sees), git no longer judges it prunable, so
+    # `git worktree prune` leaves its admin record alone.
+    r, home = repo
+    alpha, *_ = cy.setup_worktree("alpha", home, repo=r)
+    beta, *_ = cy.setup_worktree("beta", home, repo=r)
+    assert cy._sibling_worktree_gitfiles(r, [beta]) == [alpha / ".git"]
+    # simulate the container's view of beta: a dir holding only the pointer file
+    pointer = (beta / ".git").read_text()
+    import shutil
+
+    shutil.rmtree(beta)
+    assert "prunable" in git(r, "worktree", "list").stdout
+    beta.mkdir()
+    (beta / ".git").write_text(pointer)
+    assert "prunable" not in git(r, "worktree", "list").stdout
+    git(r, "worktree", "prune")
+    assert (r / ".git" / "worktrees" / "beta").is_dir()
+
+
 # --- resume -----------------------------------------------------------------
 
 

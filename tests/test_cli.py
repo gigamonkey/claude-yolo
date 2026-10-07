@@ -85,7 +85,7 @@ def test_default_run_assembles_expected_mounts(cy, run_cli, flag_values, dirs):
     assert not any(e.startswith("CLAUDE_CONFIG_DIR=") for e in envs)
 
 
-def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, dirs):
+def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, git_config, dirs):
     # --no-ssh-agent is now also the default; assert it's a no-op-equivalent
     home, work = dirs
     argv = run_cli(["--no-ssh-agent"], home=home, cwd=work)
@@ -96,10 +96,10 @@ def test_no_ssh_agent_drops_socket_mounts(cy, run_cli, flag_values, dirs):
     assert not any("known_hosts" in m for m in mounts)
     # without the agent, the GitHub HTTPS->SSH rewrite is NOT applied, so plain
     # HTTPS clones of public repos still work instead of failing on an SSH URL
-    assert "GIT_CONFIG_COUNT=1" not in envs
+    assert "url.git@github.com:.insteadOf" not in git_config(argv)
 
 
-def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
+def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, git_config, dirs):
     home, work = dirs
     argv = run_cli(["--ssh-agent"], home=home, cwd=work)
     mounts = flag_values(argv, "-v")
@@ -108,9 +108,28 @@ def test_ssh_agent_opt_in_adds_socket_mounts(cy, run_cli, flag_values, dirs):
     assert any("ssh-auth.sock" in m for m in mounts)
     # the GitHub HTTPS->SSH rewrite rides along with the agent, applied as run-time
     # git config via GIT_CONFIG_* (not baked into the image)
-    assert "GIT_CONFIG_COUNT=1" in envs
-    assert "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf" in envs
-    assert "GIT_CONFIG_VALUE_0=https://github.com/" in envs
+    assert git_config(argv)["url.git@github.com:.insteadOf"] == "https://github.com/"
+
+
+def test_git_config_env_is_well_formed(cy, run_cli, flag_values, dirs):
+    # GIT_CONFIG_COUNT matches the KEY_i/VALUE_i pairs actually emitted (git
+    # ignores the whole set if the count is off), for both the 1- and 2-entry cases
+    home, work = dirs
+    for flags in ([], ["--ssh-agent"]):
+        envs = dict(e.split("=", 1) for e in flag_values(run_cli(flags, home=home, cwd=work), "-e"))
+        n = int(envs["GIT_CONFIG_COUNT"])
+        keys = sorted(k for k in envs if k.startswith("GIT_CONFIG_KEY_"))
+        vals = sorted(k for k in envs if k.startswith("GIT_CONFIG_VALUE_"))
+        assert keys == [f"GIT_CONFIG_KEY_{i}" for i in range(n)]
+        assert vals == [f"GIT_CONFIG_VALUE_{i}" for i in range(n)]
+
+
+def test_auto_gc_worktree_prune_is_disabled(cy, run_cli, git_config, dirs):
+    # Every session pins gc.worktreePruneExpire=never: the container can't see its
+    # sibling worktrees' directories, so an auto-gc prune in there would delete
+    # their admin records on the host (see test_verbs' sibling-worktree tests)
+    home, work = dirs
+    assert git_config(run_cli([], home=home, cwd=work))["gc.worktreePruneExpire"] == "never"
 
 
 # --- build-dir redirection --------------------------------------------------

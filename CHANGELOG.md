@@ -5,6 +5,16 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Sessions can no longer orphan the repo's other worktrees.** A container sees
+  the repo's shared `.git` read-write but not its sibling worktrees' directories,
+  so from inside, `git worktree list` called every sibling `prunable` and a
+  `git worktree prune` there (an agent tidying up, or auto-gc on an idle one)
+  deleted the sibling's admin record on the host — leaving an intact worktree
+  `orphaned`. Every launch now bind-mounts each sibling worktree's one-line
+  `.git` pointer file read-only at its host path (so git sees it as alive,
+  without exposing its contents) and sets `gc.worktreePruneExpire=never`. Covers
+  worktree sessions (every repo of a multi-repo topic) and cwd sessions at a
+  repo root.
 - **New `doctor` verb** (`yolo doctor [--fix]`): audits everything yolo keeps
   on the host for stale or inconsistent records — the config files (parse
   errors, a project `dir` that no longer exists, a topic overlay pointing at a

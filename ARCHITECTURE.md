@@ -2048,6 +2048,30 @@ is named via `claude --name <repo>:<TOPIC>`. Durability is the point: commits la
 host's shared `.git` and uncommitted edits live in the host worktree dir, so a
 container exit loses nothing. Must be run from inside a git repo.
 
+**Sibling worktrees are guarded against being pruned from inside.** The container
+sees the shared `.git` read-write but only its *own* worktree dir, so from inside,
+every other linked worktree's recorded path is missing and `git worktree list`
+labels it `prunable`; a `git worktree prune` run there (an agent tidying up after
+seeing that label, or `gc --auto` reaping a long-idle one) would delete the
+sibling's `.git/worktrees/<id>` record **on the host**, orphaning an intact
+worktree (this is how a worktree ends up `orphaned` without the repo ever moving).
+Two guards in `launch_container`: (1) each sibling's one-line `.git` pointer file
+is bind-mounted **read-only at its host path** (`_sibling_worktree_gitfiles`:
+`git worktree list --porcelain` on the repo, minus the main checkout, the
+session's own worktree(s), and any entry whose `.git` isn't a plain file — a
+genuinely dead worktree has nothing to mount, and docker would create a host
+*directory* for a missing `-v` source), so git's existence check passes and nothing
+in the container sees a sibling as prunable while none of the sibling's files are
+exposed; (2) `gc.worktreePruneExpire=never` rides in with the run-time git config,
+so auto-gc never prunes. The guard applies wherever the container can see a repo's
+`.git`: worktree mode (the primary and every multi-repo extra), and a **cwd
+session at the repo root** (its `.git` sits inside the cwd mount, and the yolo
+topics under `~/.claude-yolo/worktrees/` are exactly the siblings at risk); a cwd
+session in a subdirectory can't see `.git` and mounts nothing extra. A deliberate
+`git worktree remove --force <sibling>` from inside would still delete the record
+(git continues to the admin dir after the working-tree rm fails), which is why
+the container prompt also tells the agent to leave sibling worktrees alone.
+
 ## Projects and multi-repo (`--project`, `repos`, named `projects.json`)
 
 A **project** is a named `projects.json` entry — `dir` (the primary) plus
@@ -2204,10 +2228,12 @@ request shouldn't silently become a fresh session).
 
   Either way the host must have a running ssh-agent for forwarding to work.
 - **Under `--ssh-agent`, GitHub HTTPS git is rewritten to SSH so it reuses the
-  agent.** When the agent is forwarded, the launch sets run-time git config via
-  `GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf` /
-  `GIT_CONFIG_VALUE_0=https://github.com/` (highest-precedence env-based config, not
-  baked into the image), so in-container git operations on `https://github.com/...`
+  agent.** When the agent is forwarded, the launch adds
+  `url.git@github.com:.insteadOf=https://github.com/` to the run-time git config
+  it emits as `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_i` / `GIT_CONFIG_VALUE_i` env
+  (highest-precedence env-based config, not baked into the image; `launch_container`
+  collects the pairs in a `git_config` list and emits them in one block, so the
+  count always matches), so in-container git operations on `https://github.com/...`
   remotes (fetch *and* push) transparently route over SSH and authenticate via the
   forwarded ssh-agent — **no token ever enters the container**. It's conditioned on
   `--ssh-agent` deliberately: without an agent the rewrite would turn a public-repo
@@ -2357,7 +2383,11 @@ is in `test_verbs.py`, the tmux switch-and-skip-build variant in `test_tmux.py`)
 `test_verbs.py` covers the worktree verbs against a
 **real throwaway git repo** (so the actual `git worktree` machinery runs),
 stubbing only `running_container_for` (docker) plus the `run_cli` side effects —
-including the four `--finish-action` behaviors (`keep`, `merge` and its
+including the sibling-worktree prune guard (a worktree session mounts each
+sibling's `.git` pointer file `:ro` and nothing else of it, a cwd session at the
+repo root does too, a cwd session in a subdirectory and a dead sibling mount
+nothing, and the mechanism itself: with only the pointer file present, real
+`git worktree prune` leaves the record alone), the four `--finish-action` behaviors (`keep`, `merge` and its
 conflict-abort/keep path, and `push` to a `--finish-remote` bare repo) alongside
 the default `delete-if-merged`, the submodule-removal fallback (a real populated
 submodule that plain `git worktree remove` refuses, which `finish` clears via
@@ -2414,7 +2444,8 @@ cross-validating the files against the branch).
 repos**: the `repos` key end-to-end (`config --add-repo`/`--remove-repo`
 persist/dedupe/validate, a project-entry `repos` reaching the launch), the
 multi-worktree `start` (worktree+branch per repo, per-repo worktree + `.git`
-mounts with `-w` staying the primary, `--add-dir` + the layout prompt line +
+mounts with `-w` staying the primary, the sibling-worktree `.git:ro` guard
+mounts covering every repo's other topics, `--add-dir` + the layout prompt line +
 the `yolo.extra-repos` label, the `--repo`-flags overlay stamp, the untouched
 single-repo path), the guards (bad path / branch-collision errors creating
 nothing, mid-set failure rolling back worktrees and branches, the cwd-session

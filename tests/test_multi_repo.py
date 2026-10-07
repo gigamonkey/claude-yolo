@@ -337,6 +337,28 @@ def test_start_multi_repo_launches_from_saved_dir_anywhere(
     assert read_overlay(cy, home, app, "feat") == {"project": "chat"}
 
 
+def test_multi_repo_session_guards_every_repo_s_siblings(cy, run_cli, repos, tmp_path, flag_values):
+    # Each extra repo's shared .git is mounted read-write too, so its other
+    # worktrees need the same read-only pointer-file mounts as the primary's; the
+    # topic's own worktrees in each repo are mounted whole and not listed here.
+    app, lib, proto, home = repos
+    run_cli(
+        ["config", "--project", "chat", "--dir", str(app), "--add-repo", str(lib)],
+        home=home,
+        cwd=tmp_path,
+    )
+    run_cli(["start", "other", "--project", "chat"], home=home, cwd=tmp_path)
+    argv = run_cli(["start", "feat", "--project", "chat"], home=home, cwd=tmp_path)
+    ro = sorted(m for m in flag_values(argv, "-v") if m.endswith("/.git:ro"))
+    expected = sorted(
+        f"{w}/.git:{w}/.git:ro"
+        for w in (wt_of(cy, home, app, "other"), wt_of(cy, home, lib, "other"))
+    )
+    assert ro == expected
+    for w in (wt_of(cy, home, app, "feat"), wt_of(cy, home, lib, "feat")):
+        assert f"{w}:{w}" in flag_values(argv, "-v")
+
+
 def test_project_sessions_are_named_after_the_project(cy, run_cli, repos, tmp_path):
     # Container/session names derive from the project's NAME, not the primary
     # repo's basename — the `wip` dashboard correlates sessions to tmux windows by
