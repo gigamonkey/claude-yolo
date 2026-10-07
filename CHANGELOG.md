@@ -15,6 +15,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   without exposing its contents) and sets `gc.worktreePruneExpire=never`. Covers
   worktree sessions (every repo of a multi-repo topic) and cwd sessions at a
   repo root.
+- **New `scripts/restore-orphaned-worktrees.py`** re-registers worktrees that
+  were orphaned that way (the repo's `.git/worktrees/<id>` record is gone, so
+  `git worktree repair` has nothing to re-link): run from the main checkout, it
+  finds them under `~/.claude-yolo/worktrees/` (or in dirs you name), rebuilds
+  the record on the worktree's branch — recreating the branch from `--base` if
+  it's gone — and resets the index so uncommitted edits reappear as ordinary
+  modifications. `--dry-run` previews every step; `--adopt` also takes
+  worktrees whose pointer names a repo path that no longer exists.
 - **New `doctor` verb** (`yolo doctor [--fix]`): audits everything yolo keeps
   on the host for stale or inconsistent records — the config files (parse
   errors, a project `dir` that no longer exists, a topic overlay pointing at a

@@ -2440,6 +2440,14 @@ differing checked-out copy; the rc staged from git into the run dir chmod 600
 and mounted from there, over a differing checked-out copy; missing file/ref and
 absolute-path errors for both; the `config` verb persisting and
 cross-validating the files against the branch).
+`test_restore_script.py` runs `scripts/restore-orphaned-worktrees.py` as a
+subprocess against real throwaway repos (dry run changes nothing, a pruned
+record is rebuilt with uncommitted work intact and the run is idempotent, a
+deleted branch is recreated from `--base`, a branch checked out elsewhere is
+skipped, a moved repo takes `repair` for an intact record and `--adopt` for a
+pruned one, colliding admin ids get git's `<id>1` suffix even in a dry run, and
+a linked worktree is refused as the cwd).
+
 `test_multi_repo.py` covers multi-repo projects against **three real throwaway
 repos**: the `repos` key end-to-end (`config --add-repo`/`--remove-repo`
 persist/dedupe/validate, a project-entry `repos` reaching the launch), the

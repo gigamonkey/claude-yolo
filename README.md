@@ -324,8 +324,10 @@ Verb details:
   squash-merge reads as `unmerged`), or `orphaned` when git can't resolve the
   worktree's main repo at all (it was moved or deleted — `list` then prints a hint
   to run `git worktree repair`; if the repo is still where it was, its record of
-  the worktree was pruned instead, which is unrecoverable by `repair` — re-add
-  the worktree by hand). Sessions guard against the common cause of that: a
+  the worktree was pruned instead, which `repair` can't fix — run
+  `scripts/restore-orphaned-worktrees.py` from the repo's main checkout, which
+  re-registers every orphaned worktree on its branch with its working files
+  intact; `--dry-run` previews the steps). Sessions guard against the common cause of that: a
   container can't see its sibling worktrees' directories, so plain git would
   consider them prunable from inside; yolo mounts each sibling's `.git` pointer
   file read-only at its host path and sets `gc.worktreePruneExpire=never`, so
