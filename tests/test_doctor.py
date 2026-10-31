@@ -1,4 +1,5 @@
-"""Tests for the `doctor` verb: the host-side consistency audit and its `--fix`.
+"""Tests for the `doctor` verb: the host-side consistency audit, its `--fix`,
+and its `--clean`.
 
 Each check is exercised against a planted inconsistency under an isolated HOME
 (and, for the worktree checks, a real throwaway git repo). The environment probe
@@ -101,6 +102,69 @@ def test_fix_flag_only_applies_to_doctor(cy, run_cli, repo):
     with pytest.raises(SystemExit) as exc:
         run_cli(["list", "--fix"], home=home, cwd=r)
     assert "--fix only applies to `doctor`" in str(exc.value)
+    with pytest.raises(SystemExit) as exc:
+        run_cli(["list", "--clean"], home=home, cwd=r)
+    assert "--clean only applies to `doctor`" in str(exc.value)
+
+
+# --- --clean: config entries naming paths that no longer exist -------------------------
+
+
+def test_clean_drops_dangling_config_entries_fix_does_not(cy, run_cli, repo, capsys):
+    """Every dangling path-valued entry is a `--clean` (never a `--fix`): the
+    spec goes, the rest of the list stays, an emptied key is dropped, a bad
+    dockerfile is unset; the global layer's bare-string list and its illegal
+    `repos` are handled too. A referenced-but-unstored secret is never cleaned."""
+    r, home = repo
+    pfile = home / ".claude-yolo" / "projects.json"
+    write_json(
+        pfile,
+        {
+            "repo": {
+                "dir": str(r),
+                "mounts": [f"{r}:ro", "/no/such/mount:ro"],
+                "plugin-dirs": ["/no/such/plugin"],
+                "repos": [str(r.parent)],  # exists but isn't a git repo
+                "secrets": ["API_KEY", "bad spec!"],
+                "dockerfile": "/no/such/Dockerfile.yolo",
+            }
+        },
+    )
+    write_json(home / ".yolo.json", {"repos": [str(r)], "mounts": "/no/such/global"})
+    before = pfile.read_text()
+    code, out = doctor(run_cli, home, r, capsys, "--fix")
+    assert code == 1
+    assert pfile.read_text() == before  # --fix touches none of it
+    assert out.count("--clean would:") == 7
+    assert "can be cleaned up: re-run with `yolo doctor --clean`" in out
+
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 1  # the unstored secret remains a problem
+    assert out.count("  cleaned ") == 7
+    entry = json.loads(pfile.read_text())["repo"]
+    assert entry["mounts"] == [f"{r}:ro"]
+    assert entry["secrets"] == ["API_KEY"]
+    for key in ("plugin-dirs", "repos", "dockerfile"):
+        assert key not in entry
+    assert json.loads((home / ".yolo.json").read_text()) == {}
+    assert "secret API_KEY is referenced but not stored" in out
+    assert "--clean would" not in out
+
+    code, out = doctor(run_cli, home, r, capsys)
+    assert "mount source" not in out and "plugin dir" not in out and "dockerfile" not in out
+
+
+def test_clean_edits_the_overlay_layer_too(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    wt_file = home / ".claude-yolo" / "worktrees.json"
+    overlays = json.loads(wt_file.read_text())
+    (key,) = overlays
+    overlays[key] = {"mounts": ["/no/such:rw"], "ssh-agent": True}
+    wt_file.write_text(json.dumps(overlays))
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0
+    assert json.loads(wt_file.read_text())[key] == {"ssh-agent": True}
 
 
 # --- projects.json ------------------------------------------------------------------
@@ -337,6 +401,46 @@ def test_worktree_under_wrong_slug(cy, run_cli, repo, tmp_path, capsys):
     assert code == 1
     assert "belongs to" in out and "whose worktrees live under" in out
     assert cy._repo_root_of(moved)[2] in out  # the slug it should live under
+    assert "--clean would" not in out  # docker unreachable: can't rule out a session
+
+
+def test_clean_refiles_worktree_under_the_right_slug(cy, run_cli, repo, tmp_path):
+    """With docker answering and no session in it, --clean moves the worktree
+    under the repo's current slug, repairs the link, and re-keys its overlay."""
+    r, home = repo
+    run_cli(["start", "beta"], home=home, cwd=r)
+    wt = next((home / ".claude-yolo" / "worktrees").rglob("beta"))
+    wt_file = home / ".claude-yolo" / "worktrees.json"
+    write_json(wt_file, {str(wt.resolve()): {"ssh-agent": True}})
+    moved = tmp_path / "repo-moved"
+    r.rename(moved)
+    git(moved, "worktree", "repair", str(wt))
+    rep = cy._DoctorReport()
+    cy._doctor_worktree_dirs(rep, home, tmp_path, {}, True)
+    (item,) = [it for it in rep.items if it.level == "problem"]
+    assert item.clean and item.fix is not None
+    assert rep.apply_fixes(clean=True) == []
+    dest = home / ".claude-yolo" / "worktrees" / cy._repo_root_of(moved)[2] / "beta"
+    assert dest.is_dir() and not wt.exists()
+    assert str(dest) in git(moved, "worktree", "list").stdout
+    assert git(dest, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "beta"
+    assert json.loads(wt_file.read_text()) == {str(dest.resolve()): {"ssh-agent": True}}
+
+
+def test_clean_deletes_stray_files_in_the_worktrees_dir(cy, run_cli, repo, capsys):
+    r, home = repo
+    run_cli(["start", "alpha"], home=home, cwd=r)
+    root = home / ".claude-yolo" / "worktrees"
+    top = root / "notes.txt"
+    top.write_text("x")
+    inner = next(root.iterdir() if False else (d for d in root.iterdir() if d.is_dir())) / "stray"
+    inner.write_text("y")
+    code, out = doctor(run_cli, home, r, capsys, "--fix")
+    assert top.exists() and inner.exists()
+    assert out.count("--clean would: delete it") == 2
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0
+    assert not top.exists() and not inner.exists()
 
 
 # --- recent-projects.json ----------------------------------------------------------------
@@ -417,6 +521,29 @@ def test_token_for_vanished_config_dir_is_a_note(cy, run_cli, repo, capsys):
     assert code == 0
     assert "config dir no longer exists but its token is still cached" in out
     assert "yolo forget-token --config-dir /no/such/cfg" in out
+    assert "--clean would: forget it" in out
+
+
+def test_clean_forgets_tokens_for_vanished_dirs_and_past_expiry(cy, run_cli, repo, capsys):
+    r, home = repo
+    os.environ["HOME"] = str(home)
+    gone = cy._oauth_service("/no/such/cfg")
+    cy._cred_set(gone, "sk-ant-oat-gone")
+    cy._cred_set(cy.OAUTH_KC_SERVICE, "sk-ant-oat-old")
+    write_json(
+        home / ".claude-yolo" / "tokens.json",
+        {
+            gone: {"config_dir": "/no/such/cfg", "minted": _minted(1)},
+            cy.OAUTH_KC_SERVICE: {"config_dir": None, "minted": _minted(400)},
+        },
+    )
+    doctor(run_cli, home, r, capsys, "--fix")
+    assert cy._keychain_has(gone) and cy._keychain_has(cy.OAUTH_KC_SERVICE)
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0
+    assert out.count("  cleaned ") == 2
+    assert not cy._keychain_has(gone) and not cy._keychain_has(cy.OAUTH_KC_SERVICE)
+    assert json.loads((home / ".claude-yolo" / "tokens.json").read_text()) == {}
 
 
 # --- secrets.json vs the store -------------------------------------------------------------------
@@ -443,6 +570,24 @@ def test_project_secret_for_vanished_dir_is_a_note(cy, run_cli, repo, capsys):
     code, out = doctor(run_cli, home, r, capsys)
     assert code == 0
     assert "DB: project-scope secret for /no/such/proj, which no longer exists" in out
+    assert "--clean would: remove it" in out
+
+
+def test_clean_removes_project_secret_for_vanished_dir(cy, run_cli, repo, capsys):
+    r, home = repo
+    os.environ["HOME"] = str(home)
+    svc = cy._secret_service("DB", "project", "/no/such/proj")
+    cy._store_secret_value(svc, "v")
+    cy._write_secret_entry(svc, "project", "DB", "/no/such/proj")
+    keep = cy._secret_service("DB", "global")
+    cy._store_secret_value(keep, "g")
+    cy._write_secret_entry(keep, "global", "DB", None)
+    doctor(run_cli, home, r, capsys, "--fix")
+    assert cy._keychain_has(svc)
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0 and "  cleaned " in out
+    assert not cy._keychain_has(svc) and svc not in cy._read_secrets_file()
+    assert cy._keychain_has(keep) and keep in cy._read_secrets_file()  # the global one stays
 
 
 # --- the file credential store --------------------------------------------------------------------
@@ -501,9 +646,10 @@ def test_stale_images_noted(cy, monkeypatch):
     assert item.fix is not None
 
 
-def test_stale_images_one_note_and_fix_removes_them(cy, monkeypatch):
+def test_stale_images_one_note_and_clean_removes_them(cy, monkeypatch):
     """Several stale images collapse to one note with one combined `docker rmi`,
-    and --fix runs exactly that command; current and in-use tags are untouched."""
+    and --clean (not --fix) runs exactly that command; current and in-use tags
+    are untouched."""
     uid = os.getuid()
     current = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
     calls = []
@@ -537,10 +683,14 @@ def test_stale_images_one_note_and_fix_removes_them(cy, monkeypatch):
     assert item.text.startswith("2 images no configured Dockerfile builds")
     assert item.hint.startswith(f"`docker rmi {a} {b}`")
     rendered = "\n".join(rep.render(fixing=False))
-    assert "--fix would: remove them" in rendered
-    assert rep.apply_fixes() == []
+    assert "--clean would: remove them" in rendered
+    assert rep.apply_fixes() == [] and calls == []  # --fix alone leaves images be
+    assert rep.items[0].level == "note"
+    assert "--clean would: remove them" in "\n".join(rep.render(fixing=True))
+    assert rep.apply_fixes(clean=True) == []
     assert calls == [["docker", "rmi", a, b]]
-    assert rep.items[0].level == "fixed"
+    assert rep.items[0].level == "cleaned"
+    assert "  cleaned  2 images" in "\n".join(rep.render(fixing=True, cleaning=True))
 
 
 def test_no_stale_images_no_note(cy, monkeypatch):
@@ -584,6 +734,19 @@ def test_in_directory_yolo_json_is_a_problem(cy, run_cli, repo, capsys):
     code, out = doctor(run_cli, home, r / "sub", capsys)  # found walking up from a subdir
     assert code == 1
     assert "an in-directory .yolo.json is no longer read" in out
+
+
+def test_macos_credentials_file_is_cleaned(cy, run_cli, repo, capsys, monkeypatch):
+    r, home = repo
+    monkeypatch.setattr(cy, "_is_macos", lambda: True)
+    creds = home / ".claude" / ".credentials.json"
+    creds.parent.mkdir()
+    creds.write_text("{}")
+    code, out = doctor(run_cli, home, r, capsys, "--fix")
+    assert code == 1 and creds.exists()
+    assert "--clean would: delete it" in out
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0 and not creds.exists()
 
 
 def test_migration_backup_is_a_fixable_note(cy, run_cli, repo, capsys):
@@ -646,3 +809,21 @@ def test_summary_counts_fixable_items(cy, run_cli, repo, capsys):
     assert out.rstrip().endswith(
         "1 problem, 1 note; 1 can be fixed automatically: re-run with `yolo doctor --fix`."
     )
+
+
+def test_summary_counts_cleanable_items(cy, run_cli, repo, capsys):
+    r, home = repo
+    write_json(home / ".claude-yolo" / "recent-projects.json", {"/gone": {}})
+    write_json(home / ".yolo.json", {"mounts": ["/no/such"]})
+    code, out = doctor(run_cli, home, r, capsys)
+    assert out.rstrip().endswith(
+        "1 problem, 1 note; 1 can be fixed automatically: re-run with `yolo doctor --fix`, "
+        "1 more with `--clean`."
+    )
+    code, out = doctor(run_cli, home, r, capsys, "--fix")
+    assert out.rstrip().endswith(
+        "1 problem, 0 notes, 1 fixed; 1 can be cleaned up: re-run with `yolo doctor --clean`."
+    )
+    code, out = doctor(run_cli, home, r, capsys, "--clean")
+    assert code == 0
+    assert out.rstrip().endswith("0 problems, 0 notes, 1 cleaned.")

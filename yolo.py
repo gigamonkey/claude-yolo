@@ -4218,9 +4218,20 @@ PARSER.add_argument(
     action="store_true",
     help="For `doctor`: apply the fixes that are pure bookkeeping — drop registry "
     "and overlay entries whose subject no longer exists, prune worktrees git has "
-    "lost, remove empty dirs, leftover run-dir files, and stale claude-yolo images "
-    "(regenerable: a launch rebuilds what it needs). Never deletes a project "
-    "entry, a worktree, or a stored token/secret value.",
+    "lost, remove empty dirs and leftover run-dir files. Never deletes a project "
+    "entry, a worktree, a stored token/secret value, or an image (see --clean).",
+)
+PARSER.add_argument(
+    "--clean",
+    action="store_true",
+    help="For `doctor`: --fix, plus the cleanups that delete something real but "
+    "dangling — config entries naming paths that no longer exist (mounts, "
+    "plugin-dirs, repos, dockerfile/yolorc, a bad secret spec, a global `repos`), "
+    "tokens for vanished config dirs or past expiry, project-scope secrets for "
+    "vanished projects, stray files in the worktrees dir, a worktree filed under "
+    "a moved repo's old slug (re-filed and repaired), a macOS .credentials.json, "
+    "and stale claude-yolo images (a launch rebuilds what it needs). Never a "
+    "project entry, a worktree's contents, or a `config-dir`.",
 )
 PARSER.add_argument(
     "--require-project-entry",
@@ -9384,7 +9395,7 @@ def do_forget_token(config_dir: str | None) -> None:
 # (the docker-backed checks are skipped — an ok line, under --verbose — when the
 # daemon is away; the environment section carries the problem).
 
-_DoctorItem = collections.namedtuple("_DoctorItem", "section level text hint fix fix_label")
+_DoctorItem = collections.namedtuple("_DoctorItem", "section level text hint fix fix_label clean")
 
 
 class _DoctorReport:
@@ -9394,7 +9405,12 @@ class _DoctorReport:
     fails the exit status), `note` (harmless leftovers and advisories), and `ok`
     (informational lines, environment only). A section with no findings renders
     its `start` summary as a single ok line. An item with a `fix` callable is
-    applied under `--fix` and re-rendered as `fixed`.
+    applied under `--fix` and re-rendered as `fixed` — or, when the item is
+    marked `clean`, only under `--clean`, re-rendered as `cleaned`. The split:
+    a fix is pure bookkeeping (a record whose subject is already gone); a clean
+    deletes something real but dangling — a config entry naming a path that no
+    longer exists, a credential for a vanished subject, a stray file, a
+    regenerable image — so it costs a re-add if the subject was only moved.
     """
 
     def __init__(self):
@@ -9404,40 +9420,58 @@ class _DoctorReport:
     def start(self, section: str, ok_summary: str) -> None:
         self.summaries[section] = ok_summary
 
-    def _add(self, level, section, text, hint, fix, fix_label):
+    def _add(self, level, section, text, hint, fix, fix_label, clean):
         self.summaries.setdefault(section, "")
-        self.items.append(_DoctorItem(section, level, text, hint, fix, fix_label))
+        self.items.append(_DoctorItem(section, level, text, hint, fix, fix_label, clean))
 
-    def problem(self, section, text, hint=None, *, fix=None, fix_label=None):
-        self._add("problem", section, text, hint, fix, fix_label)
+    def problem(self, section, text, hint=None, *, fix=None, fix_label=None, clean=False):
+        self._add("problem", section, text, hint, fix, fix_label, clean)
 
-    def note(self, section, text, hint=None, *, fix=None, fix_label=None):
-        self._add("note", section, text, hint, fix, fix_label)
+    def note(self, section, text, hint=None, *, fix=None, fix_label=None, clean=False):
+        self._add("note", section, text, hint, fix, fix_label, clean)
 
     def ok(self, section, text):
-        self._add("ok", section, text, None, None, None)
+        self._add("ok", section, text, None, None, None, False)
 
-    def apply_fixes(self) -> list[str]:
-        """Run every item's fix; re-level the successes as `fixed`. Returns failures."""
+    def apply_fixes(self, *, clean: bool = False) -> list[str]:
+        """Run every item's fix (the `clean` ones only when `clean`); re-level the
+        successes as `fixed` / `cleaned`. Returns the failures."""
         failures = []
         for i, it in enumerate(self.items):
-            if it.fix is None:
+            if it.fix is None or (it.clean and not clean):
                 continue
             try:
                 it.fix()
             except (OSError, subprocess.SubprocessError, SystemExit) as e:
                 failures.append(f"{it.fix_label}: {e}")
                 continue
-            self.items[i] = it._replace(level="fixed")
+            self.items[i] = it._replace(level="cleaned" if it.clean else "fixed")
         return failures
 
     def count(self, level: str) -> int:
         return sum(1 for it in self.items if it.level == level)
 
-    def render(self, *, fixing: bool, verbose: bool = False, width: int | None = None) -> list[str]:
+    def pending(self, *, clean: bool) -> int:
+        """Items whose fix hasn't run: the `--fix` ones, or the `--clean` ones."""
+        return sum(
+            1
+            for it in self.items
+            if it.fix is not None and it.clean == clean and it.level not in ("fixed", "cleaned")
+        )
+
+    def render(
+        self,
+        *,
+        fixing: bool,
+        cleaning: bool = False,
+        verbose: bool = False,
+        width: int | None = None,
+    ) -> list[str]:
         """The report. By default only sections with a finding appear, and only
         their findings; `verbose` adds every section and its ok lines. `width`
-        wraps every line to that many columns (None: no wrapping)."""
+        wraps every line to that many columns (None: no wrapping). `fixing` /
+        `cleaning` say which tier ran, so the others show as `--fix would:` /
+        `--clean would:`."""
         lines = []
         indent = " " * 11  # past the `  LABEL    ` column
         for section, summary in self.summaries.items():
@@ -9448,17 +9482,18 @@ class _DoctorReport:
                     continue
             lines.append(section)
             if not any(it.level != "ok" for it in found) and summary:
-                found.append(_DoctorItem(section, "ok", summary, None, None, None))
+                found.append(_DoctorItem(section, "ok", summary, None, None, None, False))
             for it in found:
-                label = {"problem": "PROBLEM", "fixed": "fixed"}.get(it.level, it.level)
+                label = {"problem": "PROBLEM"}.get(it.level, it.level)
                 lines += _doctor_wrap(it.text, width, f"  {label:<8} ", indent)
-                if it.level == "fixed":
+                if it.level in ("fixed", "cleaned"):
                     lines += _doctor_wrap(it.fix_label, width, indent, indent)
                     continue
                 if it.hint:
                     lines += _doctor_wrap(it.hint, width, indent, indent)
-                if it.fix is not None and not fixing:
-                    lines += _doctor_wrap(f"--fix would: {it.fix_label}", width, indent, indent)
+                if it.fix is not None and not (cleaning if it.clean else fixing):
+                    flag = "--clean" if it.clean else "--fix"
+                    lines += _doctor_wrap(f"{flag} would: {it.fix_label}", width, indent, indent)
             lines.append("")
         return lines
 
@@ -9548,6 +9583,45 @@ def _doctor_environment(rep: _DoctorReport) -> bool:
     return docker_ok
 
 
+def _layer_editor(path: pathlib.Path, entry_key: str | None):
+    """An `edit(key, item=None)` for one config layer — the object at the top of
+    `path` (`~/.yolo.json`) or under `entry_key` in it (a projects.json entry, a
+    worktrees.json overlay). `edit(key)` unsets the key; `edit(key, item)` drops
+    one spec from a list key (the key goes too once its list is empty). The
+    stored spelling may be dashed or underscored, and a list key may be stored
+    as a bare string; both are handled, as the loader does. The `--clean`
+    counterpart of the `yolo config … --remove-*`/`--unset` hints."""
+
+    def edit(key: str, item: str | None = None) -> None:
+        data = json.loads(path.read_text())
+        obj = data if entry_key is None else data.get(entry_key)
+        if not isinstance(obj, dict):
+            return
+        raw = next(
+            (k for k in (key, key.replace("_", "-"), key.replace("-", "_")) if k in obj), None
+        )
+        if raw is None:
+            return
+        if item is None:
+            del obj[raw]
+        else:
+            val = obj[raw]
+            kept = (
+                []
+                if val == item
+                else [x for x in val if x != item]
+                if isinstance(val, list)
+                else [val]
+            )
+            if kept:
+                obj[raw] = kept
+            else:
+                del obj[raw]
+        path.write_text(json.dumps(data, indent=2) + "\n")
+
+    return edit
+
+
 def _doctor_config_keys(
     rep: _DoctorReport,
     section: str,
@@ -9558,6 +9632,7 @@ def _doctor_config_keys(
     ctx: dict,
     *,
     project_key: str | None,
+    edit,
     global_layer: bool = False,
 ) -> None:
     """Check one parsed config layer's path- and secret-valued keys.
@@ -9568,9 +9643,13 @@ def _doctor_config_keys(
     `base`, the layer's session dir; `None` for the global layer, whose relative
     paths resolve per session) fails the build, and a referenced secret that
     isn't stored fails the staging. `cfg_cmd` is the `yolo config …` invocation
-    that edits this layer, for the hints. `ctx` accumulates what later checks
-    need: the config dirs in play (`config_dirs`) and the custom Dockerfile
-    texts (`dockerfiles`, for the image check).
+    that edits this layer, for the hints; `edit` (a `_layer_editor`) performs
+    the same edit for `--clean` — dropping the spec or key that names a path no
+    longer there. Two findings deliberately have no clean: a missing config dir
+    (unsetting it would silently re-point the project at the default account)
+    and a referenced-but-unstored secret (the fix may be to store it). `ctx`
+    accumulates what later checks need: the config dirs in play (`config_dirs`)
+    and the custom Dockerfile texts (`dockerfiles`, for the image check).
     """
     cd = cfg.get("config_dir")
     if cd:
@@ -9589,6 +9668,9 @@ def _doctor_config_keys(
                 section,
                 f"{where}: mount source does not exist: {path_part}",
                 f"a launch would refuse it; `{cfg_cmd} --remove-mount {spec}`",
+                fix=lambda s=spec: edit("mounts", s),
+                fix_label="drop it from `mounts`",
+                clean=True,
             )
     for spec in cfg.get("plugin_dirs") or []:
         if not pathlib.Path(os.path.expanduser(spec)).exists():
@@ -9596,6 +9678,9 @@ def _doctor_config_keys(
                 section,
                 f"{where}: plugin dir does not exist: {spec}",
                 f"a launch would refuse it; `{cfg_cmd} --remove-plugin-dir {spec}`",
+                fix=lambda s=spec: edit("plugin_dirs", s),
+                fix_label="drop it from `plugin-dirs`",
+                clean=True,
             )
     for spec in cfg.get("repos") or []:
         path = pathlib.Path(os.path.expanduser(spec))
@@ -9611,6 +9696,9 @@ def _doctor_config_keys(
                 section,
                 f"{where}: repo {what}: {spec}",
                 f"`start` would refuse it; `{cfg_cmd} --remove-repo {spec}`",
+                fix=lambda s=spec: edit("repos", s),
+                fix_label="drop it from `repos`",
+                clean=True,
             )
     branch = cfg.get("yolo_config_branch")
     for key in ("dockerfile", "yolorc"):
@@ -9623,13 +9711,25 @@ def _doctor_config_keys(
             expanded = pathlib.Path(os.path.expanduser(val))
             if not branch and expanded.is_absolute() and not expanded.is_file():
                 rep.problem(
-                    section, f"{where}: {key}: not a file: {val}", f"`{cfg_cmd} --unset {key}`"
+                    section,
+                    f"{where}: {key}: not a file: {val}",
+                    f"`{cfg_cmd} --unset {key}`",
+                    fix=lambda k=key: edit(k),
+                    fix_label=f"unset `{key}`",
+                    clean=True,
                 )
             continue
         try:
             text = _read_config_file(key, val, branch, base)
         except YoloError as e:
-            rep.problem(section, f"{where}: {e}", f"`{cfg_cmd} --{key} PATH`, or `--unset {key}`")
+            rep.problem(
+                section,
+                f"{where}: {e}",
+                f"`{cfg_cmd} --{key} PATH`, or `--unset {key}`",
+                fix=lambda k=key: edit(k),
+                fix_label=f"unset `{key}`",
+                clean=True,
+            )
             continue
         if key == "dockerfile":
             ctx["dockerfiles"].append(text)
@@ -9638,7 +9738,14 @@ def _doctor_config_keys(
         try:
             name = _parse_secret_spec(spec)[0]
         except SystemExit as e:
-            rep.problem(section, f"{where}: {e}", f"`{cfg_cmd} --remove-secret {spec}`")
+            rep.problem(
+                section,
+                f"{where}: {e}",
+                f"`{cfg_cmd} --remove-secret {spec}`",
+                fix=lambda s=spec: edit("secrets", s),
+                fix_label="drop it from `secrets`",
+                clean=True,
+            )
             continue
         if global_layer:
             # The global layer applies to every project, so a name stored at any
@@ -9674,11 +9781,15 @@ def _doctor_global(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> None:
         rep.problem(section, str(e), "edit the file by hand, or `yolo config --global --unset KEY`")
         return
     rep.start(section, _doctor_n(len(cfg), "key", "everything they name is present"))
+    edit = _layer_editor(path, None)
     if "repos" in cfg:
         rep.problem(
             section,
             "`repos` can't be set globally (a launch refuses it)",
             "`yolo config --global --unset repos`; set it on a project entry instead",
+            fix=lambda: edit("repos"),
+            fix_label="unset `repos`",
+            clean=True,
         )
     _doctor_config_keys(
         rep,
@@ -9689,6 +9800,7 @@ def _doctor_global(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> None:
         "yolo config --global",
         ctx,
         project_key=None,
+        edit=edit,
         global_layer=True,
     )
 
@@ -9748,6 +9860,7 @@ def _doctor_projects(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> dict:
             cfg_cmd,
             ctx,
             project_key=str(root[1]) if root else (str(base.resolve()) if base else None),
+            edit=_layer_editor(_projects_file(home), name),
         )
     for d, names in sorted(by_dir.items()):
         if len(names) > 1:
@@ -9821,17 +9934,22 @@ def _doctor_overlays(rep: _DoctorReport, home: pathlib.Path, projects: dict, ctx
             cfg_cmd,
             ctx,
             project_key=str(main) if main else None,
+            edit=_layer_editor(wt_file, key),
         )
     return overlays
 
 
 def _doctor_worktree_dirs(
-    rep: _DoctorReport, home: pathlib.Path, cwd: pathlib.Path, projects: dict
+    rep: _DoctorReport, home: pathlib.Path, cwd: pathlib.Path, projects: dict, docker_ok: bool
 ) -> None:
     """~/.claude-yolo/worktrees/: orphaned worktrees (main repo gone), worktrees
     filed under the wrong repo slug (main repo moved, then repaired), empty slug
-    dirs, and — in each main repo — worktree entries git still lists but whose
-    directory is gone (`git worktree prune` material)."""
+    dirs, stray files, and — in each main repo — worktree entries git still
+    lists but whose directory is gone (`git worktree prune` material). The
+    wrong-slug case is re-filed under `--clean` (moved, `git worktree repair`ed,
+    its overlay re-keyed) — only when docker can confirm no session is running
+    in it, since a container's bind mount would be left pointing at the old
+    path. An orphaned worktree is never touched: it may hold uncommitted work."""
     section = "worktrees (~/.claude-yolo/worktrees/)"
     root = home / ".claude-yolo" / "worktrees"
     if not root.is_dir():
@@ -9841,7 +9959,14 @@ def _doctor_worktree_dirs(
     count = 0
     for slug_dir in sorted(root.iterdir()):
         if not slug_dir.is_dir():
-            rep.note(section, f"unexpected file: {_doctor_tilde(slug_dir, home)}")
+            rep.note(
+                section,
+                f"unexpected file: {_doctor_tilde(slug_dir, home)}",
+                "yolo never writes files here",
+                fix=slug_dir.unlink,
+                fix_label="delete it",
+                clean=True,
+            )
             continue
         topics = sorted(slug_dir.iterdir())
         if not topics:
@@ -9855,7 +9980,14 @@ def _doctor_worktree_dirs(
             continue
         for wt in topics:
             if not wt.is_dir():
-                rep.note(section, f"unexpected file: {_doctor_tilde(wt, home)}")
+                rep.note(
+                    section,
+                    f"unexpected file: {_doctor_tilde(wt, home)}",
+                    "yolo never writes files here",
+                    fix=wt.unlink,
+                    fix_label="delete it",
+                    clean=True,
+                )
                 continue
             count += 1
             rel = f"{slug_dir.name}/{wt.name}"
@@ -9874,13 +10006,25 @@ def _doctor_worktree_dirs(
             _, main_root, slug = ident
             main_roots.add(main_root)
             if slug != slug_dir.name:
+                dest = root / slug / wt.name
+                movable = (
+                    docker_ok
+                    and not dest.exists()
+                    and running_container_for(slug_dir.name, wt.name) is None
+                    and running_container_for(slug, wt.name) is None
+                )
                 rep.problem(
                     section,
                     f"worktree {rel} belongs to {_doctor_tilde(main_root, home)}, whose "
                     f"worktrees live under {slug}/",
                     f"`yolo resume {wt.name}` there won't find it; move it to "
-                    f"{_doctor_tilde(root / slug / wt.name, home)} and run "
+                    f"{_doctor_tilde(dest, home)} and run "
                     "`git worktree repair` from the repo",
+                    fix=(lambda w=wt, d=dest, r=main_root: _refile_worktree(w, d, r, home))
+                    if movable
+                    else None,
+                    fix_label=f"move it to {_doctor_tilde(dest, home)} and repair",
+                    clean=True,
                 )
     rep.start(section, _doctor_n(count, "worktree", "every main repo present"))
     # Repos with no live worktree can still carry stale admin entries (a worktree
@@ -9922,6 +10066,29 @@ def _doctor_worktree_dirs(
                     ),
                     fix_label=f"git -C {main_root} worktree prune",
                 )
+
+
+def _refile_worktree(
+    wt: pathlib.Path, dest: pathlib.Path, main_root: pathlib.Path, home: pathlib.Path
+) -> None:
+    """Move a worktree dir under its repo's current slug, re-link it (`git
+    worktree repair` rewrites both the worktree's `.git` pointer and the repo's
+    admin record), and carry its worktrees.json overlay over to the new key."""
+    old_key = _worktree_overlay_key(wt)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(wt), str(dest))
+    subprocess.run(
+        ["git", "-C", str(main_root), "worktree", "repair", str(dest)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wt_file = _worktrees_file(home)
+    if wt_file.is_file():
+        overlays = json.loads(wt_file.read_text())
+        if old_key in overlays:
+            overlays[_worktree_overlay_key(dest)] = overlays.pop(old_key)
+            _write_worktrees_file(wt_file, overlays)
 
 
 def _doctor_recent(rep: _DoctorReport, home: pathlib.Path) -> None:
@@ -9985,7 +10152,11 @@ def _doctor_tokens(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> dict:
                 section,
                 f"{label}: config dir no longer exists but its token is still cached",
                 f"`yolo forget-token{cd_flag}` if it isn't coming back",
+                fix=lambda s=service: _forget_token(s),
+                fix_label="forget it (delete the cached token and its registry row)",
+                clean=True,
             )
+            continue
         try:
             minted = datetime.datetime.fromisoformat(entry.get("minted", ""))
         except ValueError:
@@ -9998,6 +10169,9 @@ def _doctor_tokens(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> dict:
                 section,
                 f"{label}: token past its estimated expiry ({expires.date().isoformat()})",
                 f"`yolo setup-token{cd_flag}` mints a fresh one",
+                fix=lambda s=service: _forget_token(s),
+                fix_label="forget it (the next launch offers to mint a fresh one)",
+                clean=True,
             )
         elif days <= TOKEN_EXPIRY_WARN_DAYS:
             rep.note(
@@ -10017,6 +10191,13 @@ def _doctor_tokens(rep: _DoctorReport, home: pathlib.Path, ctx: dict) -> dict:
                 "re-mints with a recorded date, if you want the warning",
             )
     return tokens
+
+
+def _forget_token(service: str) -> None:
+    """What `forget-token` does, minus the narration: drop the registry row and
+    the cached value. Either may already be gone."""
+    _remove_token_entry(service)
+    _keychain_delete(service)
 
 
 def _doctor_secrets(rep: _DoctorReport, home: pathlib.Path) -> dict:
@@ -10054,6 +10235,9 @@ def _doctor_secrets(rep: _DoctorReport, home: pathlib.Path) -> dict:
                 "exists",
                 "recreate the directory and `yolo secret rm NAME --project-scope` from it, "
                 "if it isn't coming back",
+                fix=lambda s=service: (_remove_secret_entry(s), _keychain_delete(s)),
+                fix_label="remove it (delete the stored value and its registry row)",
+                clean=True,
             )
     return secrets
 
@@ -10178,7 +10362,7 @@ def _doctor_images(rep: _DoctorReport, docker_ok: bool, ctx: dict) -> None:
     # One note for the lot, not one per image: the list grows by one per
     # Dockerfile change forever, and the useful output is a single command.
     # An image is fully regenerable (a launch that needs it rebuilds it), so
-    # removing it is the one deletion --fix is allowed — the cost is build time.
+    # removing it costs only build time — a --clean, not a --fix.
     refs = [ref for ref, _, _ in stale]
     width = max(len(ref) for ref in refs)
     detail = "".join(
@@ -10192,6 +10376,7 @@ def _doctor_images(rep: _DoctorReport, docker_ok: bool, ctx: dict) -> None:
         "to — images share layers; a launch that needs one rebuilds it)",
         fix=lambda refs=refs: _docker_rmi(refs),
         fix_label="remove them (a launch that needs one rebuilds it)",
+        clean=True,
     )
 
 
@@ -10239,17 +10424,30 @@ def _doctor_leftovers(rep: _DoctorReport, home: pathlib.Path, cwd: pathlib.Path,
                     "Keychain, so this was likely written back by a past container (every "
                     "launch warns; it can shadow the OAuth token)",
                     f"`rm {shlex.quote(str(creds))}`",
+                    fix=creds.unlink,
+                    fix_label="delete it (the Keychain is the real copy)",
+                    clean=True,
                 )
 
 
-def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool, verbose: bool = False) -> None:
-    """`doctor` verb: audit yolo's host-side state; `--fix` applies the safe fixes.
+def do_doctor(
+    home: pathlib.Path,
+    cwd: pathlib.Path,
+    *,
+    fix: bool,
+    clean: bool = False,
+    verbose: bool = False,
+) -> None:
+    """`doctor` verb: audit yolo's host-side state; `--fix` applies the safe
+    (bookkeeping) fixes, `--clean` those plus the dangling-subject deletions
+    (see `_DoctorReport`).
 
     Prints only the findings (problems and notes) unless `verbose`, which adds
     every section and the checks that passed. Exits 1 when a problem remains
     after any fixes — so `yolo doctor` doubles as a check in scripts — and 0
     when only notes (or nothing) turned up.
     """
+    fix = fix or clean
     rep = _DoctorReport()
     ctx: dict = {"config_dirs": set(), "dockerfiles": [], "secrets": {}}
     docker_ok = _doctor_environment(rep)
@@ -10262,7 +10460,7 @@ def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool, verbose: bool
     _doctor_global(rep, home, ctx)
     projects = _doctor_projects(rep, home, ctx)
     _doctor_overlays(rep, home, projects, ctx)
-    _doctor_worktree_dirs(rep, home, cwd, projects)
+    _doctor_worktree_dirs(rep, home, cwd, projects, docker_ok)
     _doctor_recent(rep, home)
     tokens = _doctor_tokens(rep, home, ctx)
     secrets = _doctor_secrets(rep, home)
@@ -10271,23 +10469,34 @@ def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool, verbose: bool
     _doctor_images(rep, docker_ok, ctx)
     _doctor_leftovers(rep, home, cwd, ctx)
 
-    failures = rep.apply_fixes() if fix else []
+    failures = rep.apply_fixes(clean=clean) if fix else []
     # Wrap to the terminal when there is one; a pipe gets whole lines to grep.
     width = shutil.get_terminal_size((80, 24)).columns if sys.stdout.isatty() else None
-    lines = rep.render(fixing=fix, verbose=verbose, width=width)
+    lines = rep.render(fixing=fix, cleaning=clean, verbose=verbose, width=width)
     if lines:
         print("\n".join(lines))
     for f in failures:
         print(f"fix failed: {f}", file=sys.stderr)
-    problems, notes, fixed = rep.count("problem"), rep.count("note"), rep.count("fixed")
-    fixable = sum(1 for it in rep.items if it.fix is not None and it.level != "fixed")
+    problems, notes = rep.count("problem"), rep.count("note")
+    fixed, cleaned = rep.count("fixed"), rep.count("cleaned")
     summary = (
         f"{problems} problem{'' if problems == 1 else 's'}, {notes} note{'' if notes == 1 else 's'}"
     )
     if fixed:
         summary += f", {fixed} fixed"
+    if cleaned:
+        summary += f", {cleaned} cleaned"
+    fixable, cleanable = rep.pending(clean=False), rep.pending(clean=True)
     if fixable and not fix:
         summary += f"; {fixable} can be fixed automatically: re-run with `yolo doctor --fix`"
+    if cleanable and not clean:
+        summary += (
+            f"; {cleanable} can be cleaned up: re-run with `yolo doctor --clean`"
+            if fix
+            else f", {cleanable} more with `--clean`"
+            if fixable
+            else f"; {cleanable} can be cleaned up: re-run with `yolo doctor --clean`"
+        )
     if not lines:
         summary += " (`--verbose` lists every check)"
     print("\n".join(_doctor_wrap(summary + ".", width, "", "  ")))
@@ -10455,6 +10664,8 @@ def _main():
         sys.exit("--custom only applies to `dockerfile`.")
     if parsed.fix and verb != "doctor":
         sys.exit("--fix only applies to `doctor`.")
+    if parsed.clean and verb != "doctor":
+        sys.exit("--clean only applies to `doctor`.")
     for flag, val in (
         ("--init", parsed.init),
         ("--global", parsed.cfg_global),
@@ -10508,7 +10719,7 @@ def _main():
     # load (which would exit on the very breakage it's meant to report) and reads
     # everything itself. No container.
     if verb == "doctor":
-        do_doctor(home, cwd, fix=parsed.fix, verbose=parsed.verbose)
+        do_doctor(home, cwd, fix=parsed.fix, clean=parsed.clean, verbose=parsed.verbose)
         return
 
     # `dir` just prints a path — no config, no container. Dispatched before the

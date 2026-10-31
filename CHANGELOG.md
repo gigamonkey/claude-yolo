@@ -12,14 +12,29 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   check. The report also wraps to the terminal width now (continuations
   indented under the text column; tags and paths never split), and stays
   unwrapped when piped so a `grep` sees whole lines.
-- **`yolo doctor` lists stale images in one note, and `--fix` removes them.**
-  The docker-images section used to emit a note per `claude-yolo:*` image no
-  configured Dockerfile builds — one more every time a Dockerfile (or yolo's
-  default) changes, each with its own `docker rmi` hint. It's now a single note
-  listing them, with one combined `docker rmi tag1 tag2 …` command to paste,
-  and `--fix` runs that command: an image is fully regenerable (a launch
-  rebuilds what it needs), so it's the one deletion the safe-fix rule admits.
-  Images used by a running container are never touched.
+- **New `yolo doctor --clean`: `--fix` plus the deletions of what's dangling.**
+  `--fix` stays pure bookkeeping (records whose subject is already gone).
+  `--clean` also removes things that are real but point nowhere, where the
+  cost of being wrong is a re-add: a `mounts`/`plugin-dirs`/`repos` entry
+  naming a path that no longer exists, a `dockerfile`/`yolorc` that isn't a
+  file, an unparseable `secrets` spec, a global `repos`; the cached token for
+  a config dir that no longer exists or one past its estimated expiry; a
+  project-scope secret for a project dir that no longer exists; stray files in
+  the worktrees dir; a worktree filed under a moved repo's old slug (re-filed,
+  `git worktree repair`ed, overlay re-keyed — only when docker confirms no
+  session runs in it); a macOS `.credentials.json` written by a container; and
+  the stale `claude-yolo:*` images. Never a project entry, an orphaned
+  worktree, a `config-dir` (unsetting it would silently switch the project to
+  the default account), or a referenced secret that isn't stored. Each finding
+  says which tier handles it (`--fix would:` / `--clean would:`), and the
+  summary counts both.
+- **`yolo doctor` lists stale images in one note.** The docker-images section
+  used to emit a note per `claude-yolo:*` image no configured Dockerfile
+  builds — one more every time a Dockerfile (or yolo's default) changes, each
+  with its own `docker rmi` hint. It's now a single note listing them, with one
+  combined `docker rmi tag1 tag2 …` command to paste; `--clean` runs it (an
+  image is fully regenerable — a launch rebuilds what it needs). Images used by
+  a running container are never touched.
 
 ## v0.34.0 — 2026-10-31
 

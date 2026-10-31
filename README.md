@@ -1694,7 +1694,8 @@ refusing while it has live worktrees unless `--force`.
 
 ```bash
 yolo doctor         # report problems and notes; exit 1 if any problem is found
-yolo doctor --fix   # ...and apply the safe bookkeeping fixes
+yolo doctor --fix   # ...and apply the bookkeeping fixes
+yolo doctor --clean # ...and also delete what's dangling (see below)
 yolo doctor -v      # ...also list every check that passed
 ```
 
@@ -1739,8 +1740,8 @@ refuse:
   Dockerfile edit and yolo update leaves one behind, since tags are
   content-addressed and nothing reuses an old one. The stale images (any not
   used by a running container) are listed in one note with a single combined
-  `docker rmi` command to paste; the sizes shown overstate the reclaim, since
-  images share layers.
+  `docker rmi` command to paste (`--clean` runs it); the sizes shown overstate
+  the reclaim, since images share layers.
   Skipped with a note when docker isn't answering.
 
 - **leftovers** — an in-directory `.yolo.json` at or above the cwd, migration
@@ -1749,14 +1750,40 @@ refuse:
 
 Findings are **problems** (a launch or verb would warn, fail, or misbehave; the
 exit status is 1 while any remain) or **notes** (harmless leftovers and
-advisories). Each comes with the command that resolves it. **`--fix`** applies
-only the fixes that are pure bookkeeping — dropping a registry or overlay entry
-whose subject no longer exists, `git worktree prune`, removing empty dirs and
-leftover run-dir files, restoring credential-file permissions, deleting
-migration backups — plus the one deletion that is fully regenerable: stale
-`claude-yolo:*` images, which a launch rebuilds on demand at the cost of build
-time. It never removes a project entry, a worktree, or a stored token or secret
-value: the report names the command for those instead.
+advisories). Each comes with the command that resolves it, and most can be
+applied for you, in two tiers:
+
+- **`--fix`** applies the fixes that are pure bookkeeping — a record whose
+  subject is already gone: dropping a registry or overlay entry for a worktree
+  that no longer exists, a topic's pointer at a deleted project, a token or
+  secret registry row whose value is no longer in the store; `git worktree
+  prune`; removing empty per-repo dirs and leftover run-dir files; restoring
+  credential-file permissions; deleting migration backups. Nothing you could
+  want back.
+
+- **`--clean`** (implies `--fix`) also deletes things that are real but
+  dangling — where what's lost is a re-add if the subject turns out to have
+  only moved: a `mounts`/`plugin-dirs`/`repos` entry naming a path that no
+  longer exists, a `dockerfile`/`yolorc` that isn't a file, a `secrets` spec
+  that doesn't parse, a `repos` key in the global file (which a launch refuses
+  anyway); the cached token for a config dir that no longer exists, or one past
+  its estimated expiry (the next launch offers to mint afresh); a project-scope
+  secret for a project dir that no longer exists; stray files in the worktrees
+  dir; a worktree filed under a moved repo's old slug (moved to the right one,
+  `git worktree repair`ed, its overlay re-keyed — only when docker confirms no
+  session is running in it); a macOS `.credentials.json` a container wrote into
+  a config dir; and the stale `claude-yolo:*` images, which a launch rebuilds
+  on demand.
+
+Neither tier ever removes a **project entry** whose `dir` is gone (its config
+is usually the account choice for a renamed project — re-point it with `--dir
+.`), an **orphaned worktree** directory (it may hold uncommitted work, and its
+commits lived in the repo that's gone), a **`config-dir`** that no longer
+exists (unsetting it would silently re-point the project at the default
+account; the launch refuses until you decide), or a **referenced secret that
+isn't stored** (the fix may be to store it). For those the report names the
+command. The report marks each finding with the tier that handles it
+(`--fix would:` / `--clean would:`), and the summary line counts both.
 
 The report shows only the sections with a finding, each finding followed by
 what resolves it; a clean run prints just the summary line. `--verbose`/`-v`

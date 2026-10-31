@@ -1723,14 +1723,25 @@ gracefully outside one — there's just no repo slug to label/find by).
   factored out of `_build_image`) and the images running containers use; and
   the leftovers the launch warns about (in-directory `.yolo.json`, migration
   `.bak`s, macOS `.credentials.json`). Findings are `problem` (exit 1 while any
-  remain) or `note`; `--fix` runs each finding's `fix` callable — the pure
-  bookkeeping: dropping a stale registry/overlay row or pointer, `worktree
-  prune`, empty dirs, leftover run dirs, chmods, `.bak`s — plus `docker rmi` of
-  the stale images, the one regenerable deletion (a launch rebuilds what it
-  needs; the stale set is one note listing every tag, with one combined `rmi`
-  hint, rather than a note per image) — and re-renders it as `fixed`.
-  Deliberately never removes a project entry, a worktree, or a stored value
-  (the report names the command instead). `_DoctorReport.render` prints only
+  remain) or `note`; a finding may carry a `fix` callable in one of two tiers.
+  `--fix` runs the pure-bookkeeping ones — dropping a stale registry/overlay
+  row or pointer, `worktree prune`, empty dirs, leftover run dirs, chmods,
+  `.bak`s — and re-renders each as `fixed`. `--clean` (implies `--fix`) also
+  runs the items marked `clean=True`, re-rendered as `cleaned`: the deletions
+  of something real but dangling — a config spec/key naming a path that no
+  longer exists (via `_layer_editor`, one `edit(key, item=None)` per layer
+  that drops a list item or unsets a key in `~/.yolo.json`, a projects.json
+  entry, or a worktrees.json overlay, tolerating dashed/underscored spellings
+  and bare-string lists), a global `repos`, a token for a vanished config dir
+  or past expiry (`_forget_token`: row + store value), a project-scope secret
+  for a vanished dir, stray files under the worktrees root, a wrong-slug
+  worktree (`_refile_worktree`: `shutil.move`, `git worktree repair`, re-key
+  the overlay — offered only when `docker_ok` and `running_container_for`
+  finds no session under either slug), a macOS `.credentials.json`, and
+  `docker rmi` of the stale images (one note listing every tag with one
+  combined `rmi` hint, rather than a note per image). Deliberately never
+  removes a project entry, an orphaned worktree, a `config-dir`, or a
+  referenced-but-unstored secret (the report names the command instead). `_DoctorReport.render` prints only
   the sections with a finding (problems/notes/fixed) — a clean run is just the
   summary line, with a `--verbose` pointer — and under `--verbose` every
   section with its `ok` lines (the environment section is all `ok` lines, so
