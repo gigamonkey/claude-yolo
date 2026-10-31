@@ -7771,7 +7771,7 @@ def _table_lines(title, title_code, headers, items, selected, colorize) -> tuple
 _WIP_HINTS = {
     "session": "Enter switch · S shell · b browse · l log · s stop · d diff · m merge · f/r finish/rebase (idle)",
     "worktree": "Enter open · N new · R resume-pick · d diff · m merge · c config · f finish · r rebase (idle) · x discard · X discard+branch",
-    "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register",
+    "project": "Enter open · N new · R resume-pick · n new worktree · c config · a register · D delete",
     "allprojects": "Enter show/hide projects not used in a while",
     "newsession": "Enter open a session in a directory (Tab-completes)",
 }
@@ -7830,7 +7830,11 @@ def _draw_wip(sections: dict, selected: str | None, footer: str, top: int = 0) -
     # q only works (and is only advertised) once no sessions are running — see
     # the quit guard in _wip_loop.
     quit_hint = "" if sections["session"] else " · q quit"
-    status = f"\x1b[90mupdated {now} · a add-project · B rebuild-image · j/k move{quit_hint}\x1b[0m"
+    # Kept under 80 columns with the quit hint, so nothing is clipped on a
+    # default-width terminal.
+    status = (
+        f"\x1b[90mupdated {now} · a add · g global · B rebuild-image · j/k move{quit_hint}\x1b[0m"
+    )
     print(_clip_line(status, size.columns))
     # No trailing newline: on a full page the footer sits on the terminal's last
     # row, and a newline there would scroll the pinned title off the top.
@@ -8019,6 +8023,8 @@ def _wip_action(key, item, home, session, term) -> str:
             except YoloError as e:
                 return str(e)
         return _wip_add_project(home, term)
+    if key == "g":  # edit ~/.yolo.json (global; no row needed)
+        return _config_editor_loop(_global_config_scope(home), term)
     if key == "B":  # rebuild the default image from scratch (global; no row needed)
         try:
             return _wip_rebuild_image(session)
@@ -8059,6 +8065,8 @@ def _wip_action(key, item, home, session, term) -> str:
             return _wip_diff(kind, p, home, session)
         if key == "c":
             return _wip_config(kind, p, home, term)
+        if key == "D" and kind == "project":
+            return _wip_delete_project(p, home, term)
         if key == "n" and kind == "project":
             return _wip_new_worktree(p, home, session, term)
         if key == "N":
@@ -8599,6 +8607,15 @@ class _ConfigScope:
         self._base_cwd = base_cwd
 
     def read(self) -> dict:
+        if self.is_global:
+            # Lenient like the projects read: a malformed file shows as empty here
+            # and the next write's `yolo config --global` reports the real error.
+            path = self.home / ".yolo.json"
+            try:
+                data = json.loads(path.read_text()) if path.is_file() else {}
+            except (OSError, ValueError):
+                data = {}
+            return data if isinstance(data, dict) else {}
         if self.store == "worktrees.json":
             data = _read_worktrees_file(_worktrees_file(self.home))
         else:
@@ -8607,9 +8624,16 @@ class _ConfigScope:
 
     def inherited(self) -> list:
         """[(key, value, sources)] from lower layers, minus the editable keys."""
+        if self.is_global:
+            return []  # the bottom layer: nothing beneath it
         editable = {k.replace("_", "-") for k in self.read()}
         items, _ = _effective_config(self.home, self._base_cwd)
         return [(k, v, s) for (k, v, s) in items if k not in editable]
+
+    @property
+    def is_global(self) -> bool:
+        """The `~/.yolo.json` layer (the dashboard's `g`), edited via `config --global`."""
+        return "--global" in self.config_args
 
     @property
     def name(self) -> str:
@@ -8630,6 +8654,21 @@ class _ConfigScope:
         self.label = f"project {new_name}"
         self._entry_key = new_name
         self.config_args = ["config", "--project", new_name]
+
+
+def _global_config_scope(home) -> "_ConfigScope":
+    """The scope for `~/.yolo.json` — the dashboard's `g`, which needs no row.
+    Writes run `yolo config --global …` (from `home`; the verb ignores the cwd
+    with --global), reads are the raw file, and there is no inherited pane."""
+    return _ConfigScope(
+        home,
+        label="global",
+        store="~/.yolo.json",
+        config_args=["config", "--global"],
+        cwd=str(home),
+        entry_key=None,
+        base_cwd=None,
+    )
 
 
 def _config_scope(kind, payload, home):
@@ -8912,6 +8951,8 @@ def _config_editor_loop(scope, term) -> str:
         msg = ""
         k = term.wait_key(86400)
         if k in ("q", "\x1b"):
+            if scope.is_global:
+                return "edited the global config — every launch picks it up."
             return f"edited config for {scope.label} — press Enter to launch with it."
         if k in ("up", "k") and keys:
             sel = max(0, sel - 1)
@@ -8920,8 +8961,14 @@ def _config_editor_loop(scope, term) -> str:
         elif k in ("\r", "\n") and keys:
             msg = _config_edit_key(scope, keys[sel], term)
         elif k == "a":
+            # `repos` is refused in the global file (it would add worktrees to
+            # every project) and a `project` pointer only means something on a
+            # worktree overlay, so neither is offered on the global layer.
+            skip = {"repos", "project"} if scope.is_global else set()
             available = sorted(
-                kk.replace("_", "-") for kk in YOLO_KEYS if kk.replace("_", "-") not in entry
+                kk.replace("_", "-")
+                for kk in YOLO_KEYS
+                if kk.replace("_", "-") not in entry and kk not in skip
             )
             chosen = _pick_one(term, "add key:", available)
             if chosen:
@@ -8980,6 +9027,35 @@ def _wip_config(kind, p, home, term) -> str:
     if scope is None:
         return "config applies to worktrees and projects."
     return _config_editor_loop(scope, term)
+
+
+def _wip_delete_project(p, home, term) -> str:
+    """`D`: delete a registered project's entry — `yolo config --project NAME
+    --delete` — after a confirm. The directory and its worktrees are untouched;
+    only the entry (its config: auth, mounts, repos, …) goes, so the directory
+    falls back to the global defaults, and a bare recently-used row for it may
+    remain. The verb's live-worktree guard becomes a second confirm that stands
+    in for `--force` (those topics fall back to directory matching plus their
+    own overlays). A recent-only row has no entry to delete."""
+    name = p.get("name")
+    if not name or not p.get("registered"):
+        return "D deletes a registered project entry; this directory has none."
+    projects = _read_projects_file(home, lenient=True)
+    keys = sorted(k for k in projects.get(name, {}) if k != "dir")
+    what = f" (its config: {', '.join(keys)})" if keys else " (no config set)"
+    if not term.confirm(f"Delete project entry '{name}'{what}? The directory and worktrees stay."):
+        return "cancelled."
+    force = []
+    live = sorted(set(_project_live_topics(home, name, projects)))
+    if live:
+        if not term.confirm(
+            f"'{name}' still has live worktrees ({', '.join(live)}) — delete anyway? "
+            "They fall back to directory matching plus their own overlays."
+        ):
+            return "cancelled."
+        force = ["--force"]
+    ok, msg = _config_apply(_config_scope("project", p, home), ["--delete", *force])
+    return f"deleted project '{name}'." if ok else msg
 
 
 def _wip_new_worktree(p, home, session, term) -> str:

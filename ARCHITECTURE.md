@@ -2196,6 +2196,15 @@ verbs operate across the set. The moving parts:
   path prompt + name prompt (defaulting to the basename), via
   `register_project`, which refuses only a taken name (a second project over
   an already-registered dir is fine — it's two repo sets over one primary).
+  `D` on a registered row deletes the entry (`_wip_delete_project`): a confirm
+  naming the config the entry holds, then `yolo config --project NAME
+  --delete` through `_config_apply`; when `_project_live_topics` finds topics
+  still resolving to it, a second confirm adds `--force` (the verb's guard,
+  made interactive). A recent-only row has no entry, so `D` is inert there.
+  `g` needs no row: it opens the same editor on `_global_config_scope` — a
+  `_ConfigScope` whose `is_global` reads `~/.yolo.json` raw (leniently) and
+  writes via `config --global`, with no inherited pane and with `repos` /
+  `project` left out of the add-key menu (refused globally / overlay-only).
   The dashboard reads `projects.json` **leniently** (malformed → `{}`) so the
   refresh loop keeps drawing; the config verb stays strict.
 

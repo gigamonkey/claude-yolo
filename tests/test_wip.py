@@ -1840,6 +1840,112 @@ def test_c_rename_not_offered_on_non_project_scopes(cy, monkeypatch, tmp_path, c
     assert "r rename" not in capsys.readouterr().out
 
 
+# --- `g`: the global layer ----------------------------------------------------
+
+
+def test_g_opens_the_global_editor_from_anywhere(cy, monkeypatch, tmp_path, capsys):
+    # `g` needs no row: it opens the editor on ~/.yolo.json, whose writes go
+    # through `yolo config --global` and which has no inherited pane.
+    calls = _stub_config_run(cy, monkeypatch)
+    (tmp_path / ".yolo.json").write_text(json.dumps({"tmux": True, "mounts": ["/x:ro"]}))
+    msg = cy._wip_action("g", None, tmp_path, "yolo", FakeTerm(["x", "q"]))
+    ((cmd, cwd),) = calls
+    assert cmd == ["yolo", "config", "--global", "--unset", "tmux"]  # keys in file order
+    assert cwd == str(tmp_path)
+    assert msg == "edited the global config — every launch picks it up."
+    out = capsys.readouterr().out
+    assert "~/.yolo.json" in out and "tmux" in out and "/x:ro" in out
+    assert "inherited" not in out  # the bottom layer has nothing beneath it
+    assert "r rename" not in out
+
+
+def test_global_scope_reads_leniently_and_hides_project_only_keys(cy, monkeypatch, tmp_path):
+    scope = cy._global_config_scope(tmp_path)
+    assert scope.is_global and not scope.renameable
+    assert scope.read() == {} and scope.inherited() == []  # no file yet
+    (tmp_path / ".yolo.json").write_text("{not json")
+    assert scope.read() == {}  # malformed: empty here, the verb reports it on write
+    (tmp_path / ".yolo.json").write_text(json.dumps({"auth": "bedrock"}))
+    assert scope.read() == {"auth": "bedrock"}
+    # `a` offers every key except `repos` (refused globally) and `project`
+    offered = []
+    monkeypatch.setattr(cy, "_pick_one", lambda term, title, options: offered.extend(options))
+    _stub_config_run(cy, monkeypatch)
+    cy._config_editor_loop(scope, FakeTerm(["a", "q"]))
+    assert "mounts" in offered and "tmux" in offered
+    assert "repos" not in offered and "project" not in offered and "auth" not in offered
+
+
+def test_g_is_advertised_in_the_status_line(cy, capsys):
+    cy._draw_wip({"session": [], "worktree": [], "project": []}, None, "")
+    out = capsys.readouterr().out
+    assert "g global" in out and "q quit" in out  # short enough not to clip at 80 columns
+
+
+# --- `D`: delete a project entry ------------------------------------------------
+
+
+def _seed_projects(home, projects):
+    d = home / ".claude-yolo"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "projects.json").write_text(json.dumps(projects))
+
+
+def test_D_deletes_a_registered_project_after_confirm(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _seed_projects(tmp_path, {"chat": {"dir": str(proj), "auth": "bedrock", "mounts": ["/x"]}})
+    term = FakeTerm([], confirms=[True])
+    item = project_item(cy, name="chat", path=str(proj))
+    msg = cy._wip_action("D", item, tmp_path, "yolo", term)
+    ((cmd, cwd),) = calls
+    assert cmd == ["yolo", "config", "--project", "chat", "--delete"]
+    assert cwd == str(proj)
+    assert msg == "deleted project 'chat'."
+    (prompt,) = term.confirm_prompts
+    assert "Delete project entry 'chat'" in prompt and "auth, mounts" in prompt
+    assert "directory and worktrees stay" in prompt
+
+
+def test_D_declined_runs_nothing(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    _seed_projects(tmp_path, {"chat": {"dir": "/p"}})
+    msg = cy._wip_action("D", project_item(cy, name="chat"), tmp_path, "yolo", FakeTerm([]))
+    assert calls == [] and msg == "cancelled."
+
+
+def test_D_with_live_worktrees_second_confirm_is_force(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    _seed_projects(tmp_path, {"chat": {"dir": "/p"}})
+    monkeypatch.setattr(cy, "_project_live_topics", lambda home, name, projects: ["fix", "fix"])
+    term = FakeTerm([], confirms=[True, False])
+    msg = cy._wip_action("D", project_item(cy, name="chat"), tmp_path, "yolo", term)
+    assert calls == [] and msg == "cancelled."
+    assert "live worktrees (fix)" in term.confirm_prompts[1]
+    term = FakeTerm([], confirms=[True, True])
+    cy._wip_action("D", project_item(cy, name="chat"), tmp_path, "yolo", term)
+    ((cmd, _),) = calls
+    assert cmd == ["yolo", "config", "--project", "chat", "--delete", "--force"]
+
+
+def test_D_on_a_recent_only_row_is_inert(cy, monkeypatch, tmp_path):
+    calls = _stub_config_run(cy, monkeypatch)
+    item = project_item(cy, name=None, registered=False)
+    msg = cy._wip_action("D", item, tmp_path, "yolo", FakeTerm([], confirms=[True]))
+    assert calls == [] and "has none" in msg
+    assert "D delete" in cy._WIP_HINTS["project"]
+
+
+def test_D_surfaces_the_verbs_error(cy, monkeypatch, tmp_path):
+    _stub_config_run(cy, monkeypatch, returncode=1, stderr="no project 'chat'.")
+    _seed_projects(tmp_path, {})
+    msg = cy._wip_action(
+        "D", project_item(cy, name="chat"), tmp_path, "yolo", FakeTerm([], confirms=[True])
+    )
+    assert msg == "no project 'chat'."
+
+
 # --- config-editor units ----------------------------------------------------
 
 

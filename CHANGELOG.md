@@ -5,6 +5,14 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **Two `wip` dashboard keys close the gaps between it and `yolo config`.**
+  `g` (anywhere) opens the config editor on the global `~/.yolo.json` layer —
+  the `yolo config --global` counterpart, previously only visible read-only in
+  the inherited pane — with every key except `repos` on offer. `D` on a
+  registered project row deletes its entry (`yolo config --project NAME
+  --delete`) after a confirm that names the config it holds; if topics still
+  resolve to the project, a second confirm stands in for `--force`. With these,
+  every `config` edit the CLI can make is reachable from the dashboard.
 - **`yolo doctor` reports only findings by default.** Sections with nothing
   wrong — and the environment section's docker/git/tmux/credential-store
   lines — no longer appear; a clean run is just the summary line. `--verbose`

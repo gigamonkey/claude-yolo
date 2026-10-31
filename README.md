@@ -379,9 +379,10 @@ Names are held to docker's container-name charset (letters, digits, `.`, `_`,
 Sessions are **named after the project**: container `chat` / `chat-fix-auth`,
 Claude session label `chat:fix-auth`. A directory with no project entry falls
 back to its basename. Renaming a project (`yolo config --name NEW`, or
-`--project OLD --name NEW`) takes effect at each session's next launch;
-deleting one (`yolo config --delete`) refuses while it still has live
-worktrees (`--force` overrides).
+`--project OLD --name NEW`, or `r` in the dashboard's config editor) takes
+effect at each session's next launch; deleting one (`yolo config --delete`,
+or `D` on its dashboard row) refuses while it still has live worktrees
+(`--force` overrides; the dashboard asks a second time instead).
 
 A project can span **several git repos**: a worktree session then gets a
 same-named worktree+branch in *each* repo, every one mounted into the
@@ -648,6 +649,8 @@ pushes the tables off-screen:
 | `R`     | a worktree or project            | open Claude's interactive session picker (`resume -r`) in a new window, to resume a session **other** than the most recent; on a project with **finished topics** (removed worktrees whose transcripts survive) it first offers those — picking one revives the topic, old session included |
 | `n`     | a project                        | prompt for a topic, start a new worktree session there — a previously-used topic (live worktree, surviving branch, or finished topic's transcript) prompts, showing when the topic was last active: `y` resumes it, `n` starts a fresh session in the topic's worktree, Esc cancels |
 | `c`     | a worktree or project            | open an interactive editor of that worktree's/project's config — shows the current values (plus the inherited lower layers, read-only), `Enter` edits a key (bool/choice pickers; Tab-completed paths), `a` adds a key, `x` removes one, `r` renames the project (on a registered project entry — re-points its worktree overlays too), `e` for a raw-flags line; plain Enter on the row then launches with the saved config |
+| `g`     | anything                         | the same editor on the **global** `~/.yolo.json` layer (`yolo config --global`): every key except `repos`, no inherited pane since nothing sits beneath it |
+| `D`     | a registered project             | **delete the project entry** (`yolo config --project NAME --delete`) after a confirm that names the config it holds — the directory and its worktrees stay. If topics still resolve to the project, a second confirm stands in for `--force` (they fall back to directory matching plus their own overlays) |
 | `S`     | a running session                | open a bash shell in its container (`docker exec`) in a new tmux window |
 | `l`     | a running session                | view its captured **startup log** (the output the Claude TUI replaced — worktree setup, image build, mounts) in a `less -R` window (`q` closes) |
 | `b`     | a session with forwarded ports   | `browse` the port (with more than one, prompts for the container port or its label) |
@@ -928,7 +931,7 @@ to highest precedence:
 
 1. **`~/.yolo.json`** — global defaults, a JSON object whose keys mirror the
    flag names (dashes or underscores both work). Edit it by hand or with
-   `yolo config --global`:
+   `yolo config --global` (or `g` in the `wip` dashboard):
 
    ```json
    {
