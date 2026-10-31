@@ -3,26 +3,8 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.34.0 — 2026-10-31
 
-- **Sessions can no longer orphan the repo's other worktrees.** A container sees
-  the repo's shared `.git` read-write but not its sibling worktrees' directories,
-  so from inside, `git worktree list` called every sibling `prunable` and a
-  `git worktree prune` there (an agent tidying up, or auto-gc on an idle one)
-  deleted the sibling's admin record on the host — leaving an intact worktree
-  `orphaned`. Every launch now bind-mounts each sibling worktree's one-line
-  `.git` pointer file read-only at its host path (so git sees it as alive,
-  without exposing its contents) and sets `gc.worktreePruneExpire=never`. Covers
-  worktree sessions (every repo of a multi-repo topic) and cwd sessions at a
-  repo root.
-- **New `scripts/restore-orphaned-worktrees.py`** re-registers worktrees that
-  were orphaned that way (the repo's `.git/worktrees/<id>` record is gone, so
-  `git worktree repair` has nothing to re-link): run from the main checkout, it
-  finds them under `~/.claude-yolo/worktrees/` (or in dirs you name), rebuilds
-  the record on the worktree's branch — recreating the branch from `--base` if
-  it's gone — and resets the index so uncommitted edits reappear as ordinary
-  modifications. `--dry-run` previews every step; `--adopt` also takes
-  worktrees whose pointer names a repo path that no longer exists.
 - **New `doctor` verb** (`yolo doctor [--fix]`): audits everything yolo keeps
   on the host for stale or inconsistent records — the config files (parse
   errors, a project `dir` that no longer exists, a topic overlay pointing at a
@@ -39,6 +21,27 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   rows and pointers, `git worktree prune`, empty dirs, run-dir leftovers,
   chmods, migration backups) and never removes a project entry, a worktree, a
   stored value, or an image.
+
+- **Sessions can no longer orphan the repo's other worktrees.** A container sees
+  the repo's shared `.git` read-write but not its sibling worktrees' directories,
+  so from inside, `git worktree list` called every sibling `prunable` and a
+  `git worktree prune` there (an agent tidying up, or auto-gc on an idle one)
+  deleted the sibling's admin record on the host — leaving an intact worktree
+  `orphaned`. Every launch now bind-mounts each sibling worktree's one-line
+  `.git` pointer file read-only at its host path (so git sees it as alive,
+  without exposing its contents) and sets `gc.worktreePruneExpire=never`. Covers
+  worktree sessions (every repo of a multi-repo topic) and cwd sessions at a
+  repo root.
+
+- **New `scripts/restore-orphaned-worktrees.py`** re-registers worktrees that
+  were orphaned that way (the repo's `.git/worktrees/<id>` record is gone, so
+  `git worktree repair` has nothing to re-link): run from the main checkout, it
+  finds them under `~/.claude-yolo/worktrees/` (or in dirs you name), rebuilds
+  the record on the worktree's branch — recreating the branch from `--base` if
+  it's gone — and resets the index so uncommitted edits reappear as ordinary
+  modifications. `--dry-run` previews every step; `--adopt` also takes
+  worktrees whose pointer names a repo path that no longer exists.
+
 - **README sweep:** `doctor` gets its own top-level section with sample
   output; the `submodules` config key (undocumented in the README since v0.13)
   and the `--add-secret`/`--add-plugin-dir`/`--add-clone` config edits are
