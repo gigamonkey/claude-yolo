@@ -1748,7 +1748,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   it only ever shows there). Lines go through `_doctor_wrap` — `textwrap` to
   the terminal width when stdout is a tty (`None`, i.e. no wrapping, when
   piped), continuations indented under the text column, a pre-broken line
-  (the image list) keeping its own indent, and words never split.
+  (the image list) keeping its own indent, and words never split. Hints go
+  through `_doctor_hint` first: every backticked command in one (`_DOCTOR_CMD`
+  — a span starting `yolo `/`git `/`docker `/`rm `/`cd `) is emitted on its
+  own line, two columns further in, backticks dropped and never wrapped, with
+  the prose around it wrapped as separate runs — so hints are phrased as a
+  lead-in ending in a colon, the command, and an optional continuation, and a
+  short command-like mention that shouldn't break out is phrased without
+  backticks.
 
 Implementation shape:
 

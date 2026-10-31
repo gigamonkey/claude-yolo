@@ -1789,30 +1789,48 @@ The report shows only the sections with a finding, each finding followed by
 what resolves it; a clean run prints just the summary line. `--verbose`/`-v`
 lists every section instead, with an `ok` line for each check that passed
 (the environment section — docker and git versions, tmux, which credential
-store — only ever appears there). On a terminal the report wraps to its
-width; piped, lines stay whole for `grep`.
+store — only ever appears there). On a terminal the prose wraps to its width;
+a suggested command always sits on a line of its own, indented and never
+wrapped, so it can be copied whole. Piped, nothing wraps, so `grep` sees whole
+lines.
 
 ```text
 $ yolo doctor
 global config (~/.yolo.json)
   PROBLEM  ~/.yolo.json: mount source does not exist: ~/refdocs
-           a launch would refuse it; `yolo config --global --remove-mount ~/refdocs`
+           a launch would refuse it; drop it:
+             yolo config --global --remove-mount ~/refdocs
+           --clean would: drop it from `mounts`
 
 projects (~/.claude-yolo/projects.json)
-  PROBLEM  project 'chat': dir no longer exists (moved, renamed, or deleted?): ~/work/chat
-           run `yolo config --project chat --dir .` from its new location, or `yolo config --project chat --delete` if it's gone for good (every launch warns until then)
+  PROBLEM  project 'chat': dir no longer exists (moved, renamed, or
+           deleted?): ~/work/chat
+           if it moved, re-point it from its new location:
+             yolo config --project chat --dir .
+           or, if it's gone for good, delete it:
+             yolo config --project chat --delete
+           (every launch warns until then)
 
 worktree overlays (~/.claude-yolo/worktrees.json)
-  PROBLEM  entry for a worktree that no longer exists: ~/.claude-yolo/worktrees/app/old-topic
-           it was removed without `yolo finish`, which is what drops the entry
+  PROBLEM  entry for a worktree that no longer exists:
+           ~/.claude-yolo/worktrees/app/old-topic
+           it was removed by hand (a finish would have dropped the
+           entry)
            --fix would: drop the entry
 
-worktrees (~/.claude-yolo/worktrees/)
-  note     empty repo dir: app/
-           left behind after its last worktree was finished
-           --fix would: remove it
+docker images (claude-yolo:*)
+  note     2 images no configured Dockerfile builds and no running
+           container uses:
+             claude-yolo:1a2b3c4d     2.1GB  built 3 weeks ago
+             claude-yolo:9f8e7d6c    2.08GB  built 2 months ago
+           a launch that needs one rebuilds it; reclaim the space (less
+           than the sizes add up to — images share layers):
+             docker rmi claude-yolo:1a2b3c4d claude-yolo:9f8e7d6c
+           --clean would: remove them (a launch that needs one rebuilds
+           it)
 
-3 problems, 1 note; 2 can be fixed automatically: re-run with `yolo doctor --fix`.
+3 problems, 1 note; 1 can be fixed automatically: re-run with `yolo
+  doctor --fix`, 3 more with `--clean`.
 ```
 
 Because the exit status is 1 while any problem remains, `yolo doctor` doubles

@@ -11,7 +11,9 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   (`-v`) restores the full section-by-section report with an `ok` line per
   check. The report also wraps to the terminal width now (continuations
   indented under the text column; tags and paths never split), and stays
-  unwrapped when piped so a `grep` sees whole lines.
+  unwrapped when piped so a `grep` sees whole lines. Every suggested command
+  sits on a line of its own — indented, never wrapped — so it can be copied
+  whole however long it is, and the hints are phrased as a lead-in to it.
 - **New `yolo doctor --clean`: `--fix` plus the deletions of what's dangling.**
   `--fix` stays pure bookkeeping (records whose subject is already gone).
   `--clean` also removes things that are real but point nowhere, where the

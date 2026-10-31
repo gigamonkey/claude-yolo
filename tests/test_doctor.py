@@ -642,7 +642,7 @@ def test_stale_images_noted(cy, monkeypatch):
     assert f"{cy.DOCKER_IMAGE_REPO}:deadbeef" in item.text and "1.2GB" in item.text
     for tag in (current, custom, "inuse123"):
         assert f"{cy.DOCKER_IMAGE_REPO}:{tag}" not in item.text
-    assert item.hint.startswith(f"`docker rmi {cy.DOCKER_IMAGE_REPO}:deadbeef`")
+    assert item.hint.endswith(f": `docker rmi {cy.DOCKER_IMAGE_REPO}:deadbeef`")
     assert item.fix is not None
 
 
@@ -681,7 +681,7 @@ def test_stale_images_one_note_and_clean_removes_them(cy, monkeypatch):
     item = rep.items[0]
     a, b = f"{cy.DOCKER_IMAGE_REPO}:aaaa1111", f"{cy.DOCKER_IMAGE_REPO}:bbbb2222"
     assert item.text.startswith("2 images no configured Dockerfile builds")
-    assert item.hint.startswith(f"`docker rmi {a} {b}`")
+    assert item.hint.endswith(f": `docker rmi {a} {b}`")
     rendered = "\n".join(rep.render(fixing=False))
     assert "--clean would: remove them" in rendered
     assert rep.apply_fixes() == [] and calls == []  # --fix alone leaves images be
@@ -788,11 +788,22 @@ def test_render_wraps_to_width_without_splitting_words(cy):
     unwrapped = rep.render(fixing=False)
     assert any(len(line) > 60 for line in unwrapped)
     wrapped = rep.render(fixing=False, width=60)
-    assert all(len(line) <= 60 for line in wrapped)
+    cmd_lines = [line for line in wrapped if line.startswith("             ")]
+    assert all(len(line) <= 60 for line in wrapped if line not in cmd_lines)
     assert "\n".join(wrapped).replace("\n", " ").split() == "\n".join(unwrapped).split()
     # continuation lines sit under the text column; the image row keeps its own
     assert wrapped[1].startswith("  PROBLEM  ") and wrapped[2].startswith("           ")
     assert any(line.startswith("             claude-yolo:aaaa1111") for line in wrapped)
+    # a backticked command is its own line, two columns in, backticks gone, unwrapped
+    assert "             yolo config --project ghost --dir ." in wrapped
+    long_cmd = (
+        "             docker rmi claude-yolo:aaaa1111 claude-yolo:bbbb2222 claude-yolo:cccc3333"
+    )
+    assert long_cmd in wrapped and long_cmd in unwrapped
+    i = wrapped.index("             yolo config --project ghost --dir .")
+    assert wrapped[i - 1] == "           run" and wrapped[i + 1].startswith(
+        "           from its new"
+    )
     # a word longer than the width is never split
     narrow = rep.render(fixing=False, width=20)
     assert any("claude-yolo:aaaa1111" in line for line in narrow)
