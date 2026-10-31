@@ -3,25 +3,8 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
-## Unreleased
+## v0.35.0 — 2026-10-31
 
-- **Two `wip` dashboard keys close the gaps between it and `yolo config`.**
-  `g` (anywhere) opens the config editor on the global `~/.yolo.json` layer —
-  the `yolo config --global` counterpart, previously only visible read-only in
-  the inherited pane — with every key except `repos` on offer. `D` on a
-  registered project row deletes its entry (`yolo config --project NAME
-  --delete`) after a confirm that names the config it holds; if topics still
-  resolve to the project, a second confirm stands in for `--force`. With these,
-  every `config` edit the CLI can make is reachable from the dashboard.
-- **`yolo doctor` reports only findings by default.** Sections with nothing
-  wrong — and the environment section's docker/git/tmux/credential-store
-  lines — no longer appear; a clean run is just the summary line. `--verbose`
-  (`-v`) restores the full section-by-section report with an `ok` line per
-  check. The report also wraps to the terminal width now (continuations
-  indented under the text column; tags and paths never split), and stays
-  unwrapped when piped so a `grep` sees whole lines. Every suggested command
-  sits on a line of its own — indented, never wrapped — so it can be copied
-  whole however long it is, and the hints are phrased as a lead-in to it.
 - **New `yolo doctor --clean`: `--fix` plus the deletions of what's dangling.**
   `--fix` stays pure bookkeeping (records whose subject is already gone).
   `--clean` also removes things that are real but point nowhere, where the
@@ -38,6 +21,17 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   the default account), or a referenced secret that isn't stored. Each finding
   says which tier handles it (`--fix would:` / `--clean would:`), and the
   summary counts both.
+
+- **`yolo doctor` reports only findings by default.** Sections with nothing
+  wrong — and the environment section's docker/git/tmux/credential-store
+  lines — no longer appear; a clean run is just the summary line. `--verbose`
+  (`-v`) restores the full section-by-section report with an `ok` line per
+  check. The report also wraps to the terminal width now (continuations
+  indented under the text column; tags and paths never split), and stays
+  unwrapped when piped so a `grep` sees whole lines. Every suggested command
+  sits on a line of its own — indented, never wrapped — so it can be copied
+  whole however long it is, and the hints are phrased as a lead-in to it.
+
 - **`yolo doctor` lists stale images in one note.** The docker-images section
   used to emit a note per `claude-yolo:*` image no configured Dockerfile
   builds — one more every time a Dockerfile (or yolo's default) changes, each
@@ -45,6 +39,15 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   combined `docker rmi tag1 tag2 …` command to paste; `--clean` runs it (an
   image is fully regenerable — a launch rebuilds what it needs). Images used by
   a running container are never touched.
+
+- **Two `wip` dashboard keys close the gaps between it and `yolo config`.**
+  `g` (anywhere) opens the config editor on the global `~/.yolo.json` layer —
+  the `yolo config --global` counterpart, previously only visible read-only in
+  the inherited pane — with every key except `repos` on offer. `D` on a
+  registered project row deletes its entry (`yolo config --project NAME
+  --delete`) after a confirm that names the config it holds; if topics still
+  resolve to the project, a second confirm stands in for `--force`. With these,
+  every `config` edit the CLI can make is reachable from the dashboard.
 
 ## v0.34.0 — 2026-10-31
 
