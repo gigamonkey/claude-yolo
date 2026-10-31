@@ -1722,11 +1722,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   factored out of `_build_image`) and the images running containers use; and
   the leftovers the launch warns about (in-directory `.yolo.json`, migration
   `.bak`s, macOS `.credentials.json`). Findings are `problem` (exit 1 while any
-  remain) or `note`; `--fix` runs each finding's `fix` callable — only the pure
+  remain) or `note`; `--fix` runs each finding's `fix` callable — the pure
   bookkeeping: dropping a stale registry/overlay row or pointer, `worktree
-  prune`, empty dirs, leftover run dirs, chmods, `.bak`s — and re-renders it as
-  `fixed`. Deliberately never removes a project entry, a worktree, a stored
-  value, or an image (the report names the command instead).
+  prune`, empty dirs, leftover run dirs, chmods, `.bak`s — plus `docker rmi` of
+  the stale images, the one regenerable deletion (a launch rebuilds what it
+  needs; the stale set is one note listing every tag, with one combined `rmi`
+  hint, rather than a note per image) — and re-renders it as `fixed`.
+  Deliberately never removes a project entry, a worktree, or a stored value
+  (the report names the command instead).
 
 Implementation shape:
 

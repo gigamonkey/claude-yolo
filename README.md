@@ -1733,8 +1733,12 @@ refuse:
   wrong permissions or `.cred` files no registry knows about.
 
 - **docker** — leftover run-dir files from sessions that are no longer running,
-  and `claude-yolo:*` images no configured Dockerfile builds any more (every
-  Dockerfile edit and yolo update leaves one behind; `docker rmi` hints).
+  and `claude-yolo:*` images no configured Dockerfile builds any more — every
+  Dockerfile edit and yolo update leaves one behind, since tags are
+  content-addressed and nothing reuses an old one. The stale images (any not
+  used by a running container) are listed in one note with a single combined
+  `docker rmi` command to paste; the sizes shown overstate the reclaim, since
+  images share layers.
   Skipped with a note when docker isn't answering.
 
 - **leftovers** — an in-directory `.yolo.json` at or above the cwd, migration
@@ -1747,8 +1751,10 @@ advisories). Each comes with the command that resolves it. **`--fix`** applies
 only the fixes that are pure bookkeeping — dropping a registry or overlay entry
 whose subject no longer exists, `git worktree prune`, removing empty dirs and
 leftover run-dir files, restoring credential-file permissions, deleting
-migration backups — and never a project entry, a worktree, a stored token or
-secret value, or an image: the report names the command for those instead.
+migration backups — plus the one deletion that is fully regenerable: stale
+`claude-yolo:*` images, which a launch rebuilds on demand at the cost of build
+time. It never removes a project entry, a worktree, or a stored token or secret
+value: the report names the command for those instead.
 
 The report is one block per section; a section with nothing wrong collapses to
 a single `ok` line, and every finding is followed by what resolves it (abridged):

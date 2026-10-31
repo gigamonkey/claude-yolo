@@ -468,9 +468,77 @@ def test_stale_images_noted(cy, monkeypatch):
     monkeypatch.setattr(cy.subprocess, "run", fake_run)
     rep = cy._DoctorReport()
     cy._doctor_images(rep, True, {"dockerfiles": [custom_text]})
-    texts = [it.text for it in rep.items]
-    assert len(texts) == 1 and texts[0].startswith(f"{cy.DOCKER_IMAGE_REPO}:deadbeef (1.2GB")
-    assert "docker rmi" in rep.items[0].hint
+    assert len(rep.items) == 1
+    item = rep.items[0]
+    assert item.level == "note"
+    assert item.text.startswith("1 image no configured Dockerfile builds")
+    assert f"{cy.DOCKER_IMAGE_REPO}:deadbeef" in item.text and "1.2GB" in item.text
+    for tag in (current, custom, "inuse123"):
+        assert f"{cy.DOCKER_IMAGE_REPO}:{tag}" not in item.text
+    assert item.hint.startswith(f"`docker rmi {cy.DOCKER_IMAGE_REPO}:deadbeef`")
+    assert item.fix is not None
+
+
+def test_stale_images_one_note_and_fix_removes_them(cy, monkeypatch):
+    """Several stale images collapse to one note with one combined `docker rmi`,
+    and --fix runs exactly that command; current and in-use tags are untouched."""
+    uid = os.getuid()
+    current = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["docker", "image", "ls"]:
+            out = "\n".join(
+                f"{t}\t{s}\t{a} ago"
+                for t, s, a in (
+                    (current, "2.1GB", "2 days"),
+                    ("aaaa1111", "2.1GB", "3 weeks"),
+                    ("bbbb2222", "900MB", "2 months"),
+                    ("inuse123", "2.1GB", "4 months"),
+                )
+            )
+        elif cmd[:2] == ["docker", "ps"]:
+            out = f"{cy.DOCKER_IMAGE_REPO}:inuse123\n"
+        elif cmd[:2] == ["docker", "rmi"]:
+            calls.append(cmd)
+            out = ""
+        else:
+            raise AssertionError(cmd)
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    rep = cy._DoctorReport()
+    cy._doctor_images(rep, True, {"dockerfiles": []})
+    assert len(rep.items) == 1
+    item = rep.items[0]
+    a, b = f"{cy.DOCKER_IMAGE_REPO}:aaaa1111", f"{cy.DOCKER_IMAGE_REPO}:bbbb2222"
+    assert item.text.startswith("2 images no configured Dockerfile builds")
+    assert item.hint.startswith(f"`docker rmi {a} {b}`")
+    rendered = "\n".join(rep.render(fixing=False))
+    assert "--fix would: remove them" in rendered
+    assert rep.apply_fixes() == []
+    assert calls == [["docker", "rmi", a, b]]
+    assert rep.items[0].level == "fixed"
+
+
+def test_no_stale_images_no_note(cy, monkeypatch):
+    uid = os.getuid()
+    current = cy._image_tag(cy.DEFAULT_DOCKERFILE, uid)
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["docker", "image", "ls"]:
+            out = f"{current}\t2.1GB\t2 days ago\n"
+        elif cmd[:2] == ["docker", "ps"]:
+            out = ""
+        else:
+            raise AssertionError(cmd)
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(cy.subprocess, "run", fake_run)
+    rep = cy._DoctorReport()
+    cy._doctor_images(rep, True, {"dockerfiles": []})
+    assert rep.items == []
+    assert "every one current" in "\n".join(rep.render(fixing=False))
 
 
 def test_custom_image_tag_matches_build_image_scheme(cy):

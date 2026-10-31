@@ -4216,8 +4216,9 @@ PARSER.add_argument(
     action="store_true",
     help="For `doctor`: apply the fixes that are pure bookkeeping — drop registry "
     "and overlay entries whose subject no longer exists, prune worktrees git has "
-    "lost, remove empty dirs and leftover run-dir files. Never deletes a project "
-    "entry, a worktree, a stored token/secret value, or an image.",
+    "lost, remove empty dirs, leftover run-dir files, and stale claude-yolo images "
+    "(regenerable: a launch rebuilds what it needs). Never deletes a project "
+    "entry, a worktree, or a stored token/secret value.",
 )
 PARSER.add_argument(
     "--require-project-entry",
@@ -10129,15 +10130,39 @@ def _doctor_images(rep: _DoctorReport, docker_ok: bool, ctx: dict) -> None:
         ).stdout.split()
     )
     rep.start(section, _doctor_n(len(images), "image", "every one current"))
-    for tag, size, age in ((r + ["?", "?"])[:3] for r in images):
-        ref = f"{DOCKER_IMAGE_REPO}:{tag}"
-        if tag in current or ref in in_use:
-            continue
-        rep.note(
-            section,
-            f"{ref} ({size}, built {age}): no configured Dockerfile builds this tag",
-            f"`docker rmi {ref}` reclaims the space (a launch that needs it rebuilds)",
-        )
+    stale = [
+        (f"{DOCKER_IMAGE_REPO}:{tag}", size, age)
+        for tag, size, age in ((r + ["?", "?"])[:3] for r in images)
+        if tag not in current and f"{DOCKER_IMAGE_REPO}:{tag}" not in in_use
+    ]
+    if not stale:
+        return
+    # One note for the lot, not one per image: the list grows by one per
+    # Dockerfile change forever, and the useful output is a single command.
+    # An image is fully regenerable (a launch that needs it rebuilds it), so
+    # removing it is the one deletion --fix is allowed — the cost is build time.
+    refs = [ref for ref, _, _ in stale]
+    width = max(len(ref) for ref in refs)
+    detail = "".join(
+        f"\n             {ref:<{width}}  {size:>8}  built {age}" for ref, size, age in stale
+    )
+    rep.note(
+        section,
+        f"{_doctor_n(len(stale), 'image')} no configured Dockerfile builds and no running "
+        f"container uses:{detail}",
+        f"`docker rmi {' '.join(refs)}` reclaims the space (less than the sizes add up "
+        "to — images share layers; a launch that needs one rebuilds it)",
+        fix=lambda refs=refs: _docker_rmi(refs),
+        fix_label="remove them (a launch that needs one rebuilds it)",
+    )
+
+
+def _docker_rmi(refs: list[str]) -> None:
+    """`docker rmi` the refs; a failure surfaces docker's own message (which names
+    the image it refused, e.g. one a container started using since the check)."""
+    r = subprocess.run(["docker", "rmi", *refs], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise subprocess.SubprocessError((r.stderr or r.stdout).strip() or f"exit {r.returncode}")
 
 
 def _doctor_leftovers(rep: _DoctorReport, home: pathlib.Path, cwd: pathlib.Path, ctx: dict) -> None:

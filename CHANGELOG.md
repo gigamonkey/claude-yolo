@@ -3,6 +3,17 @@
 Notable changes to claude-yolo, per tagged version. Versions are tagged
 `v{version}` and tracked in `pyproject.toml`.
 
+## Unreleased
+
+- **`yolo doctor` lists stale images in one note, and `--fix` removes them.**
+  The docker-images section used to emit a note per `claude-yolo:*` image no
+  configured Dockerfile builds — one more every time a Dockerfile (or yolo's
+  default) changes, each with its own `docker rmi` hint. It's now a single note
+  listing them, with one combined `docker rmi tag1 tag2 …` command to paste,
+  and `--fix` runs that command: an image is fully regenerable (a launch
+  rebuilds what it needs), so it's the one deletion the safe-fix rule admits.
+  Images used by a running container are never touched.
+
 ## v0.34.0 — 2026-10-31
 
 - **New `doctor` verb** (`yolo doctor [--fix]`): audits everything yolo keeps
