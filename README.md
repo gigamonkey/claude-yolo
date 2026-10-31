@@ -354,11 +354,15 @@ fresh one each time. And you can run several worktree sessions on the same repo
 at once (`yolo start fix-auth` in one terminal, `yolo start refactor-db` in
 another) without them stepping on each other.
 
-There are also three token-management verbs — `setup-token`, `tokens`, and
-`forget-token` — described under [Authentication modes](#authentication-modes),
-a `config` verb described under [Configuration](#configuration), and a
-[`doctor` verb](#the-doctor-verb) that audits everything yolo keeps on the host
-for stale or inconsistent records.
+The remaining verbs are covered in their own sections: `ps` and `wip` under
+[tmux mode](#tmux-mode) and [The `wip` dashboard](#the-wip-dashboard);
+`browse` under [Port forwarding](#port-forwarding-and-yolo-browse); the three
+token-management verbs — `setup-token`, `tokens`, and `forget-token` — under
+[Authentication modes](#authentication-modes); `secret` under the
+[`secrets` key](#secrets---secret-nametarget-repeatable); `dockerfile` under
+the [`dockerfile` key](#dockerfile---dockerfile-path); `config` under
+[Configuration](#configuration); and [`doctor`](#the-doctor-verb), which
+audits everything yolo keeps on the host for stale or inconsistent records.
 
 ### Projects
 
@@ -1004,6 +1008,21 @@ Claude in the system prompt that it can't `git push` — so it will generally le
 you know when something needs pushing from your host. (See also [Why forward the
 SSH agent](#why-forward-the-ssh-agent)).
 
+### `submodules` (`--submodules` / `--no-submodules`, default off)
+
+Populate the session's git submodules before launch — `git submodule update
+--init --recursive`, run on the **host** just before `docker run`, in the
+working directory (and in every extra repo's worktree of a multi-repo topic).
+`git worktree add` doesn't fill in submodule contents, so without this a
+worktree session finds them empty and has to clone them from inside the
+container — which fails for a private submodule while `ssh-agent` is off, as it
+is by default. Running it host-side uses your own git credentials and network,
+and the files land in the bind-mounted tree, so Claude sees them. Off by default
+since most repos have none; it's a no-op when the directory has no
+`.gitmodules`, and best-effort — a failure warns and the session launches
+anyway. (`yolo finish` knows how to remove a worktree with populated
+submodules, which a plain `git worktree remove` refuses.)
+
 ### `redirect-build-dirs` (`--redirect-build-dirs` / `--no-redirect-build-dirs`, default on)
 
 In a **cwd session** the container mounts your live host checkout in place, so a
@@ -1514,13 +1533,15 @@ models misreport as needing usage credits — see
 ### `require-project-entry` (`--require-project-entry`, default off)
 
 Refuse to launch unless a `projects.json` entry matches the current directory.
-Because `projects.json` is keyed by directory path, **renaming or moving a
-project orphans its entry** and the project would silently fall back to the
+A project entry is matched by its `dir`, so **renaming or moving a project's
+directory orphans its entry** and the project would silently fall back to the
 global defaults — the wrong account or profile being the real hazard. `yolo`
-always warns about entries whose directory no longer exists; setting this key in
-`~/.yolo.json` upgrades the fallback itself to a hard refusal to launch if the
-current project is not configured. (`--no-require-project-entry` overrides it
-for one run).
+always warns at launch about entries whose `dir` no longer exists (and
+[`yolo doctor`](#the-doctor-verb) reports them with the fix — `yolo config
+--project NAME --dir .` from the new location — spelled out); setting this key
+in `~/.yolo.json` upgrades the fallback itself to a hard refusal to launch if
+the current project is not configured. (`--no-require-project-entry` overrides
+it for one run.)
 
 For a project that needs no customization, register it with an empty entry:
 `yolo config --init` (see [the `config` verb](#the-config-verb)). That
@@ -1575,10 +1596,12 @@ inside the project *with the flags you want to pin*:
 yolo config --config-dir ~/.claude-work --mount ~/refdocs
 ```
 
-Exactly those flags are saved as the project's entry, keyed by the repo root
-(so subdirectory runs and worktree sessions share it; outside a git repo, the
-current directory). Re-running with a flag updates just that key, leaving the
-rest of the entry alone. A bare `yolo config` is read-only: it prints the
+Exactly those flags are saved as the project's entry. The first write in a
+directory creates the entry — a [project](#projects) named after the directory
+basename (`--name` overrides) whose `dir` is the repo root (so subdirectory runs
+and worktree sessions share it; outside a git repo, the current directory).
+Re-running with a flag updates just that key, leaving the rest of the entry
+alone. A bare `yolo config` is read-only: it prints the
 **complete effective config that would apply here** — the global `~/.yolo.json`
 values that aren't overridden, merged with this project's entry — with the
 source of each value, so you can see what's inherited versus pinned:
@@ -1593,8 +1616,9 @@ effective config for /Users/you/hacks/foo:
   config-dir  "~/.claude-work"   [projects.json]
 ```
 
-A concat key (`mounts`/`ports`/`prompts`/`secrets`) shows the values from both
-layers and is attributed to both; everything else is the winning layer's value.
+A concat key (`mounts`/`ports`/`prompts`/`secrets`/`plugin-dirs`/`clones`/
+`repos`) shows the values from both layers and is attributed to both;
+everything else is the winning layer's value.
 It writes nothing. `yolo config` is the only thing that writes `projects.json`
 — a plain launch never does — so the file stays a deliberate, auditable record
 of per-project grants.
@@ -1633,6 +1657,13 @@ A few editing flags go beyond whole-key sets:
   path is a git repo and matches by resolved path (a re-add is a no-op);
   `--remove-repo` doesn't require the path to exist, so a stale repo can be
   removed.
+- **`--add-secret NAME[:TARGET]` / `--remove-secret NAME[:TARGET]`**,
+  **`--add-plugin-dir PATH` / `--remove-plugin-dir PATH`**, and
+  **`--add-clone URL DIR [DEPTH]` / `--remove-clone DIR`** (all repeatable) do
+  the same for the [`secrets`](#secrets---secret-nametarget-repeatable),
+  [`plugin-dirs`](#plugin-dirs---plugin-dir-path-repeatable), and
+  [`clones`](#clones---clone-url-dir-repeatable) lists; the whole-list flags
+  (`--secret`, `--plugin-dir`, `--clone`) replace instead.
 
 Contradictory instructions in one call — setting and `--unset`ting the same
 key, or `--mount` alongside `--add-mount`/`--remove-mount` — are errors.
@@ -1658,7 +1689,7 @@ directory, inferred from the cwd's repo on creation). **`--name NEW`** renames
 a project (re-pointing its topics' overlays); **`--delete`** removes one,
 refusing while it has live worktrees unless `--force`.
 
-### The `doctor` verb
+## The `doctor` verb
 
 ```bash
 yolo doctor         # audit yolo's host-side state; exit 1 if any problem is found
@@ -1718,6 +1749,48 @@ whose subject no longer exists, `git worktree prune`, removing empty dirs and
 leftover run-dir files, restoring credential-file permissions, deleting
 migration backups — and never a project entry, a worktree, a stored token or
 secret value, or an image: the report names the command for those instead.
+
+The report is one block per section; a section with nothing wrong collapses to
+a single `ok` line, and every finding is followed by what resolves it (abridged):
+
+```text
+$ yolo doctor
+environment
+  ok       docker 28.3.2
+  ok       git 2.53.0
+  ok       tmux available
+  ok       credential store: keyring (Keyring)
+
+global config (~/.yolo.json)
+  PROBLEM  ~/.yolo.json: mount source does not exist: ~/refdocs
+           a launch would refuse it; `yolo config --global --remove-mount ~/refdocs`
+
+projects (~/.claude-yolo/projects.json)
+  PROBLEM  project 'chat': dir no longer exists (moved, renamed, or deleted?): ~/work/chat
+           run `yolo config --project chat --dir .` from its new location, or `yolo config --project chat --delete` if it's gone for good (every launch warns until then)
+
+worktree overlays (~/.claude-yolo/worktrees.json)
+  PROBLEM  entry for a worktree that no longer exists: ~/.claude-yolo/worktrees/app/old-topic
+           it was removed without `yolo finish`, which is what drops the entry
+           --fix would: drop the entry
+
+worktrees (~/.claude-yolo/worktrees/)
+  note     empty repo dir: app/
+           left behind after its last worktree was finished
+           --fix would: remove it
+
+tokens (~/.claude-yolo/tokens.json)
+  ok       1 token, every one present in the credential store
+...
+3 problems, 1 note; 2 can be fixed automatically: re-run with `yolo doctor --fix`.
+```
+
+Because the exit status is 1 while any problem remains, `yolo doctor` doubles
+as a check in a script or shell startup. It reads every file itself rather than
+going through the normal config load, so it works precisely when that load
+would refuse — a `projects.json` that no longer parses, say — and it's a good
+first stop after upgrading yolo or reorganizing the directories your projects
+live in.
 
 ## Extra `docker run` arguments
 
@@ -1792,8 +1865,9 @@ It assembles the `docker run` arguments:
 - Forwards your git identity (`user.name`/`user.email`) so commits made in the
   container are attributed to you (see below).
 - Forwards your timezone as a `TZ` environment variable (read from the host's
-  `$TZ` or `/etc/localtime`), so timestamps inside the container — commit dates,
-  log lines — match your clock instead of UTC.
+  `$TZ` or `/etc/localtime`) and repoints the container's own `/etc/localtime`
+  to match at session start, so timestamps inside the container — commit dates,
+  log lines, the odd tool that ignores `TZ` — match your clock instead of UTC.
 - Sets a `YOLO_SESSION` environment variable in every container (claude sessions
   and `yolo shell` alike), so anything running inside — Claude, hooks, your own
   scripts — can detect it's in a yolo container. Its presence is the "am I in
@@ -1897,7 +1971,8 @@ Claude it's running in an ephemeral Ubuntu container (and any
 `--prompt` additions you configured). When you exit, `--rm`
 cleans up the container.
 
-The full `docker run` command is printed (between two dashed lines) before
+The full `docker run` command is hidden by default (it's long and rarely
+legible); pass `--verbose`/`-v` to print it between two dashed lines before
 launch, so you can see exactly what's happening.
 
 ## Notes and gotchas

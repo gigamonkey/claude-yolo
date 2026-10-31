@@ -39,6 +39,12 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
   rows and pointers, `git worktree prune`, empty dirs, run-dir leftovers,
   chmods, migration backups) and never removes a project entry, a worktree, a
   stored value, or an image.
+- **README sweep:** `doctor` gets its own top-level section with sample
+  output; the `submodules` config key (undocumented in the README since v0.13)
+  and the `--add-secret`/`--add-plugin-dir`/`--add-clone` config edits are
+  documented; and stale claims are fixed — the `docker run` line is printed
+  only with `--verbose`, project entries are matched by `dir` rather than a
+  path key, and `/etc/localtime` is forwarded along with `TZ`.
 
 ## v0.33.0 — 2026-09-07
 
