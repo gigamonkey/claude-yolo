@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import webbrowser
 
@@ -4027,7 +4028,8 @@ PARSER.add_argument(
     default=False,
     dest="verbose",
     help="Print the full `docker run` command before launching (off by default — "
-    "it's long and rarely legible).",
+    "it's long and rarely legible). For `doctor`: also list the checks that "
+    "passed, section by section, not just the findings.",
 )
 PARSER.add_argument(
     "--dockerfile",
@@ -9379,7 +9381,8 @@ def do_forget_token(config_dir: str | None) -> None:
 # image: those hold (or may hold) something the user wants, so the report names
 # the command that would remove them instead. Read-only otherwise; needs no
 # config load (it must work precisely when the config is broken) and no docker
-# (the docker-backed checks are skipped with a note when the daemon is away).
+# (the docker-backed checks are skipped — an ok line, under --verbose — when the
+# daemon is away; the environment section carries the problem).
 
 _DoctorItem = collections.namedtuple("_DoctorItem", "section level text hint fix fix_label")
 
@@ -9431,25 +9434,58 @@ class _DoctorReport:
     def count(self, level: str) -> int:
         return sum(1 for it in self.items if it.level == level)
 
-    def render(self, *, fixing: bool) -> list[str]:
+    def render(self, *, fixing: bool, verbose: bool = False, width: int | None = None) -> list[str]:
+        """The report. By default only sections with a finding appear, and only
+        their findings; `verbose` adds every section and its ok lines. `width`
+        wraps every line to that many columns (None: no wrapping)."""
         lines = []
+        indent = " " * 11  # past the `  LABEL    ` column
         for section, summary in self.summaries.items():
-            lines.append(section)
             found = [it for it in self.items if it.section == section]
+            if not verbose:
+                found = [it for it in found if it.level != "ok"]
+                if not found:
+                    continue
+            lines.append(section)
             if not any(it.level != "ok" for it in found) and summary:
                 found.append(_DoctorItem(section, "ok", summary, None, None, None))
             for it in found:
                 label = {"problem": "PROBLEM", "fixed": "fixed"}.get(it.level, it.level)
-                lines.append(f"  {label:<8} {it.text}")
+                lines += _doctor_wrap(it.text, width, f"  {label:<8} ", indent)
                 if it.level == "fixed":
-                    lines.append(f"           {it.fix_label}")
+                    lines += _doctor_wrap(it.fix_label, width, indent, indent)
                     continue
                 if it.hint:
-                    lines.append(f"           {it.hint}")
+                    lines += _doctor_wrap(it.hint, width, indent, indent)
                 if it.fix is not None and not fixing:
-                    lines.append(f"           --fix would: {it.fix_label}")
+                    lines += _doctor_wrap(f"--fix would: {it.fix_label}", width, indent, indent)
             lines.append("")
         return lines
+
+
+def _doctor_wrap(body: str, width: int | None, first: str, rest: str) -> list[str]:
+    """`body` laid out under `first` (the prefix of its first line) and `rest` (of
+    every wrapped continuation), at `width` columns — None means no wrapping.
+    A line break already in `body` (the image list) starts a new line that keeps
+    its own leading whitespace as its prefix. Words are never split, so a tag or
+    a path stays whole even past the width."""
+    out = []
+    for i, para in enumerate(body.split("\n")):
+        text = para.lstrip(" ")
+        own = para[: len(para) - len(text)]
+        lead, sub = (first, rest) if i == 0 else (own, own + "  ")
+        if width is None or not text:
+            out.append((lead + text).rstrip())
+            continue
+        out += textwrap.wrap(
+            text,
+            width=max(width, len(sub) + 24),
+            initial_indent=lead,
+            subsequent_indent=sub,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    return out
 
 
 def _doctor_n(n: int, noun: str, clause: str = "") -> str:
@@ -10066,7 +10102,9 @@ def _doctor_run_dir(rep: _DoctorReport, docker_ok: bool) -> None:
         rep.start(section, "none")
         return
     if not docker_ok:
-        rep.note(section, "skipped: docker isn't answering, so which sessions run is unknown")
+        # Informational, not a finding: the environment section already raised
+        # the daemon as a problem and said these checks are skipped.
+        rep.ok(section, "skipped: docker isn't answering, so which sessions run is unknown")
         return
     running = _running_container_names()
     dirs = sorted(p for p in root.iterdir() if p.is_dir())
@@ -10097,7 +10135,7 @@ def _doctor_images(rep: _DoctorReport, docker_ok: bool, ctx: dict) -> None:
     (tags are content-addressed, so nothing ever reuses or removes an old one)."""
     section = f"docker images ({DOCKER_IMAGE_REPO}:*)"
     if not docker_ok:
-        rep.note(section, "skipped: docker isn't answering")
+        rep.ok(section, "skipped: docker isn't answering")  # see _doctor_run_dir
         return
     out = subprocess.run(
         [
@@ -10204,11 +10242,13 @@ def _doctor_leftovers(rep: _DoctorReport, home: pathlib.Path, cwd: pathlib.Path,
                 )
 
 
-def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool) -> None:
+def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool, verbose: bool = False) -> None:
     """`doctor` verb: audit yolo's host-side state; `--fix` applies the safe fixes.
 
-    Exits 1 when a problem remains after any fixes — so `yolo doctor` doubles as
-    a check in scripts — and 0 when only notes (or nothing) turned up.
+    Prints only the findings (problems and notes) unless `verbose`, which adds
+    every section and the checks that passed. Exits 1 when a problem remains
+    after any fixes — so `yolo doctor` doubles as a check in scripts — and 0
+    when only notes (or nothing) turned up.
     """
     rep = _DoctorReport()
     ctx: dict = {"config_dirs": set(), "dockerfiles": [], "secrets": {}}
@@ -10232,7 +10272,11 @@ def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool) -> None:
     _doctor_leftovers(rep, home, cwd, ctx)
 
     failures = rep.apply_fixes() if fix else []
-    print("\n".join(rep.render(fixing=fix)))
+    # Wrap to the terminal when there is one; a pipe gets whole lines to grep.
+    width = shutil.get_terminal_size((80, 24)).columns if sys.stdout.isatty() else None
+    lines = rep.render(fixing=fix, verbose=verbose, width=width)
+    if lines:
+        print("\n".join(lines))
     for f in failures:
         print(f"fix failed: {f}", file=sys.stderr)
     problems, notes, fixed = rep.count("problem"), rep.count("note"), rep.count("fixed")
@@ -10244,7 +10288,9 @@ def do_doctor(home: pathlib.Path, cwd: pathlib.Path, *, fix: bool) -> None:
         summary += f", {fixed} fixed"
     if fixable and not fix:
         summary += f"; {fixable} can be fixed automatically: re-run with `yolo doctor --fix`"
-    print(summary + ".")
+    if not lines:
+        summary += " (`--verbose` lists every check)"
+    print("\n".join(_doctor_wrap(summary + ".", width, "", "  ")))
     if problems:
         sys.exit(1)
 
@@ -10462,7 +10508,7 @@ def _main():
     # load (which would exit on the very breakage it's meant to report) and reads
     # everything itself. No container.
     if verb == "doctor":
-        do_doctor(home, cwd, fix=parsed.fix)
+        do_doctor(home, cwd, fix=parsed.fix, verbose=parsed.verbose)
         return
 
     # `dir` just prints a path — no config, no container. Dispatched before the

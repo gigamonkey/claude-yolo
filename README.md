@@ -1575,7 +1575,8 @@ A few flags are deliberately *not* config keys:
 - **`--verbose` / `-v`** — print the full `docker run` command before launching.
   It's hidden by default (it's long and rarely legible); this brings it back for
   debugging. It contains no secrets — the OAuth token and any `--secret` are
-  passed via a file mount, not the command line.
+  passed via a file mount, not the command line. On [`doctor`](#the-doctor-verb)
+  it instead lists every check that passed, not just the findings.
 
 - **`--dangerously-allow-home`** — by default `yolo` **refuses to launch with the
   working directory at or above `$HOME`**, which would mount your whole home
@@ -1692,8 +1693,9 @@ refusing while it has live worktrees unless `--force`.
 ## The `doctor` verb
 
 ```bash
-yolo doctor         # audit yolo's host-side state; exit 1 if any problem is found
+yolo doctor         # report problems and notes; exit 1 if any problem is found
 yolo doctor --fix   # ...and apply the safe bookkeeping fixes
+yolo doctor -v      # ...also list every check that passed
 ```
 
 yolo keeps a fair amount of state on the host — the config files, the
@@ -1756,17 +1758,15 @@ migration backups — plus the one deletion that is fully regenerable: stale
 time. It never removes a project entry, a worktree, or a stored token or secret
 value: the report names the command for those instead.
 
-The report is one block per section; a section with nothing wrong collapses to
-a single `ok` line, and every finding is followed by what resolves it (abridged):
+The report shows only the sections with a finding, each finding followed by
+what resolves it; a clean run prints just the summary line. `--verbose`/`-v`
+lists every section instead, with an `ok` line for each check that passed
+(the environment section — docker and git versions, tmux, which credential
+store — only ever appears there). On a terminal the report wraps to its
+width; piped, lines stay whole for `grep`.
 
 ```text
 $ yolo doctor
-environment
-  ok       docker 28.3.2
-  ok       git 2.53.0
-  ok       tmux available
-  ok       credential store: keyring (Keyring)
-
 global config (~/.yolo.json)
   PROBLEM  ~/.yolo.json: mount source does not exist: ~/refdocs
            a launch would refuse it; `yolo config --global --remove-mount ~/refdocs`
@@ -1785,9 +1785,6 @@ worktrees (~/.claude-yolo/worktrees/)
            left behind after its last worktree was finished
            --fix would: remove it
 
-tokens (~/.claude-yolo/tokens.json)
-  ok       1 token, every one present in the credential store
-...
 3 problems, 1 note; 2 can be fixed automatically: re-run with `yolo doctor --fix`.
 ```
 

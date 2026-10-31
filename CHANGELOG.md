@@ -5,6 +5,13 @@ Notable changes to claude-yolo, per tagged version. Versions are tagged
 
 ## Unreleased
 
+- **`yolo doctor` reports only findings by default.** Sections with nothing
+  wrong — and the environment section's docker/git/tmux/credential-store
+  lines — no longer appear; a clean run is just the summary line. `--verbose`
+  (`-v`) restores the full section-by-section report with an `ok` line per
+  check. The report also wraps to the terminal width now (continuations
+  indented under the text column; tags and paths never split), and stays
+  unwrapped when piped so a `grep` sees whole lines.
 - **`yolo doctor` lists stale images in one note, and `--fix` removes them.**
   The docker-images section used to emit a note per `claude-yolo:*` image no
   configured Dockerfile builds — one more every time a Dockerfile (or yolo's

@@ -68,11 +68,32 @@ def test_clean_state_reports_no_problems_and_exits_zero(cy, run_cli, repo, capsy
     r, home = repo
     code, out = doctor(run_cli, home, r, capsys)
     assert code == 0
-    assert "0 problems" in out
     assert "PROBLEM" not in out
-    # every section renders, each with an ok line
+    # nothing to report: just the summary, pointing at --verbose
+    assert out.strip() == "0 problems, 0 notes (`--verbose` lists every check)."
+
+
+def test_verbose_lists_every_section_with_its_ok_line(cy, run_cli, repo, capsys):
+    r, home = repo
+    code, out = doctor(run_cli, home, r, capsys, "--verbose")
+    assert code == 0
     for header in ("projects (", "worktree overlays (", "worktrees (", "tokens (", "secrets ("):
         assert header in out
+    assert "  ok       none" in out
+    assert "0 problems, 0 notes." in out
+
+
+def test_default_report_shows_only_sections_with_findings(cy, run_cli, repo, capsys):
+    r, home = repo
+    write_json(home / ".claude-yolo" / "projects.json", {"ghost": {"dir": "/no/such/dir"}})
+    code, out = doctor(run_cli, home, r, capsys)
+    assert code == 1
+    assert out.startswith("projects (")
+    assert "project 'ghost': dir no longer exists" in out
+    for header in ("worktree overlays (", "worktrees (", "tokens (", "secrets ("):
+        assert header not in out
+    assert "  ok " not in out
+    assert "`--verbose`" not in out
 
 
 def test_fix_flag_only_applies_to_doctor(cy, run_cli, repo):
@@ -169,6 +190,7 @@ def test_malformed_projects_json_is_reported_not_fatal(cy, run_cli, repo, capsys
     code, out = doctor(run_cli, home, r, capsys)
     assert code == 1
     assert "cannot read projects config" in out
+    code, out = doctor(run_cli, home, r, capsys, "-v")
     assert "tokens (" in out  # the later sections still ran
 
 
@@ -538,7 +560,8 @@ def test_no_stale_images_no_note(cy, monkeypatch):
     rep = cy._DoctorReport()
     cy._doctor_images(rep, True, {"dockerfiles": []})
     assert rep.items == []
-    assert "every one current" in "\n".join(rep.render(fixing=False))
+    assert rep.render(fixing=False) == []
+    assert "every one current" in "\n".join(rep.render(fixing=False, verbose=True))
 
 
 def test_custom_image_tag_matches_build_image_scheme(cy):
@@ -575,10 +598,43 @@ def test_migration_backup_is_a_fixable_note(cy, run_cli, repo, capsys):
 
 
 def test_docker_unreachable_skips_docker_checks(cy, run_cli, repo, capsys):
+    """The skip is informational (the environment section carries the problem),
+    so it shows only under --verbose and doesn't count as a note."""
     r, home = repo
     code, out = doctor(run_cli, home, r, capsys)
     assert code == 0
-    assert "skipped: docker isn't answering" in out
+    assert "skipped" not in out
+    assert "0 notes" in out
+    code, out = doctor(run_cli, home, r, capsys, "-v")
+    assert code == 0
+    assert "  ok       skipped: docker isn't answering" in out
+
+
+def test_render_wraps_to_width_without_splitting_words(cy):
+    rep = cy._DoctorReport()
+    rep.start("sec", "")
+    long_hint = "run `yolo config --project ghost --dir .` from its new location, or delete it"
+    rep.problem("sec", "project 'ghost': dir no longer exists: ~/work/ghost", long_hint)
+    rep.note(
+        "sec",
+        "2 images stale:\n             claude-yolo:aaaa1111   2.1GB  built 3 weeks ago",
+        "`docker rmi claude-yolo:aaaa1111 claude-yolo:bbbb2222 claude-yolo:cccc3333` reclaims",
+        fix=lambda: None,
+        fix_label="remove them",
+    )
+    unwrapped = rep.render(fixing=False)
+    assert any(len(line) > 60 for line in unwrapped)
+    wrapped = rep.render(fixing=False, width=60)
+    assert all(len(line) <= 60 for line in wrapped)
+    assert "\n".join(wrapped).replace("\n", " ").split() == "\n".join(unwrapped).split()
+    # continuation lines sit under the text column; the image row keeps its own
+    assert wrapped[1].startswith("  PROBLEM  ") and wrapped[2].startswith("           ")
+    assert any(line.startswith("             claude-yolo:aaaa1111") for line in wrapped)
+    # a word longer than the width is never split
+    narrow = rep.render(fixing=False, width=20)
+    assert any("claude-yolo:aaaa1111" in line for line in narrow)
+    # None keeps the raw lines, and a pipe is what do_doctor passes then
+    assert rep.render(fixing=False, width=None) == unwrapped
 
 
 def test_summary_counts_fixable_items(cy, run_cli, repo, capsys):
@@ -588,5 +644,5 @@ def test_summary_counts_fixable_items(cy, run_cli, repo, capsys):
     code, out = doctor(run_cli, home, r, capsys)
     assert code == 1
     assert out.rstrip().endswith(
-        "1 problem, 2 notes; 1 can be fixed automatically: re-run with `yolo doctor --fix`."
+        "1 problem, 1 note; 1 can be fixed automatically: re-run with `yolo doctor --fix`."
     )

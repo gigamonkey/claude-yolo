@@ -427,7 +427,8 @@ on top of whichever auth is chosen:
   rarely legible — and carries no secrets (the OAuth token and every `--secret`
   ride the `/run/secrets` file transport, not the argv), so it's purely a
   debugging convenience. Gated where the old unconditional `print(" ".join(
-  run_cmd))` was, in `launch_container` just before `_dispatch_launch`.
+  run_cmd))` was, in `launch_container` just before `_dispatch_launch`. On
+  `doctor` the same flag means "show the checks that passed" (see the verb).
 - **`--dockerfile PATH`** (default unset; `dockerfile` in config) → build the
   container image from this Dockerfile instead of the built-in `DEFAULT_DOCKERFILE`.
   Override semantics (a single path, not a concat key); the path must exist and
@@ -1729,7 +1730,14 @@ gracefully outside one — there's just no repo slug to label/find by).
   needs; the stale set is one note listing every tag, with one combined `rmi`
   hint, rather than a note per image) — and re-renders it as `fixed`.
   Deliberately never removes a project entry, a worktree, or a stored value
-  (the report names the command instead).
+  (the report names the command instead). `_DoctorReport.render` prints only
+  the sections with a finding (problems/notes/fixed) — a clean run is just the
+  summary line, with a `--verbose` pointer — and under `--verbose` every
+  section with its `ok` lines (the environment section is all `ok` lines, so
+  it only ever shows there). Lines go through `_doctor_wrap` — `textwrap` to
+  the terminal width when stdout is a tty (`None`, i.e. no wrapping, when
+  piped), continuations indented under the text column, a pre-broken line
+  (the image list) keeping its own indent, and words never split.
 
 Implementation shape:
 
